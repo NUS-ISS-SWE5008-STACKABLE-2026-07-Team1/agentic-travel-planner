@@ -1,0 +1,2 @@
+# Compatibility alias for the requested filename. The Python convention is requirements.txt.
+-r requirements.txt
