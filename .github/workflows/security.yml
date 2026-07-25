@@ -74,6 +74,7 @@ jobs:
         with:
           target: "http://127.0.0.1:5000"
           fail_action: true
+          allow_issue_writing: false
 
       - name: Upload app log
         if: always()
