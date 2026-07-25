@@ -46,7 +46,9 @@ def login():
             session["authenticated"] = True
             session["user_email"] = form.email.data.lower()
             session.permanent = bool(form.remember.data)
-            destination = request.args.get("next", "")
+            # _is_safe_redirect() restricts the target to the site's own netloc,
+            # which is the exact mitigation this rule asks for.
+            destination = request.args.get("next", "")  # nosemgrep: python.flask.security.open-redirect.open-redirect
             if destination and _is_safe_redirect(destination):
                 return redirect(destination)
             return redirect(url_for("pages.dashboard"))

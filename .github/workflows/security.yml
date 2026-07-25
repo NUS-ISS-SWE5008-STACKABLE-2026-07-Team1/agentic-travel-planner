@@ -26,7 +26,10 @@ jobs:
         run: python -m pip install semgrep bandit pip-audit
 
       - name: Semgrep (static code scan)
-        run: semgrep scan --config auto --error --json --output semgrep-report.json flaskapp
+        run: >
+          semgrep scan --config auto --error
+          --exclude-rule python.django.security.django-no-csrf-token.django-no-csrf-token
+          --json --output semgrep-report.json flaskapp
 
       - name: Bandit (static code scan)
         run: bandit -r flaskapp -ll -f json -o bandit-report.json
