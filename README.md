@@ -17,36 +17,65 @@ Each response includes agent findings, concise selection factors, alternatives,
 sources, assumptions, limitations, confidence, and safety warnings. This is useful
 explainability without storing or exposing private model chain-of-thought.
 
-## Where to build agents and prompts
+## Agent and prompt ownership
 
-The main AI code is under `flaskapp/travel_ai/`:
+Each team member can maintain one folder under `flaskapp/travel_ai/agents/`. Every
+agent folder contains its execution/tool code in `agent.py` and its model instructions
+in `prompt.py`, reducing merge conflicts between team members.
 
-| File | What to add or change |
-| --- | --- |
-| `prompts.py` | Start here. Edit the shared policy, four specialist prompts, and orchestrator prompt. |
-| `agents.py` | Add agent execution logic and calls to approved flight, hotel, map, weather, or advisory APIs. |
-| `graph.py` | Change agent order, parallel branches, conditional routing, and LangGraph edges. |
-| `schemas.py` | Define the structured information each specialist and final plan must return. |
-| `safeguards.py` | Add deterministic validation, fairness, business, and human-review rules. |
-| `tracing.py` | Add safe audit metadata. Do not store API keys or private chain-of-thought. |
-| `service.py` | Configure the OpenAI model and invoke the compiled graph. |
+| Owner | Agent folder | Responsibility |
+| --- | --- | --- |
+| Flight Agent | `agents/flight_agent/` | Flight search and reasoning under arrival-time, schedule, connection, baggage, and budget constraints. |
+| Hotel & Transport Agent | `agents/hotel_transport_agent/` | Accommodation and local transit selection compatible with flights and traveller requirements. |
+| Accessibility Agent | `agents/accessibility_agent/` | End-to-end accessibility validation, explicit veto warnings, and future bias-audit tooling. |
+| Risk & Advisory Agent | `agents/risk_advisory_agent/` | Visa, seasonal, disruption, event, health, and safety risks with high-severity escalation. |
+| Orchestrator Agent | `agents/orchestrator_agent/` | Coordination, governance, conflict/escalation handling, and final itinerary synthesis. |
 
-Search the source for `CUSTOMIZE` or `ADD` to find the marked extension points.
-For most prompt-only changes, edit `prompts.py` and restart Flask. If a prompt asks
-for a new output field, also add that field to the relevant model in `schemas.py`.
+The resulting layout is:
 
-Example specialist prompt:
-
-```python
-"flight_agent": """Compare verified flight options from the supplied provider data.
-Prioritize the user's stated budget and schedule. Return at least two alternatives,
-the source URL, price timestamp, baggage assumptions, and connection risks.
-Never invent a flight number, price, or availability.""",
+```text
+flaskapp/travel_ai/
+|-- agents/
+|   |-- base.py                    # shared specialist execution and tracing
+|   |-- shared.py                  # policy that applies to all five agents
+|   |-- flight_agent/
+|   |   |-- agent.py
+|   |   `-- prompt.py
+|   |-- hotel_transport_agent/
+|   |   |-- agent.py
+|   |   `-- prompt.py
+|   |-- accessibility_agent/
+|   |   |-- agent.py
+|   |   `-- prompt.py
+|   |-- risk_advisory_agent/
+|   |   |-- agent.py
+|   |   `-- prompt.py
+|   `-- orchestrator_agent/
+|       |-- agent.py
+|       `-- prompt.py
+|-- graph.py                       # cross-agent workflow and fan-in barrier
+|-- schemas.py                     # shared input/output contracts
+|-- safeguards.py                  # deterministic assurance rules
+`-- tracing.py                     # safe audit metadata
 ```
 
-Prompts alone cannot retrieve live travel facts. Implement provider calls in
-`agents.py`, pass only the relevant results into the message, cite their source and
-timestamp, and retain the existing safeguards and trace events.
+An owner normally edits only `agent.py`, `prompt.py`, and tests inside their assigned
+agent area. Changes to `agents/base.py`, `agents/shared.py`, `graph.py`, `schemas.py`, `safeguards.py`, or
+`tracing.py` affect multiple agents and should be reviewed by the team. In particular,
+when a prompt requires a new output field, update the Pydantic contract in
+`schemas.py` and add tests before merging.
+
+`agents/__init__.py` is the specialist registry consumed by `graph.py`. Register a
+new specialist there and add its allowed name to `schemas.AgentFinding`. The current
+graph runs the four specialists in parallel and then runs the orchestrator. The
+orchestrator prompt identifies unresolved conflicts for a future negotiation cycle;
+an actual retry/negotiation loop must be added in `graph.py` when that feature is
+developed.
+
+Prompts alone cannot retrieve live travel facts. Add approved provider calls in the
+owning execution module, pass a small and sourced result into the model context, and
+retain the shared tracing and safeguards. Keep API keys in environment configuration,
+never in prompts or traces.
 
 ## Setup
 
