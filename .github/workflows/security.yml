@@ -1,0 +1,91 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sast:
+    name: SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Install scanners
+        run: python -m pip install semgrep bandit pip-audit
+
+      # TEMP: SAST findings are reported but do not fail the build, pending team review.
+      # Remove continue-on-error once we decide what should actually gate main.
+      - name: Semgrep (static code scan)
+        continue-on-error: true
+        run: >
+          semgrep scan --config auto --error
+          --exclude-rule python.django.security.django-no-csrf-token.django-no-csrf-token
+          --json --output semgrep-report.json flaskapp
+
+      - name: Bandit (static code scan)
+        continue-on-error: true
+        run: bandit -r flaskapp -ll -f json -o bandit-report.json
+
+      - name: pip-audit (dependency vulnerability scan)
+        continue-on-error: true
+        run: pip-audit -r requirements.txt
+
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-reports
+          path: |
+            semgrep-report.json
+            bandit-report.json
+
+  dast:
+    name: DAST
+    needs: sast
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Start app
+        run: |
+          nohup python app.py > app.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:5000/ -o /dev/null && exit 0
+            sleep 1
+          done
+          echo "App did not start in time"; cat app.log; exit 1
+
+      # TEMP: DAST findings are reported but do not fail the build, pending team review.
+      # Set fail_action back to true once we decide what should actually gate main.
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: "http://127.0.0.1:5000"
+          fail_action: false
+          allow_issue_writing: false
+
+      - name: Upload app log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-log
+          path: app.log
