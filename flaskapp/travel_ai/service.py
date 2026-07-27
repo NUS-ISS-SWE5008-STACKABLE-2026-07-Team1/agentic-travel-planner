@@ -7,11 +7,11 @@ from uuid import uuid4
 
 from langchain_openai import ChatOpenAI
 
-from flaskapp.travel_ai.graph import build_travel_graph
+from flaskapp.travel_ai.graph import SPECIALISTS, build_travel_graph
+from flaskapp.travel_ai.a2a import request_message
 from flaskapp.travel_ai.safeguards import assess_plan
 from flaskapp.travel_ai.schemas import PlanResponse, TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
-
 
 class TravelPlanningService:
     def __init__(self, *, api_key: str, model: str, temperature: float, timeout: float, trace_dir: Path):
@@ -22,7 +22,8 @@ class TravelPlanningService:
         self.trace_dir = trace_dir
 
     def create_plan(self, request: TravelRequest) -> PlanResponse:
-        request_id = str(uuid4())
+        correlation_id = uuid4()
+        request_id = str(correlation_id)
         tracer = AuditTracer(self.trace_dir, request_id)
         tracer.record("request_accepted", "system", {
             "model": self.model,
@@ -37,10 +38,21 @@ class TravelPlanningService:
             max_retries=2,
         )
         graph = build_travel_graph(llm, tracer)
+        messages = [
+            request_message(
+                correlation_id=correlation_id,
+                sender="orchestrator_agent",
+                recipient=name,
+                payload_type="TravelRequest",
+                payload=request,
+            )
+            for name in SPECIALISTS
+        ]
         result = graph.invoke({
             "request_id": request_id,
             "request": request.model_dump(mode="json"),
             "findings": [],
+            "messages": messages,
         })
         findings = result["findings"]
         plan = result["plan"]

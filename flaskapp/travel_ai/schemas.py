@@ -7,6 +7,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from flaskapp.travel_ai.a2a import A2AMessage
+
 
 class TravelRequest(BaseModel):
     """User-provided planning constraints. Sensitive traits are intentionally absent."""
@@ -99,6 +101,11 @@ def merge_findings(left: list[AgentFinding], right: list[AgentFinding]) -> list[
     return left + right
 
 
+def merge_messages(left: list[A2AMessage], right: list[A2AMessage]) -> list[A2AMessage]:
+    """LangGraph reducer that retains the auditable A2A message stream."""
+    return left + right
+
+
 class GraphState(dict):
     """Documentation marker; runtime state is declared as TravelGraphState below."""
 
@@ -110,5 +117,6 @@ class TravelGraphState(TypedDict, total=False):
     request_id: str
     request: dict[str, Any]
     findings: Annotated[list[AgentFinding], merge_findings]
+    messages: Annotated[list[A2AMessage], merge_messages]
     plan: TravelPlan
     safety_warnings: list[str]
