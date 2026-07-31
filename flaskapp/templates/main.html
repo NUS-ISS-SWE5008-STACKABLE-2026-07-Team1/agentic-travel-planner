@@ -11,9 +11,10 @@
 <body class="dashboard-body">
   <nav class="navbar navbar-expand-lg bg-white border-bottom sticky-top" aria-label="Primary navigation">
     <div class="container py-2">
-      <a class="navbar-brand brand" href="{{ url_for('pages.dashboard') }}"><span class="brand-mark">✦</span><span>Atlas AI Travel</span></a>
+      <a class="navbar-brand brand" href="{{ url_for('pages.main') }}"><span class="brand-mark">✦</span><span>Atlas AI Travel</span></a>
       <div class="d-flex align-items-center gap-3">
-        <span class="small text-body-secondary d-none d-sm-inline">{{ user_email }}</span>
+        {% if is_admin %}<a class="btn btn-outline-primary btn-sm" href="{{ url_for('pages.admin') }}" target="_blank" rel="noopener noreferrer">Admin</a>{% endif %}
+        <span class="small text-body-secondary d-none d-sm-inline">{{ user_name }}</span>
         <form method="post" action="{{ url_for('pages.logout') }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button class="btn btn-outline-secondary btn-sm" type="submit">Sign out</button>
@@ -45,14 +46,36 @@
         <div class="card-body p-4 p-lg-5">
           <form id="travel-plan-form" data-endpoint="{{ url_for('travel_api.create_travel_plan') }}">
             <div class="row g-4">
-              <div class="col-md-6"><label class="form-label" for="origin">Flying from</label><input class="form-control form-control-lg" id="origin" name="origin" placeholder="Singapore" required></div>
-              <div class="col-md-6"><label class="form-label" for="destination">Destination</label><input class="form-control form-control-lg" id="destination" name="destination" placeholder="Tokyo" required></div>
+              <div class="col-md-6">
+                <label class="form-label" for="origin">Flying from</label>
+                <select class="form-select form-select-lg placeholder-select" id="origin" name="origin" required>
+                  <option value="" selected disabled>Select departure country</option>
+                  {% for country in countries %}<option value="{{ country }}">{{ country }}</option>{% endfor %}
+                </select>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label" for="destination">Destination</label>
+                <select class="form-select form-select-lg placeholder-select" id="destination" name="destination" required>
+                  <option value="" selected disabled>Select destination country</option>
+                  {% for country in countries %}<option value="{{ country }}">{{ country }}</option>{% endfor %}
+                </select>
+              </div>
               <div class="col-md-3"><label class="form-label" for="departure_date">Depart</label><input class="form-control" type="date" id="departure_date" name="departure_date" required></div>
               <div class="col-md-3"><label class="form-label" for="return_date">Return</label><input class="form-control" type="date" id="return_date" name="return_date" required></div>
               <div class="col-md-3"><label class="form-label" for="travellers">Travellers</label><input class="form-control" type="number" id="travellers" name="travellers" min="1" max="20" value="1" required></div>
-              <div class="col-md-3"><label class="form-label" for="budget">Budget (SGD)</label><input class="form-control" type="number" id="budget" name="budget" min="1" placeholder="3000"></div>
-              <div class="col-md-6"><label class="form-label" for="preferences">Preferences</label><input class="form-control" id="preferences" name="preferences" placeholder="Direct flights, local food, quiet hotel"><div class="form-text">Separate items with commas.</div></div>
-              <div class="col-md-6"><label class="form-label" for="accessibility_needs">Accessibility needs</label><input class="form-control" id="accessibility_needs" name="accessibility_needs" placeholder="Step-free access, low walking distance"><div class="form-text">These are treated as hard constraints.</div></div>
+              <div class="col-md-3"><label class="form-label" for="budget">Total budget (SGD)</label><input class="form-control" type="number" id="budget" name="budget" min="1" step="0.01" placeholder="3000" required></div>
+              <div class="col-12">
+                <fieldset>
+                  <legend class="h6 mb-1">Traveler details</legend>
+                  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                    <span class="small text-body-secondary">Add up to 20 travelers.</span>
+                    <button class="btn btn-outline-primary btn-sm" id="add-traveler" type="button">+ Add traveler</button>
+                  </div>
+                  <p class="small text-body-secondary">Age and gender selection are required for each traveler.</p>
+                  <div id="traveler-details" class="row g-3" aria-live="polite"></div>
+                </fieldset>
+              </div>
+              <div class="col-12"><label class="form-label" for="preferences">Travel preferences <span class="text-body-secondary fw-normal">(optional)</span></label><textarea class="form-control" id="preferences" name="preferences" rows="3" placeholder="Direct flights, local food, quiet hotel"></textarea><div class="form-text">Separate requirements with commas.</div></div>
               <div class="col-12 d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-3 pt-2">
                 <p class="small text-body-secondary mb-0">Nothing is booked automatically. Always verify provider details.</p>
                 <button class="btn btn-primary btn-lg px-5" type="submit"><span class="button-label">Build my plan</span><span class="spinner-border spinner-border-sm ms-2 d-none" aria-hidden="true"></span></button>
@@ -62,6 +85,18 @@
         </div>
       </div>
       <div id="plan-result" class="mt-4" aria-live="polite"></div>
+      <section id="refinement-panel" class="card border-0 shadow-sm mt-4 d-none" aria-labelledby="refinement-heading">
+        <div class="card-body p-4">
+          <h2 id="refinement-heading" class="h5">Refine your plan</h2>
+          <p class="text-body-secondary">Optionally tell the travel assistant what you would like changed.</p>
+          <div id="refinement-history" class="refinement-history mb-3" aria-live="polite"></div>
+          <form id="refinement-form" class="d-flex flex-column flex-sm-row gap-2">
+            <label class="visually-hidden" for="refinement-message">Refinement request</label>
+            <input class="form-control" id="refinement-message" maxlength="500" placeholder="For example: Prefer a quieter hotel near a train station" required>
+            <button class="btn btn-primary" type="submit">Refine plan</button>
+          </form>
+        </div>
+      </section>
     </section>
   </main>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>

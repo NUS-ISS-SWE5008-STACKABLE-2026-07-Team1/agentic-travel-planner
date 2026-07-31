@@ -16,6 +16,10 @@ def create_app(config_object: type[Config] = Config) -> Flask:
     app.config.from_object(config_object)
     csrf.init_app(app)
 
+    from flaskapp.database import init_app as init_database
+
+    init_database(app)
+
     from flaskapp.routes import pages_bp
     from flaskapp.travel_ai.api import travel_api_bp
 
