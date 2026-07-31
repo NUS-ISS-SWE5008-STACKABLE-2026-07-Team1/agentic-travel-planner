@@ -68,20 +68,17 @@
               <button class="password-toggle" type="button" data-password-toggle aria-label="Show password" aria-pressed="false">Show</button>
               {% for error in form.password.errors %}<div class="invalid-feedback">{{ error }}</div>{% endfor %}
             </div>
-            <div class="d-flex align-items-center justify-content-between mb-4">
+            <div class="d-flex align-items-center mb-4">
               <div class="form-check">
                 {{ form.remember(class="form-check-input") }}
                 {{ form.remember.label(class="form-check-label") }}
               </div>
-              <span class="small text-body-secondary">Secure demo access</span>
             </div>
             {{ form.submit(class="btn btn-primary btn-lg w-100") }}
           </form>
 
-          <div class="demo-credentials mt-4" role="note">
-            <span class="demo-icon" aria-hidden="true">i</span>
-            <div><strong>Demo credentials</strong><br><code>demo@example.com</code> · <code>TravelDemo2026!</code></div>
-          </div>
+          <p class="text-center mt-4 mb-0">New to Atlas? <a href="{{ url_for('pages.register') }}">Create an account</a></p>
+
           <p class="small text-body-secondary text-center mt-5 mb-0">Protected with session security and CSRF validation.</p>
         </div>
       </section>

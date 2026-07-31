@@ -20,16 +20,30 @@ class TravelRequest(BaseModel):
     departure_date: date
     return_date: date
     travellers: int = Field(default=1, ge=1, le=20)
-    budget: float | None = Field(default=None, gt=0)
+    traveller_ages: list[int] = Field(min_length=1, max_length=20)
+    traveller_genders: list[Literal["female", "male", "non_binary", "prefer_not_to_say"]] = Field(
+        min_length=1, max_length=20
+    )
+    traveller_accessibility_needs: list[list[str]] = Field(min_length=1, max_length=20)
+    budget: float = Field(gt=0)
     currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
     preferences: list[str] = Field(default_factory=list, max_length=30)
     accessibility_needs: list[str] = Field(default_factory=list, max_length=30)
+    refinement_notes: list[str] = Field(default_factory=list, max_length=10)
     risk_tolerance: Literal["low", "medium", "high"] = "medium"
 
     @model_validator(mode="after")
     def dates_are_ordered(self) -> "TravelRequest":
         if self.return_date < self.departure_date:
             raise ValueError("return_date must be on or after departure_date")
+        if len(self.traveller_ages) != self.travellers:
+            raise ValueError("one age is required for each traveller")
+        if len(self.traveller_genders) != self.travellers:
+            raise ValueError("one gender selection is required for each traveller")
+        if len(self.traveller_accessibility_needs) != self.travellers:
+            raise ValueError("one accessibility entry is required for each traveller")
+        if any(age < 0 or age > 120 for age in self.traveller_ages):
+            raise ValueError("traveller ages must be between 0 and 120")
         return self
 
 

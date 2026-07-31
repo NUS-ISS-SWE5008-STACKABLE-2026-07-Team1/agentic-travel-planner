@@ -28,7 +28,7 @@ def validate_request(payload: dict[str, Any], max_chars: int) -> TravelRequest:
     if forbidden:
         raise SafetyError(f"Unsupported sensitive fields: {', '.join(sorted(forbidden))}")
     request = TravelRequest.model_validate(payload)
-    text_fields = request.preferences + request.accessibility_needs
+    text_fields = request.preferences + request.accessibility_needs + request.refinement_notes
     if any(PROMPT_INJECTION.search(value) for value in text_fields):
         raise SafetyError("Instruction-like text was detected in request fields")
     return request
