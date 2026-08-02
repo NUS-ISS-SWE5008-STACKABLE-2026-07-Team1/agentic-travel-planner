@@ -20,7 +20,7 @@ def test_schema_creates_all_application_tables():
     assert {
         "users", "travel_requests", "travel_plans", "agent_findings", "options",
         "a2a_messages", "audit_events",
-        "planning_jobs", "agent_runs",
+        "planning_jobs", "agent_runs", "plan_feedback",
     } <= tables
 
 

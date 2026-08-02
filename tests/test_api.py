@@ -1,6 +1,6 @@
 from flaskapp import create_app
 from flaskapp.config import Config
-from flaskapp.database import connect
+from flaskapp.database import connect, get_platform_dashboard
 
 
 class TestConfig(Config):
@@ -103,6 +103,33 @@ def test_cancel_endpoint_cancels_authenticated_users_job(monkeypatch):
     assert response.get_json()["status"] == "cancelled"
 
 
+def test_completed_plan_feedback_requires_comment_for_thumbs_down(tmp_path):
+    class FeedbackConfig(TestConfig):
+        DATABASE = tmp_path / "feedback.sqlite3"
+
+    client = create_app(FeedbackConfig).test_client()
+    client.post("/", data={"email": "demo@example.com", "password": "TravelDemo2026!"})
+    request_id = "11111111-1111-4111-8111-111111111111"
+    with connect(FeedbackConfig.DATABASE) as db:
+        user_id = db.execute("SELECT id FROM users WHERE email = 'demo@example.com'").fetchone()[0]
+        db.execute(
+            "INSERT INTO planning_jobs (request_id, user_id, status, request_json) VALUES (?, ?, 'completed', '{}')",
+            (request_id, user_id),
+        )
+    short = client.post(f"/api/v1/travel-plans/{request_id}/feedback", json={
+        "rating": "down", "comment": "This plan needs more detail",
+    })
+    assert short.status_code == 422
+    accepted = client.post(f"/api/v1/travel-plans/{request_id}/feedback", json={
+        "rating": "down",
+        "comment": "This plan needs more detail about transport timing cost and accessibility options",
+    })
+    assert accepted.status_code == 201
+    dashboard = get_platform_dashboard(FeedbackConfig.DATABASE)
+    assert dashboard["needs_improvement_rate"] == 100.0
+    assert dashboard["average_feedback"] == 0.0
+
+
 def test_admin_page_and_activity_require_configured_admin(tmp_path):
     class AdminConfig(TestConfig):
         DATABASE = tmp_path / "admin.sqlite3"
@@ -122,7 +149,14 @@ def test_admin_page_and_activity_require_configured_admin(tmp_path):
     assert client.get("/admin").status_code == 200
     response = client.get("/api/v1/admin/activity")
     assert response.status_code == 200
-    assert response.get_json() == {"requests": []}
+    dashboard = response.get_json()
+    assert dashboard["requests"] == []
+    assert dashboard["consumption"]["totals"] == {
+        "request_count": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+    }
+    assert dashboard["platform"]["total_requests"] == 0
+    assert dashboard["logs"] == []
+    assert len(dashboard["prompts"]) == 6
 
     with client.session_transaction() as session:
         session["user_email"] = "SECOND-ADMIN@example.com"
@@ -130,6 +164,26 @@ def test_admin_page_and_activity_require_configured_admin(tmp_path):
     main = client.get("/main")
     assert b'target="_blank"' in main.data
     assert b'rel="noopener noreferrer"' in main.data
+
+
+def test_admin_can_register_database_managed_administrator(tmp_path):
+    class AdminConfig(TestConfig):
+        DATABASE = tmp_path / "registered-admin.sqlite3"
+        ADMIN_EMAIL = "owner@example.com"
+        ADMIN_EMAILS = ()
+
+    client = create_app(AdminConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_email"] = "owner@example.com"
+    response = client.post("/api/v1/admin/administrators", json={
+        "name": "Operations Admin", "email": "ops@example.com",
+        "password": "StrongAdmin2026!",
+    })
+    assert response.status_code == 201
+    with client.session_transaction() as session:
+        session["user_email"] = "ops@example.com"
+    assert client.get("/admin").status_code == 200
 
 
 def test_registration_creates_account_and_signs_user_in(tmp_path):
@@ -148,6 +202,7 @@ def test_registration_creates_account_and_signs_user_in(tmp_path):
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/main")
     assert b"Alicia Tan" in client.get("/main").data
+    assert b'<option value="Singapore" selected>Singapore</option>' in client.get("/main").data
     with connect(RegistrationConfig.DATABASE) as db:
         user = db.execute(
             "SELECT name, email, country, birthday, password_hash FROM users WHERE email = ?",

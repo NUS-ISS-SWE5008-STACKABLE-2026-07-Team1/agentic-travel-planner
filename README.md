@@ -166,14 +166,44 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
+Copy-Item .env.secrets.example .env.secrets
 ```
 
-Configure the Azure deployment and API version in `.env`. Copy
-`crediential.env.example` to `crediential.env`, then place the Azure endpoint and a
-newly rotated subscription key there before running `python app.py`. The local address is
-`http://127.0.0.1:5000`. The credential file is gitignored and must never be
-committed. If a key is pasted into chat, source code, or Git history, revoke it in
-Azure and issue a replacement before using the application.
+Choose the provider and model in `.env`; these are non-secret settings. With
+`LLM_PROVIDER=auto`, exactly one provider credential in `.env.secrets` is detected.
+`LLM_MODEL` may be left blank to use the application's provider default, but pinning
+it is recommended for reproducible behavior:
+
+```dotenv
+# Azure OpenAI
+LLM_PROVIDER=azure_openai
+LLM_MODEL=my-gpt-5-deployment
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+
+# Or OpenAI
+# LLM_PROVIDER=openai
+# LLM_MODEL=gpt-5
+```
+
+Supported provider values are `azure_openai`, `openai`, `anthropic`, `google`,
+`deepseek`, `xai`, `meta`, and `openai_compatible`. All five agents use the same
+selected provider and model. DeepSeek and xAI use their official OpenAI-compatible
+endpoints. `meta` represents a hosted Meta model: set `META_BASE_URL` to the hosting
+vendor's OpenAI-compatible endpoint and set `LLM_MODEL` to that vendor's model ID.
+Use `openai_compatible` with `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` for other
+compatible resources. If multiple credentials are present, choose `LLM_PROVIDER`
+explicitly to avoid ambiguity.
+
+Put only the matching credentials in `.env.secrets`. Both `.env` and `.env.secrets`
+are gitignored, while their `.example` templates are safe to commit. Production
+deployments should inject the same variables through their hosting platform's secret
+manager instead of creating files. Process environment variables take precedence over
+local files. The old misspelled `crediential.env` remains readable for backward
+compatibility but should not be used for new setups.
+
+Run `python app.py` after configuration. The local address is
+`http://127.0.0.1:5000`. Never paste credentials into prompts, logs, source code, or
+Git. If a key is exposed, revoke and replace it with the provider immediately.
 
 For local development, set `FLASK_DEBUG=true` in the ignored `.env` file. Running
 `python app.py` then automatically restarts the server when application code or

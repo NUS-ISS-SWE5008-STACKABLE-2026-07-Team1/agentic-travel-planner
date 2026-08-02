@@ -80,12 +80,29 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
 .traveler-card { padding: 1rem; border: 1px solid #dfe6ef; border-radius: 1rem; background: #f9fbfe; }
 .refinement-history { max-height: 15rem; overflow-y: auto; }
 .refinement-message { padding: .75rem 1rem; border-radius: .8rem; background: var(--atlas-sky); }
-.agent-activity-card { top: 6rem; }
+.agent-activity-card { top: 6rem; height: min(48rem, calc(100vh - 8rem)); min-height: 34rem; }
+.agent-activity-card .card-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.agent-activity-card .agent-activity { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: .4rem; scrollbar-gutter: stable; }
 .agent-thinking { flex: 0 0 auto; display: grid; place-items: center; width: 3rem; height: 3rem; border-radius: 1rem; color: var(--atlas-navy); background: var(--atlas-mint); animation: ai-pulse 1.15s ease-in-out infinite; }
+.planning-progress { height: .8rem; overflow: hidden; border-radius: 999px; background: #dfe8f5; box-shadow: inset 0 1px 2px rgba(11,32,56,.08); }
+.planning-progress-bar { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--atlas-blue), var(--atlas-mint)); transition: width .45s ease; }
+.planning-travel-icon { flex: 0 0 auto; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: 50%; color: #fff; background: var(--atlas-blue); font-size: 1.2rem; animation: travel-float 1.4s ease-in-out infinite; box-shadow: 0 .4rem 1rem rgba(25,94,231,.25); }
+.planning-progress-wrap.is-complete .planning-travel-icon { animation: none; background: #198754; }
+.planning-progress-wrap.is-stopped .planning-travel-icon { animation: none; background: #6c757d; }
+@keyframes travel-float { 0%, 100% { transform: translateY(2px) rotate(-8deg); } 50% { transform: translateY(-5px) rotate(5deg); } }
 .agent-activity { list-style: none; padding: 0; }
 .agent-activity li { position: relative; margin-left: .65rem; padding: .7rem 0 .7rem 1.5rem; border-left: 2px solid #dce5f1; font-size: .9rem; }
 .agent-activity li::before { content: ""; position: absolute; width: .65rem; height: .65rem; left: -.38rem; top: 1rem; border-radius: 50%; background: var(--atlas-blue); box-shadow: 0 0 0 .25rem #eaf2ff; }
 .plan-itinerary li { margin-bottom: .65rem; }
+.travel-assistant-card { height: min(48rem, calc(100vh - 8rem)); min-height: 34rem; }
+.travel-assistant-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.travel-assistant-body > #result-heading { flex: 0 0 auto; order: 1; }
+#chat-result { flex: 1 1 auto; order: 2; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: .5rem; scrollbar-gutter: stable; }
+.travel-assistant-body > .plan-feedback { flex: 0 1 auto; order: 3; max-height: 15rem; overflow-y: auto; }
+#chat-result .plan-feedback { max-height: none; overflow: visible; }
+.chat-composer { flex: 0 0 auto; order: 4; background: #fff; position: relative; z-index: 2; }
+#chat-result:focus-visible { outline: 2px solid var(--atlas-blue); outline-offset: 2px; }
+#agent-chat h1, #agent-chat h2, #agent-chat h3, #agent-chat h4 { text-transform: capitalize; }
 .cancel-warning-dialog { width: min(92vw, 30rem); padding: 0; border: 0; border-radius: 1.25rem; box-shadow: 0 1.5rem 4rem rgba(7, 28, 51, .28); }
 .cancel-warning-dialog::backdrop { background: rgba(7, 28, 51, .62); backdrop-filter: blur(3px); }
 .warning-icon { display: grid; place-items: center; width: 2.75rem; height: 2.75rem; border-radius: 50%; color: #842029; background: #f8d7da; font-size: 1.25rem; font-weight: 700; }
@@ -93,13 +110,40 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
 .admin-chart-wrap { position: relative; min-height: 21rem; }
 .admin-request { cursor: pointer; }
 .admin-request.active { color: inherit; background: var(--atlas-sky); border-color: #cbdcff; }
+.admin-shell { display: grid; grid-template-columns: 17rem minmax(0, 1fr); min-height: 100vh; transition: grid-template-columns .2s ease; }
+.admin-sidebar { position: sticky; top: 0; height: 100vh; overflow: hidden; background: #101a32; color: #fff; z-index: 1030; }
+.admin-sidebar-header { min-height: 4.5rem; padding: .9rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; border-bottom: 1px solid rgba(255,255,255,.12); }
+.admin-sidebar .brand { color: #fff; white-space: nowrap; }
+.admin-sidebar .nav-link { color: #cbd4e8; display: flex; align-items: center; gap: .8rem; min-height: 3rem; text-align: left; white-space: nowrap; }
+.admin-sidebar .nav-link i { font-size: 1.2rem; min-width: 1.5rem; text-align: center; }
+.admin-sidebar .sidebar-label { text-transform: capitalize; }
+.admin-sidebar .nav-link:hover, .admin-sidebar .nav-link.active { color: #fff; background: #195ee7; }
+.admin-content { min-width: 0; }
+.sidebar-collapsed { grid-template-columns: 5rem minmax(0, 1fr); }
+.sidebar-collapsed .sidebar-label { display: none; }
+.sidebar-collapsed .admin-sidebar-header { flex-direction: column; justify-content: center; }
+.sidebar-collapsed .admin-sidebar .nav-link { justify-content: center; padding-inline: .5rem; }
+.prompt-instruction { white-space: pre-wrap; font: inherit; color: var(--bs-secondary-color); }
+.critical-chart-wrap { position: relative; min-height: 18rem; }
+.agent-history-chart-wrap { position: relative; min-height: 22rem; }
+.admin-request { cursor: pointer; }
+.agent-audit-response td { background: var(--bs-tertiary-bg); }
+#admin-monitor h1, #admin-monitor h2, #admin-monitor th { text-transform: capitalize; }
+@media (max-width: 767.98px) {
+  .admin-shell { grid-template-columns: 5rem minmax(0, 1fr); }
+  .admin-shell .sidebar-label { display: none; }
+  .admin-sidebar-header { flex-direction: column; justify-content: center; }
+  .admin-sidebar .nav-link { justify-content: center; padding-inline: .5rem; }
+}
 .agent-response-json { max-height: 18rem; overflow: auto; padding: 1rem; border-radius: .75rem; background: #f5f7fa; font-size: .75rem; white-space: pre-wrap; word-break: break-word; }
 
 @media (max-width: 767.98px) {
   .agent-orbit { transform: scale(.82); }
   .planner-wrap { margin-top: 0; }
+  .travel-assistant-card { height: 75vh; min-height: 32rem; }
+  .agent-activity-card { height: 75vh; min-height: 32rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
-  .ai-loader-spark, .ai-loader-orbit { animation: none !important; }
+  .ai-loader-spark, .ai-loader-orbit, .planning-travel-icon { animation: none !important; }
 }

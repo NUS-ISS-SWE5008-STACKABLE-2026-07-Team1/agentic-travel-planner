@@ -49,8 +49,8 @@
               <div class="col-md-6">
                 <label class="form-label" for="origin">Flying from</label>
                 <select class="form-select form-select-lg placeholder-select" id="origin" name="origin" required>
-                  <option value="" selected disabled>Select departure country</option>
-                  {% for country in countries %}<option value="{{ country }}">{{ country }}</option>{% endfor %}
+                  <option value="" {% if not user_country %}selected{% endif %} disabled>Select departure country</option>
+                  {% for country in countries %}<option value="{{ country }}" {% if country == user_country %}selected{% endif %}>{{ country }}</option>{% endfor %}
                 </select>
               </div>
               <div class="col-md-6">
