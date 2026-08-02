@@ -48,6 +48,7 @@ def login():
             session["user_id"] = user["id"]
             session["user_email"] = user["email"]
             session["user_name"] = user["name"] or "Traveller"
+            session["user_country"] = user["country"] or ""
             session.permanent = bool(form.remember.data)
             # _is_safe_redirect() restricts the target to the site's own netloc,
             # which is the exact mitigation this rule asks for.
@@ -82,6 +83,7 @@ def register():
             session["user_id"] = user["id"]
             session["user_email"] = user["email"]
             session["user_name"] = user["name"]
+            session["user_country"] = user["country"] or ""
             flash("Your account has been created.", "success")
             return redirect(url_for("pages.main"))
 
@@ -94,6 +96,7 @@ def main():
     return render_template(
         "main.html", user_name=session.get("user_name", "Traveller"), countries=COUNTRIES,
         is_admin=is_admin_email(current_app.config, session.get("user_email")),
+        user_country=session.get("user_country", ""),
     )
 
 

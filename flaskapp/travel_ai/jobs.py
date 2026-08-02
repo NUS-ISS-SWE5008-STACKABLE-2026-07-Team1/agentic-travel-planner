@@ -55,8 +55,9 @@ def _run_plan(request_id: str, request: TravelRequest, settings: dict,
     update_planning_job(settings["database_path"], request_id, "processing")
     try:
         service = TravelPlanningService(
-            api_key=settings["api_key"], endpoint=settings["endpoint"],
-            deployment=settings["deployment"], api_version=settings["api_version"],
+            provider=settings["provider"], api_key=settings["api_key"], model=settings["model"],
+            endpoint=settings.get("endpoint"), api_version=settings.get("api_version"),
+            base_url=settings.get("base_url"),
             temperature=settings["temperature"], timeout=settings["timeout"],
             trace_dir=Path(settings["trace_dir"]), database_path=Path(settings["database_path"]),
             user_id=user_id,

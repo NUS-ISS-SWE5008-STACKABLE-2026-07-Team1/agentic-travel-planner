@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
+import re
 
 from flask import Blueprint, current_app, jsonify, request, session
 from pydantic import ValidationError
+from werkzeug.security import generate_password_hash
 
 from flaskapp.travel_ai.safeguards import SafetyError, validate_request
 from flaskapp.travel_ai.jobs import cancel_job, get_job, submit_plan
-from flaskapp.database import get_admin_activity
+from flaskapp.database import (
+    get_admin_activity, get_admin_token_summary, get_admins, get_platform_dashboard,
+    get_recent_feedback, get_system_logs, register_admin, save_plan_feedback,
+)
 from flaskapp.admin_auth import is_admin_email
+from flaskapp.config import get_llm_settings
 
 travel_api_bp = Blueprint("travel_api", __name__)
 
@@ -25,23 +31,16 @@ def require_browser_session():
 
 @travel_api_bp.post("/travel-plans")
 def create_travel_plan():
-    required = ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT")
-    if current_app.config.get("LLM_PROVIDER") != "azure" or any(
-        not current_app.config.get(name) for name in required
-    ):
-        return jsonify(error="Azure OpenAI configuration is incomplete"), 503
+    llm_settings, configuration_error = get_llm_settings(current_app.config)
+    if configuration_error:
+        return jsonify(error=configuration_error), 503
     try:
         payload = request.get_json(force=False, silent=False)
         if not isinstance(payload, dict):
             return jsonify(error="A JSON object is required"), 400
         travel_request = validate_request(payload, current_app.config["MAX_INPUT_CHARS"])
         settings = {
-            "api_key": current_app.config["AZURE_OPENAI_API_KEY"],
-            "endpoint": current_app.config["AZURE_OPENAI_ENDPOINT"],
-            "deployment": current_app.config["AZURE_OPENAI_DEPLOYMENT"],
-            "api_version": current_app.config["AZURE_OPENAI_API_VERSION"],
-            "temperature": current_app.config["AZURE_OPENAI_TEMPERATURE"],
-            "timeout": current_app.config["AI_REQUEST_TIMEOUT_SECONDS"],
+            **llm_settings,
             "trace_dir": str(current_app.config["TRACE_DIR"]),
             "database_path": str(current_app.config["DATABASE"]),
         }
@@ -88,7 +87,71 @@ def cancel_travel_plan(request_id):
 def get_admin_monitoring_activity():
     if not is_admin_email(current_app.config, session.get("user_email")):
         return jsonify(error="Administrator access required"), 403
-    return jsonify(requests=get_admin_activity(current_app.config["DATABASE"]))
+    database = current_app.config["DATABASE"]
+    return jsonify(
+        requests=get_admin_activity(database),
+        consumption=get_admin_token_summary(database),
+        platform=get_platform_dashboard(database),
+        logs=get_system_logs(database),
+        admins=get_admins(database),
+        feedback=get_recent_feedback(database),
+        prompts=_prompt_catalog(),
+    )
+
+
+def _prompt_catalog():
+    from flaskapp.travel_ai.agents.accessibility_agent.prompt import INSTRUCTION as accessibility
+    from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION as flight
+    from flaskapp.travel_ai.agents.hotel_transport_agent.prompt import INSTRUCTION as hotel
+    from flaskapp.travel_ai.agents.orchestrator_agent.prompt import INSTRUCTION as orchestrator
+    from flaskapp.travel_ai.agents.risk_advisory_agent.prompt import INSTRUCTION as risk
+    from flaskapp.travel_ai.safeguards import PROMPT_INJECTION, SENSITIVE_KEYS
+    return [
+        {"agent": "Flight agent", "instruction": flight},
+        {"agent": "Hotel & transport agent", "instruction": hotel},
+        {"agent": "Accessibility agent", "instruction": accessibility},
+        {"agent": "Risk & advisory agent", "instruction": risk},
+        {"agent": "Orchestrator agent", "instruction": orchestrator},
+        {"agent": "Shared deterministic guardrails", "instruction":
+         f"Reject oversized input, sensitive ranking fields ({', '.join(sorted(SENSITIVE_KEYS))}), "
+         f"and prompt-injection patterns matching: {PROMPT_INJECTION.pattern}"},
+    ]
+
+
+@travel_api_bp.post("/admin/administrators")
+def create_administrator():
+    if not is_admin_email(current_app.config, session.get("user_email")):
+        return jsonify(error="Administrator access required"), 403
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name", "")).strip()
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", ""))
+    if not name or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return jsonify(error="A name and valid email address are required"), 422
+    if len(password) < 12 or not re.search(r"[A-Z]", password) or not re.search(r"[a-z]", password) or not re.search(r"\d", password):
+        return jsonify(error="Password must be at least 12 characters with upper-case, lower-case, and numeric characters"), 422
+    administrator = register_admin(
+        current_app.config["DATABASE"], name, email, generate_password_hash(password)
+    )
+    return jsonify(administrator=administrator), 201
+
+
+@travel_api_bp.post("/travel-plans/<uuid:request_id>/feedback")
+def submit_plan_feedback(request_id):
+    payload = request.get_json(silent=True) or {}
+    rating = payload.get("rating")
+    comment = str(payload.get("comment", "")).strip()
+    if rating not in {"up", "down"}:
+        return jsonify(error="Rating must be thumbs up or thumbs down"), 422
+    if rating == "down" and len(comment.split()) < 10:
+        return jsonify(error="Please provide at least 10 words of feedback"), 422
+    feedback = save_plan_feedback(
+        current_app.config["DATABASE"], str(request_id), session.get("user_id"),
+        rating, comment or None,
+    )
+    if feedback is None:
+        return jsonify(error="Completed planning request not found"), 404
+    return jsonify(feedback=feedback), 201
 
 
 @travel_api_bp.get("/traces/<uuid:request_id>")
