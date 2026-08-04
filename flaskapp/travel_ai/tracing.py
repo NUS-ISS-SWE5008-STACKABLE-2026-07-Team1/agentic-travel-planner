@@ -15,11 +15,12 @@ _lock = threading.Lock()
 class AuditTracer:
     """Append agent lifecycle events with a hash chain for accountability."""
 
-    def __init__(self, trace_dir: Path, request_id: str):
+    def __init__(self, trace_dir: Path, request_id: str, database_path: Path | None = None):
         self.path = trace_dir / f"{request_id}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.request_id = request_id
         self._previous_hash = "GENESIS"
+        self.database_path = database_path
 
     def record(self, event: str, agent: str, details: dict[str, Any] | None = None) -> None:
         # Do not record prompts, API keys, or raw personal data in production traces.
@@ -38,4 +39,7 @@ class AuditTracer:
             item["hash"] = hashlib.sha256(canonical.encode()).hexdigest()
             with self.path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(item, default=str) + "\n")
+            if self.database_path:
+                from flaskapp.database import save_audit_event
+                save_audit_event(self.database_path, item)
             self._previous_hash = item["hash"]
