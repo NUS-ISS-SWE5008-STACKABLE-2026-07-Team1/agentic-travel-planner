@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Create your Atlas AI Travel account.">
+  <title>Create account · Atlas AI Travel</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body class="login-body">
+  <main class="container py-5">
+    <div class="registration-panel mx-auto bg-white shadow-sm p-4 p-md-5">
+      <a href="{{ url_for('pages.login') }}" class="brand text-decoration-none mb-4">
+        <span class="brand-mark" aria-hidden="true">✦</span><span>Atlas AI Travel</span>
+      </a>
+      <span class="eyebrow text-primary d-block">START YOUR JOURNEY</span>
+      <h1 class="h2 mt-2">Create your account</h1>
+      <p class="text-body-secondary mb-4">Enter your details to save and manage your travel plans.</p>
+
+      <form method="post" novalidate>
+        {{ form.hidden_tag() }}
+        <div class="row g-3">
+          {% for field in [form.name, form.email, form.country, form.birthday] %}
+            <div class="col-md-6">
+              {{ field.label(class="form-label") }}
+              {% if field.name == "country" %}
+                {{ field(class="form-select" + (" is-invalid" if field.errors else ""), autocomplete="country-name") }}
+              {% else %}
+                {{ field(class="form-control" + (" is-invalid" if field.errors else ""), autocomplete=("bday" if field.name == "birthday" else field.name)) }}
+              {% endif %}
+              {% for error in field.errors %}<div class="invalid-feedback">{{ error }}</div>{% endfor %}
+            </div>
+          {% endfor %}
+          <div class="col-md-6">
+            {{ form.password.label(class="form-label") }}
+            {{ form.password(class="form-control" + (" is-invalid" if form.password.errors else ""), autocomplete="new-password", aria_describedby="password-help") }}
+            {% for error in form.password.errors %}<div class="invalid-feedback">{{ error }}</div>{% endfor %}
+          </div>
+          <div class="col-md-6">
+            {{ form.confirm_password.label(class="form-label") }}
+            {{ form.confirm_password(class="form-control" + (" is-invalid" if form.confirm_password.errors else ""), autocomplete="new-password") }}
+            {% for error in form.confirm_password.errors %}<div class="invalid-feedback">{{ error }}</div>{% endfor %}
+          </div>
+        </div>
+        <div id="password-help" class="form-text mt-3">Use 12+ characters including uppercase, lowercase, a number, and a special character.</div>
+        {{ form.submit(class="btn btn-primary btn-lg w-100 mt-4") }}
+      </form>
+      <p class="text-center mt-4 mb-0">Already registered? <a href="{{ url_for('pages.login') }}">Sign in</a></p>
+    </div>
+  </main>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

@@ -8,20 +8,37 @@ from langgraph.graph import END, START, StateGraph
 from flaskapp.travel_ai.agents import SPECIALIST_NODE_FACTORIES, create_orchestrator_node
 from flaskapp.travel_ai.schemas import TravelGraphState
 from flaskapp.travel_ai.tracing import AuditTracer
+from flaskapp.travel_ai.cancellation import PlanningCancelled
 
 SPECIALISTS = tuple(SPECIALIST_NODE_FACTORIES)
 
 
-def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer):
+def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None):
     """Compile a fan-out/fan-in graph: four specialists feed one orchestrator."""
     # CUSTOMIZE THE LANGGRAPH WORKFLOW HERE.
     # Current design: START -> all four specialists in parallel -> orchestrator -> END.
     # Add conditional edges here if an agent should run only for certain requests.
     workflow = StateGraph(TravelGraphState)
     for name, create_node in SPECIALIST_NODE_FACTORIES.items():
-        workflow.add_node(name, create_node(llm, tracer))
+        node = create_node(llm, tracer)
+        def cancellable_specialist(state, node=node):
+            if cancel_event and cancel_event.is_set():
+                raise PlanningCancelled("Planning was cancelled")
+            result = node(state)
+            if cancel_event and cancel_event.is_set():
+                raise PlanningCancelled("Planning was cancelled")
+            return result
+        workflow.add_node(name, cancellable_specialist)
         workflow.add_edge(START, name)
-    workflow.add_node("orchestrator_agent", create_orchestrator_node(llm, tracer))
+    orchestrator = create_orchestrator_node(llm, tracer)
+    def cancellable_orchestrator(state):
+        if cancel_event and cancel_event.is_set():
+            raise PlanningCancelled("Planning was cancelled")
+        result = orchestrator(state)
+        if cancel_event and cancel_event.is_set():
+            raise PlanningCancelled("Planning was cancelled")
+        return result
+    workflow.add_node("orchestrator_agent", cancellable_orchestrator)
     # A list-valued source is a barrier: synthesis starts only after every branch.
     workflow.add_edge(list(SPECIALISTS), "orchestrator_agent")
     workflow.add_edge("orchestrator_agent", END)

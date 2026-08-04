@@ -10,7 +10,9 @@ from flaskapp.travel_ai.schemas import AgentFinding, TravelRequest
 def travel_request():
     return TravelRequest(
         origin="Singapore", destination="Tokyo", departure_date="2026-10-10",
-        return_date="2026-10-16",
+        return_date="2026-10-16", travellers=1, traveller_ages=[30],
+        traveller_genders=["prefer_not_to_say"], traveller_accessibility_needs=[[]],
+        budget=3000,
     )
 
 

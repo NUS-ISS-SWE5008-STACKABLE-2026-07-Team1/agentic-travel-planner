@@ -166,10 +166,80 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
+Copy-Item .env.secrets.example .env.secrets
 ```
 
-Put an OpenAI API key in `.env`, then run `python app.py`. The local address is
-`http://127.0.0.1:5000`.
+Choose the provider and model in `.env`; these are non-secret settings. With
+`LLM_PROVIDER=auto`, exactly one provider credential in `.env.secrets` is detected.
+`LLM_MODEL` may be left blank to use the application's provider default, but pinning
+it is recommended for reproducible behavior:
+
+```dotenv
+# Azure OpenAI
+LLM_PROVIDER=azure_openai
+LLM_MODEL=my-gpt-5-deployment
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+
+# Or OpenAI
+# LLM_PROVIDER=openai
+# LLM_MODEL=gpt-5
+```
+
+Supported provider values are `azure_openai`, `openai`, `anthropic`, `google`,
+`deepseek`, `xai`, `meta`, and `openai_compatible`. All five agents use the same
+selected provider and model. DeepSeek and xAI use their official OpenAI-compatible
+endpoints. `meta` represents a hosted Meta model: set `META_BASE_URL` to the hosting
+vendor's OpenAI-compatible endpoint and set `LLM_MODEL` to that vendor's model ID.
+Use `openai_compatible` with `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` for other
+compatible resources. If multiple credentials are present, choose `LLM_PROVIDER`
+explicitly to avoid ambiguity.
+
+Put only the matching credentials in `.env.secrets`. Both `.env` and `.env.secrets`
+are gitignored, while their `.example` templates are safe to commit. Production
+deployments should inject the same variables through their hosting platform's secret
+manager instead of creating files. Process environment variables take precedence over
+local files. The old misspelled `crediential.env` remains readable for backward
+compatibility but should not be used for new setups.
+
+Run `python app.py` after configuration. The local address is
+`http://127.0.0.1:5000`. Never paste credentials into prompts, logs, source code, or
+Git. If a key is exposed, revoke and replace it with the provider immediately.
+
+For local development, set `FLASK_DEBUG=true` in the ignored `.env` file. Running
+`python app.py` then automatically restarts the server when application code or
+templates change. Keep debug mode disabled in production.
+
+## Local database
+
+The application initializes `instance/travel_planner.sqlite3` automatically on
+startup. SQLite requires no separate database server. To initialize it explicitly:
+
+```powershell
+$env:FLASK_APP = "app.py"
+flask init-db
+```
+
+Set `DATABASE` in `.env` to use another local path. The schema stores users, travel
+requests and completed plans, specialist findings and options, versioned A2A
+messages, and hash-chained audit events. List fields are encoded as JSON, while
+relationships and frequently queried identifiers remain normalized and indexed.
+The configured demo user is inserted only when its email does not already exist,
+so startup never overwrites a changed password.
+
+Users can create an account at `/register` with their name, email, country, and
+birthday. Passwords must contain at least 12 characters with uppercase, lowercase,
+a number, and a special character. Passwords are stored only as Werkzeug hashes;
+email addresses are case-insensitively unique.
+
+## Administrator monitoring
+
+Set `ADMIN_EMAILS` in `.env` to a comma-separated list of registered accounts that
+may access `/admin`, for example `ADMIN_EMAILS=admin1@example.com,admin2@example.com`.
+The older single `ADMIN_EMAIL` setting remains supported.
+The administrator page refreshes every two seconds and shows recent user requests,
+live agent status, each agent's latest structured response, and Azure-reported input,
+output, and total token usage. Monitoring data is recorded for new requests after
+this feature is enabled; older trace-only requests do not contain token metadata.
 
 For the bundled demo login, use `demo@example.com` and `TravelDemo2026!`.
 Replace `SECRET_KEY`, `LOGIN_EMAIL`, and `LOGIN_PASSWORD_HASH` in `.env` before
@@ -187,6 +257,9 @@ Send `POST /api/v1/travel-plans`:
   "departure_date": "2026-10-10",
   "return_date": "2026-10-16",
   "travellers": 2,
+  "traveller_ages": [34, 32],
+  "traveller_genders": ["male", "female"],
+  "traveller_accessibility_needs": [[], ["step-free access"]],
   "budget": 4000,
   "currency": "SGD",
   "preferences": ["direct flights", "near public transport"],
