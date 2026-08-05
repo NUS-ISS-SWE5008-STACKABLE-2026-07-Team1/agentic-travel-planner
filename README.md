@@ -39,8 +39,15 @@ flaskapp/travel_ai/
 |   |-- base.py                    # shared specialist execution and tracing
 |   |-- shared.py                  # policy that applies to all five agents
 |   |-- flight_agent/
-|   |   |-- agent.py
-|   |   `-- prompt.py
+|   |   |-- agent.py               # LangGraph node (what the graph runs today)
+|   |   |-- prompt.py
+|   |   |-- adapter.py             # TravelRequest <-> Flight Agent contracts
+|   |   |-- airports.py            # country -> primary airport resolution
+|   |   |-- schemas.py             # flight-specific contracts
+|   |   |-- domain.py              # deterministic search/filter/rank
+|   |   |-- guardrails.py          # input/output screening and grounding
+|   |   |-- reasoning.py           # LLM layer over the deterministic tool
+|   |   `-- seed_data.py           # static inventory (+ seed_data_extended.csv)
 |   |-- hotel_transport_agent/
 |   |   |-- agent.py
 |   |   `-- prompt.py
@@ -71,6 +78,40 @@ graph runs the four specialists in parallel and then runs the orchestrator. The
 orchestrator prompt identifies unresolved conflicts for a future negotiation cycle;
 an actual retry/negotiation loop must be added in `graph.py` when that feature is
 developed.
+
+### Flight Agent's deterministic layer
+
+Flight Agent carries a second, fuller implementation alongside its prompt-only
+graph node. `domain.py` searches, filters and ranks real inventory in code, and
+records why every rejected flight was rejected (`screen_flights`); `reasoning.py`
+then asks the model only to explain what the code already decided, with
+`guardrails.validate_grounded_explanation` rejecting any flight ID the model
+invents. `adapter.py` translates the shared `TravelRequest` into these contracts
+and is the single place that knows both schemas — point changes there when the
+shared schema or the intake form moves.
+
+**The graph does not use this layer yet.** `agent.py` still runs the prompt-only
+node, so runtime behaviour is unchanged. Connecting them is one change to
+`create_node` (`adapter.to_flight_request` produces what
+`reasoning.run_flight_agent` needs), deliberately left as its own reviewed step
+because it changes what every downstream agent receives.
+
+Two limits to know before wiring it in. Inventory is 104 static rows covering
+SIN <-> NRT/LHR/SYD/BKK/HKG between 2026-08-25 and 2026-10-08, so anything else
+correctly returns no candidates. And the intake form collects countries, not
+cities or airports, so `airports.py` reduces each country to one gateway —
+collecting a city or airport at intake is the real fix.
+
+Two demo scripts exercise it against a live model:
+
+```powershell
+python scripts/demo_golden_scenario.py        # the wheelchair/SIN->Tokyo scenario
+python scripts/demo_multi_gap_relaxation.py   # does relaxation choice track party context?
+```
+
+`scripts/generate_flight_seed_csv.py` regenerates the extended inventory
+deterministically — same output every run, so a regeneration that produces a
+diff means an input changed.
 
 ## Agent-to-agent (A2A) communication standard
 
