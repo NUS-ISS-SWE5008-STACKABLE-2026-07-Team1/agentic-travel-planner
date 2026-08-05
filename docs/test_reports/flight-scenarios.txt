@@ -1,0 +1,340 @@
+FLIGHT AGENT — SCENARIO INPUT/RESULT LOG
+Deterministic only: no model call, no network. Reproducible on any machine.
+
+==============================================================================
+PART 1 — GOLDEN SCENARIOS (tests/golden/flight_scenarios.json)
+==============================================================================
+These are the fixtures test_flight_golden.py asserts against. The tool's
+output must match 'expected' exactly for the test to pass.
+
+
+------------------------------------------------------------------------------
+golden_scenario_1_round0
+------------------------------------------------------------------------------
+WHY: db_schema.md §7 round 0: wheelchair user, no renegotiation yet — both the red-eye and mid-priced options surface, cheapest first.
+
+INPUT:
+  route          SIN -> NRT
+  dates          out 2026-09-01, back 2026-09-05
+  party          {'adults': 1, 'children': 0}   budget 4000.0
+  accessibility  ['wheelchair']
+  constraints    none (round 0)
+
+RESULT:
+  OUTBOUND:
+    1. SQ636-20260901       dep 2026-09-01T16:00+08:00  arr 2026-09-01T23:40+09:00  SGD 380  stops 0  wheelchair=True
+    2. SQ632-20260901       dep 2026-09-01T08:00+08:00  arr 2026-09-01T15:10+09:00  SGD 520  stops 0  wheelchair=True
+  RETURN:
+    1. SQ637-20260905       dep 2026-09-05T23:00+09:00  arr 2026-09-06T04:40+08:00  SGD 390  stops 0  wheelchair=True
+    2. SQ633-20260905       dep 2026-09-05T11:00+09:00  arr 2026-09-05T17:00+08:00  SGD 520  stops 0  wheelchair=True
+
+  expected outbound ['SQ636-20260901', 'SQ632-20260901']
+  expected inbound  ['SQ637-20260905', 'SQ633-20260905']
+  MATCHES EXPECTED: True
+
+  WHY OTHERS WERE REJECTED (20 rows; first 5 shown):
+    SQ105-20260828       departs 2026-08-28, requested 2026-09-01
+    TR109-20260828       departs 2026-08-28, requested 2026-09-01
+    NH108-20260910       departs 2026-09-10, requested 2026-09-01
+    SQ116-20260910       departs 2026-09-10, requested 2026-09-01
+    NH118-20260915       departs 2026-09-15, requested 2026-09-01
+
+------------------------------------------------------------------------------
+golden_scenario_1_renegotiation_arrive_before
+------------------------------------------------------------------------------
+WHY: db_schema.md §7 renegotiation: Hotel/Transport flagged the 23:40 arrival infeasible against last train service — Flight must drop the red-eye on the OUTBOUND leg only; the return leg is untouched.
+
+INPUT:
+  route          SIN -> NRT
+  dates          out 2026-09-01, back 2026-09-05
+  party          {'adults': 1, 'children': 0}   budget 4000.0
+  accessibility  ['wheelchair']
+  constraints    {'direction': 'OUTBOUND', 'arrive_before': '2026-09-01T23:00+09:00'}   (orchestrator-issued, renegotiation only)
+
+RESULT:
+  OUTBOUND:
+    1. SQ632-20260901       dep 2026-09-01T08:00+08:00  arr 2026-09-01T15:10+09:00  SGD 520  stops 0  wheelchair=True
+  RETURN:
+    1. SQ637-20260905       dep 2026-09-05T23:00+09:00  arr 2026-09-06T04:40+08:00  SGD 390  stops 0  wheelchair=True
+    2. SQ633-20260905       dep 2026-09-05T11:00+09:00  arr 2026-09-05T17:00+08:00  SGD 520  stops 0  wheelchair=True
+
+  expected outbound ['SQ632-20260901']
+  expected inbound  ['SQ637-20260905', 'SQ633-20260905']
+  MATCHES EXPECTED: True
+
+  WHY OTHERS WERE REJECTED (21 rows; first 5 shown):
+    SQ636-20260901       arrival 2026-09-01T23:40+09:00 later than constraint arrive_before 2026-09-01T23:00+09:00
+    SQ105-20260828       departs 2026-08-28, requested 2026-09-01
+    TR109-20260828       departs 2026-08-28, requested 2026-09-01
+    NH108-20260910       departs 2026-09-10, requested 2026-09-01
+    SQ116-20260910       departs 2026-09-10, requested 2026-09-01
+
+------------------------------------------------------------------------------
+budget_exceeded_no_outbound_option
+------------------------------------------------------------------------------
+WHY: Budget Validator flagged the accessible-taxi + 24h hotel combo as exceeding cap — orchestrator re-proposes with a tighter max_price on the OUTBOUND leg only; both outbound options are priced above it, so the leg must come back empty, not fabricated.
+
+INPUT:
+  route          SIN -> NRT
+  dates          out 2026-09-01, back 2026-09-05
+  party          {'adults': 1, 'children': 0}   budget 4000.0
+  accessibility  ['wheelchair']
+  constraints    {'direction': 'OUTBOUND', 'max_price': 300.0}   (orchestrator-issued, renegotiation only)
+
+RESULT:
+  OUTBOUND:
+    (none — no flight satisfies the constraints for this leg)
+  RETURN:
+    1. SQ637-20260905       dep 2026-09-05T23:00+09:00  arr 2026-09-06T04:40+08:00  SGD 390  stops 0  wheelchair=True
+    2. SQ633-20260905       dep 2026-09-05T11:00+09:00  arr 2026-09-05T17:00+08:00  SGD 520  stops 0  wheelchair=True
+
+  expected outbound []
+  expected inbound  ['SQ637-20260905', 'SQ633-20260905']
+  MATCHES EXPECTED: True
+
+  WHY OTHERS WERE REJECTED (22 rows; first 5 shown):
+    SQ636-20260901       price 380.0 exceeds constraint max_price 300.0
+    SQ632-20260901       price 520.0 exceeds constraint max_price 300.0
+    SQ105-20260828       departs 2026-08-28, requested 2026-09-01
+    TR109-20260828       departs 2026-08-28, requested 2026-09-01
+    NH108-20260910       departs 2026-09-10, requested 2026-09-01
+
+------------------------------------------------------------------------------
+no_availability_wrong_date
+------------------------------------------------------------------------------
+WHY: Requested departure date has no matching inventory row — must return an empty leg, never a fabricated flight.
+
+INPUT:
+  route          SIN -> NRT
+  dates          out 2026-12-25, back 2026-09-05
+  party          {'adults': 1, 'children': 0}   budget 4000.0
+  accessibility  []
+  constraints    none (round 0)
+
+RESULT:
+  OUTBOUND:
+    (none — no flight satisfies the constraints for this leg)
+  RETURN:
+    1. SQ637-20260905       dep 2026-09-05T23:00+09:00  arr 2026-09-06T04:40+08:00  SGD 390  stops 0  wheelchair=True
+    2. SQ633-20260905       dep 2026-09-05T11:00+09:00  arr 2026-09-05T17:00+08:00  SGD 520  stops 0  wheelchair=True
+
+  expected outbound []
+  expected inbound  ['SQ637-20260905', 'SQ633-20260905']
+  MATCHES EXPECTED: True
+
+  WHY OTHERS WERE REJECTED (22 rows; first 5 shown):
+    SQ636-20260901       departs 2026-09-01, requested 2026-12-25
+    SQ632-20260901       departs 2026-09-01, requested 2026-12-25
+    SQ105-20260828       departs 2026-08-28, requested 2026-12-25
+    TR109-20260828       departs 2026-08-28, requested 2026-12-25
+    NH108-20260910       departs 2026-09-10, requested 2026-12-25
+
+------------------------------------------------------------------------------
+multi_passenger_large_party
+------------------------------------------------------------------------------
+WHY: Party of 10 — flights without enough remaining seats for the whole party must be excluded, not just flights with zero seats.
+
+INPUT:
+  route          SIN -> NRT
+  dates          out 2026-09-01, back 2026-09-05
+  party          {'adults': 10, 'children': 0}   budget 20000.0
+  accessibility  []
+  constraints    none (round 0)
+
+RESULT:
+  OUTBOUND:
+    1. SQ636-20260901       dep 2026-09-01T16:00+08:00  arr 2026-09-01T23:40+09:00  SGD 380  stops 0  wheelchair=True
+  RETURN:
+    1. SQ633-20260905       dep 2026-09-05T11:00+09:00  arr 2026-09-05T17:00+08:00  SGD 520  stops 0  wheelchair=True
+
+  expected outbound ['SQ636-20260901']
+  expected inbound  ['SQ633-20260905']
+  MATCHES EXPECTED: True
+
+  WHY OTHERS WERE REJECTED (22 rows; first 5 shown):
+    SQ632-20260901       only 9 seat(s) available, party needs 10
+    SQ105-20260828       departs 2026-08-28, requested 2026-09-01
+    TR109-20260828       departs 2026-08-28, requested 2026-09-01
+    NH108-20260910       departs 2026-09-10, requested 2026-09-01
+    SQ116-20260910       departs 2026-09-10, requested 2026-09-01
+
+==============================================================================
+PART 2 — WHAT THE INTAKE FORM ACTUALLY SENDS
+==============================================================================
+Same deterministic tool, driven by real form payloads rather than fixtures.
+This is the path the running app takes.
+
+
+------------------------------------------------------------------------------
+Covered route, no special needs
+------------------------------------------------------------------------------
+INPUT (as posted by the form):
+  Singapore -> Japan, 2026-09-01 to 2026-09-05
+  travellers 1, ages [34], budget 4000.0 SGD
+  preferences []
+  accessibility_needs []
+
+ADAPTED TO FLIGHT CONTRACT:
+  airports       SIN -> NRT
+  party derived  {'adults': 1, 'children': 0}
+  prefer_direct=False  avoid_red_eye=False
+  needs cleaned  []
+  routable=True  has_inventory=True
+
+RESULT:
+  OUTBOUND:
+    1. SQ636-20260901       dep 2026-09-01T16:00+08:00  arr 2026-09-01T23:40+09:00  SGD 380  stops 0  wheelchair=True
+    2. SQ632-20260901       dep 2026-09-01T08:00+08:00  arr 2026-09-01T15:10+09:00  SGD 520  stops 0  wheelchair=True
+  RETURN:
+    1. SQ637-20260905       dep 2026-09-05T23:00+09:00  arr 2026-09-06T04:40+08:00  SGD 390  stops 0  wheelchair=True
+    2. SQ633-20260905       dep 2026-09-05T11:00+09:00  arr 2026-09-05T17:00+08:00  SGD 520  stops 0  wheelchair=True
+
+------------------------------------------------------------------------------
+Wheelchair need typed as free text
+------------------------------------------------------------------------------
+INPUT (as posted by the form):
+  Singapore -> Japan, 2026-09-01 to 2026-09-05
+  travellers 1, ages [34], budget 4000.0 SGD
+  preferences []
+  accessibility_needs ['Traveler 1: wheelchair assistance']
+
+ADAPTED TO FLIGHT CONTRACT:
+  airports       SIN -> NRT
+  party derived  {'adults': 1, 'children': 0}
+  prefer_direct=False  avoid_red_eye=False
+  needs cleaned  ['wheelchair assistance']
+  routable=True  has_inventory=True
+
+RESULT:
+  OUTBOUND:
+    1. SQ636-20260901       dep 2026-09-01T16:00+08:00  arr 2026-09-01T23:40+09:00  SGD 380  stops 0  wheelchair=True
+    2. SQ632-20260901       dep 2026-09-01T08:00+08:00  arr 2026-09-01T15:10+09:00  SGD 520  stops 0  wheelchair=True
+  RETURN:
+    1. SQ637-20260905       dep 2026-09-05T23:00+09:00  arr 2026-09-06T04:40+08:00  SGD 390  stops 0  wheelchair=True
+    2. SQ633-20260905       dep 2026-09-05T11:00+09:00  arr 2026-09-05T17:00+08:00  SGD 520  stops 0  wheelchair=True
+
+------------------------------------------------------------------------------
+Family of 4 (2 adults, 2 children)
+------------------------------------------------------------------------------
+INPUT (as posted by the form):
+  Singapore -> Japan, 2026-09-01 to 2026-09-05
+  travellers 4, ages [40, 38, 9, 6], budget 4000.0 SGD
+  preferences []
+  accessibility_needs []
+
+ADAPTED TO FLIGHT CONTRACT:
+  airports       SIN -> NRT
+  party derived  {'adults': 2, 'children': 2}
+  prefer_direct=False  avoid_red_eye=False
+  needs cleaned  []
+  routable=True  has_inventory=True
+
+RESULT:
+  OUTBOUND:
+    1. SQ636-20260901       dep 2026-09-01T16:00+08:00  arr 2026-09-01T23:40+09:00  SGD 380  stops 0  wheelchair=True
+    2. SQ632-20260901       dep 2026-09-01T08:00+08:00  arr 2026-09-01T15:10+09:00  SGD 520  stops 0  wheelchair=True
+  RETURN:
+    1. SQ637-20260905       dep 2026-09-05T23:00+09:00  arr 2026-09-06T04:40+08:00  SGD 390  stops 0  wheelchair=True
+    2. SQ633-20260905       dep 2026-09-05T11:00+09:00  arr 2026-09-05T17:00+08:00  SGD 520  stops 0  wheelchair=True
+
+------------------------------------------------------------------------------
+Preference 'direct flights' in free text
+------------------------------------------------------------------------------
+INPUT (as posted by the form):
+  Singapore -> Japan, 2026-09-01 to 2026-09-05
+  travellers 1, ages [34], budget 4000.0 SGD
+  preferences ['direct flights']
+  accessibility_needs []
+
+ADAPTED TO FLIGHT CONTRACT:
+  airports       SIN -> NRT
+  party derived  {'adults': 1, 'children': 0}
+  prefer_direct=True  avoid_red_eye=False
+  needs cleaned  []
+  routable=True  has_inventory=True
+
+RESULT:
+  OUTBOUND:
+    1. SQ636-20260901       dep 2026-09-01T16:00+08:00  arr 2026-09-01T23:40+09:00  SGD 380  stops 0  wheelchair=True
+    2. SQ632-20260901       dep 2026-09-01T08:00+08:00  arr 2026-09-01T15:10+09:00  SGD 520  stops 0  wheelchair=True
+  RETURN:
+    1. SQ637-20260905       dep 2026-09-05T23:00+09:00  arr 2026-09-06T04:40+08:00  SGD 390  stops 0  wheelchair=True
+    2. SQ633-20260905       dep 2026-09-05T11:00+09:00  arr 2026-09-05T17:00+08:00  SGD 520  stops 0  wheelchair=True
+
+------------------------------------------------------------------------------
+Route with no inventory (Brazil)
+------------------------------------------------------------------------------
+INPUT (as posted by the form):
+  Singapore -> Brazil, 2026-09-01 to 2026-09-05
+  travellers 1, ages [34], budget 4000.0 SGD
+  preferences []
+  accessibility_needs []
+
+ADAPTED TO FLIGHT CONTRACT:
+  airports       SIN -> None
+  party derived  {'adults': 1, 'children': 0}
+  prefer_direct=False  avoid_red_eye=False
+  needs cleaned  []
+  routable=False  has_inventory=False
+  UNRESOLVED: No airport mapping for destination country 'Brazil'
+
+RESULT:
+  RESULT: no candidates (no feasible option)
+  -> the graph node falls back to the prompt-only path here,
+     labelling its options as estimates rather than verified inventory.
+
+------------------------------------------------------------------------------
+Country with no airport mapping (Chad)
+------------------------------------------------------------------------------
+INPUT (as posted by the form):
+  Singapore -> Chad, 2026-09-01 to 2026-09-05
+  travellers 1, ages [34], budget 4000.0 SGD
+  preferences []
+  accessibility_needs []
+
+ADAPTED TO FLIGHT CONTRACT:
+  airports       SIN -> None
+  party derived  {'adults': 1, 'children': 0}
+  prefer_direct=False  avoid_red_eye=False
+  needs cleaned  []
+  routable=False  has_inventory=False
+  UNRESOLVED: No airport mapping for destination country 'Chad'
+
+RESULT:
+  RESULT: no candidates (no feasible option)
+  -> the graph node falls back to the prompt-only path here,
+     labelling its options as estimates rather than verified inventory.
+
+------------------------------------------------------------------------------
+Dates outside the loaded inventory
+------------------------------------------------------------------------------
+INPUT (as posted by the form):
+  Singapore -> Japan, 2026-12-10 to 2026-12-20
+  travellers 1, ages [34], budget 4000.0 SGD
+  preferences []
+  accessibility_needs []
+
+ADAPTED TO FLIGHT CONTRACT:
+  airports       SIN -> NRT
+  party derived  {'adults': 1, 'children': 0}
+  prefer_direct=False  avoid_red_eye=False
+  needs cleaned  []
+  routable=True  has_inventory=True
+
+RESULT:
+  RESULT: no candidates (no feasible option)
+
+==============================================================================
+PART 3 — BIAS AUDIT CONTROL (XRAI)
+==============================================================================
+Ranking must be identical across genders, so any difference an audit
+observes in the model's rationale is attributable to the LLM alone.
+
+  traveller_genders=['female']                  -> ['SQ636-20260901', 'SQ632-20260901', 'SQ637-20260905', 'SQ633-20260905']  identical=True
+  traveller_genders=['male']                    -> ['SQ636-20260901', 'SQ632-20260901', 'SQ637-20260905', 'SQ633-20260905']  identical=True
+  traveller_genders=['non_binary']              -> ['SQ636-20260901', 'SQ632-20260901', 'SQ637-20260905', 'SQ633-20260905']  identical=True
+  traveller_genders=['prefer_not_to_say']       -> ['SQ636-20260901', 'SQ632-20260901', 'SQ637-20260905', 'SQ633-20260905']  identical=True
+
+==============================================================================
+END
+==============================================================================
