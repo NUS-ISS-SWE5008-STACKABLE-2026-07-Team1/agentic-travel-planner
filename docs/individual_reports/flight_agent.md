@@ -1,18 +1,29 @@
-# Flight Agent — Individual Report Sections (Draft)
+# Flight Agent — Individual Report Sections
 
 **Owner:** Mark. Covers the two sections `draftProject.txt` §6 requires in every team
 member's individual report: Explainable & Responsible AI, and Security Practices. Both
 are agent-specific here, not the group report's system-level synthesis of all four.
 
-Status: draft, grounded only in what's actually built as of 2026-07-19
-(`flaskapp/travel_ai/agents/flight_agent/`: `schemas.py`, `domain.py`, `guardrails.py`, `prompts.py`,
-`agent.py`, plus `tracing.py`'s hash-chain verifier). The LLM "brain" layer
-(`agent.py`'s `run_flight_agent`) now exists and is mock-tested (no live API key in
-this environment) — see the architecture note below before assuming "has an LLM call"
-means "is fully wired into the real system."
+Status: grounded in what is actually built as of **2026-08-05**
+(`flaskapp/travel_ai/agents/flight_agent/`: `schemas.py`, `domain.py`, `guardrails.py`,
+`prompt.py`, `reasoning.py`, `adapter.py`, `airports.py`, `agent.py`, plus `tracing.py`'s
+hash-chain verifier). The LLM reasoning layer (`reasoning.py`'s `run_flight_agent`) is
+built, tested against stubs, **and exercised against a live model**.
 
-**On whether Flight Agent is "an agent" (brain/memory/tools)**: as of this session,
-yes in the narrow sense that matters — `agent.py` adds a genuine LLM reasoning layer
+For period-by-period delivery detail, the automated/manual test breakdown, and the two
+manual acceptance scenarios with their analysis, see
+[`docs/flight_agent/progress.md`](../flight_agent/progress.md). This document stays
+scoped to the two assessed sections below.
+
+> **Changed since the 2026-07-19 draft.** The agent is now wired into the LangGraph
+> workflow — `agent.py` runs the deterministic search and passes its result to the model
+> for explanation only, so a plan's flight facts come from inventory rather than from
+> generation. Earlier statements that it was "not integrated" and "untested against a
+> real model" no longer hold. Two file renames came with the move: `flight/agent.py` is
+> now `reasoning.py`, and `flight/prompts.py` merged into `prompt.py`.
+
+**On whether Flight Agent is "an agent" (brain/memory/tools)**: yes in the narrow sense
+that matters — `reasoning.py` adds a genuine LLM reasoning layer
 (rationale generation, escalation judgment, and — option B — a bounded relaxation of
 Flight's *own* soft preferences that genuinely changes control flow) on top of the
 deterministic tool (`domain.py`), with memory supplied as orchestrator-fed negotiation
@@ -33,11 +44,20 @@ This is what makes the LLM non-decorative: a validated relaxation demonstrably r
 the proposal (e.g. dropping a soft arrival preference reverts arrival-ranking to
 price-ranking), so removing the LLM changes the outcome, not just the prose.
 
-What's *not* yet true: this isn't wired into a real orchestrator, event bus, or live
-LLM call — `agent.py` is structurally complete and correctly grounded/fail-closed, but
-untested against a real model. Don't overstate this in the report as "fully working
-end-to-end" — it's the reasoning layer, built and correct in isolation, not yet
-integrated.
+One claim to withdraw, not soften. The evidence that the relaxation *choice* tracks
+traveller context — a family choosing differently from a solo traveller when both
+options are open — is **not established**. `scripts/demo_multi_gap_relaxation.py` exists
+to test exactly that, and on its live run both contexts chose `soft_arrival_preference`.
+That does not show the model ignores context; both may be equally defensible in that
+fixture. But the demonstration is inconclusive and should not be cited as evidence until
+a scenario where the two contexts clearly ought to diverge says otherwise. What *is*
+established is the weaker, sufficient claim above: a relaxation changes the outcome.
+
+What's *not* yet true: there is no orchestrator-driven renegotiation loop.
+`FlightConstraints` and `negotiation_history` are implemented and tested, but nothing
+issues them mid-run, so that path is exercised only by the golden scenarios. Inventory
+is also static — 104 rows over five routes and a six-week window — so a request outside
+that coverage takes a clearly-labelled fallback path rather than a grounded one.
 
 ---
 
@@ -59,15 +79,21 @@ Every proposal is traceable at two levels:
   chain and returns `False` if any event was edited or reordered after the fact. An
   explanation is only trustworthy if the log it's built from wasn't altered.
 
-**Now built**: `agent.py`'s `run_flight_agent()` — the LLM reasoning layer. Deliberately
-scoped narrow: the tool (`propose_flights`/`screen_flights`) always runs first and is
-never bypassed; the LLM only writes the rationale, judges escalation, and suggests
-(never decides) a relaxation for the next round — matches `llmops_plan.md` §8's
+**Now built and running in the workflow**: `reasoning.py`'s `run_flight_agent()` — the
+LLM reasoning layer — called by the LangGraph node in `agent.py`. Deliberately scoped
+narrow: the tool (`propose_flights`/`screen_flights`) always runs first and is never
+bypassed; the LLM only writes the rationale, judges escalation, and suggests (never
+decides) a relaxation for the next round — matches `llmops_plan.md` §8's
 structured-output pattern for Flight, not a full autonomous tool-calling loop.
 `guardrails.validate_grounded_explanation()` gates every response: a hallucinated
 flight_id triggers a retry, then a deterministic fallback with no narrative — the tool's
-output is always usable even if the LLM never succeeds. Mock-tested only; needs a real
-`OPENAI_API_KEY` to exercise for real.
+output is always usable even if the LLM never succeeds.
+
+Verified against a live model, not only stubs: in a full five-agent run, every flight in
+the resulting plan was a real inventory row with the correct fare and per-airport UTC
+offsets, and the per-option provenance note ("from the project's static inventory ...
+must be verified with the airline") survived orchestrator synthesis verbatim into the
+traveller-facing plan. Full scenarios and analysis in `docs/flight_agent/progress.md` §5.
 
 ### Bias & Fairness
 
@@ -85,6 +111,22 @@ wheelchair_assist_available is False"`), so it's auditable by the profile-compar
 harness `llmops_plan.md` §4/§7 already plans (option-count parity across
 Budget_Disabled vs. Budget_Solo profiles would show this filter's actual effect size).
 
+**Gender is carried deliberately, so the bias audit can actually run.** Flight selection
+has no legitimate use for gender, and nothing in `domain.py` reads it. But the intake
+form collects it, and stripping it at the agent boundary would make an XRAI bias audit
+impossible: a model cannot be tested for conditioning on an attribute it never receives.
+It is therefore passed into the model's context, and the risk is accepted knowingly —
+a field the model can see is a field it can condition on. That is the finding the audit
+is looking for, not a side effect to design away.
+
+What makes such a finding *attributable* is the control. `tests/test_flight_bias_audit.py`
+asserts that deterministic ranking and screening reasons are byte-identical across all
+four gender values, plus a structural check that the string "gender" appears nowhere in
+`domain.py`. Any difference an audit observes therefore originates in the model, not the
+code. Confirmed live: an otherwise-identical request returned identical flights for
+`female` and `male`. This is the control Andrew's parity harness needs — without it, a
+difference in output could come from either layer and would prove nothing.
+
 **Seat selection extends the disability-tax surface (a deliberate bias decision).**
 Seat availability is modelled as a flight-selection factor (`SeatInventory` — aggregate
 counts, not a seat map). The bias-relevant choice: `accessible_available` seats are
@@ -99,15 +141,18 @@ kept as an explicit "don't do this" case for Andrew's parity harness, not the de
 
 Flight Agent's own quality metrics, per `llmops_plan.md` §2a: first-pass feasibility
 rate (% proposals passing Hotel's check-in check without renegotiation) target ≥70%;
-structured-output validity target ≥95% (Pydantic parse success — not yet measurable
-without a prompt/LLM call to parse).
+structured-output validity target ≥95% (Pydantic parse success). The latter is now
+measurable — the prompt and LLM call exist — but is not yet instrumented: `reasoning.py`
+records a failed attempt in the trace (`agent_llm_attempt_failed`) without aggregating a
+rate. Counting those events against total attempts is the small piece of work that turns
+this from a target into a metric.
 
 ### Governance (IMDA MGF mapping)
 
 | MGF principle | Flight Agent evidence |
 |---|---|
 | Internal governance | `schemas.py`'s `extra="forbid"` Pydantic contracts reject any field an LLM might invent; `domain.py` has zero LLM calls, so ranking logic is 100% reviewable code, not a black box |
-| Human involvement | Empty candidate list (both legs unfeasible) is a legible signal the orchestrator can escalate to the user — not yet wired to an actual escalation path since the orchestrator doesn't exist as working code yet |
+| Human involvement | An empty leg is now named explicitly in the finding's `warnings`, and the orchestrator (working code, running in the graph) receives it. `safeguards.enforce_provenance_disclosure()` additionally forces an unverified-data statement into the plan's own limitations, so a traveller cannot be shown model estimates presented as verified facts. A dedicated human-escalation path is still not built |
 | Operations management | `docs/prompt_specs/flight_agent.md`'s example cases are meant to become permanent `promptfoo`/golden-suite regression cases once the prompt exists, per `llmops_plan.md` §8's "every prompt bug becomes a permanent test case" |
 | Stakeholder communication | `screen_flights()`'s per-rejection reasons are the raw material for the "why this option, not that one" narrative required in the final itinerary output |
 
@@ -124,14 +169,17 @@ backend reasoning agent with no chat UI — see `localfolder/discussion_18Jul.md
 | Biased/stereotyping input (e.g. a preference combining a protected-attribute mention with a stereotyping claim) | Pre-tool | `guardrails.detect_bias()` — two-tier: a bare attribute mention (e.g. a destination cuisine) is `medium` and NOT blocked, only attribute+stereotype combined is `high` and blocks | Built and wired in |
 | Toxic input text | Pre-tool | `guardrails.detect_toxicity()`, keyword-fallback (not the ML `detoxify` backend — not worth the dependency for this scale) | Built and wired in |
 | Biased/stereotyping or toxic LLM output (the rationale itself) | Post-tool | `guardrails.screen_output_text()` — same two detectors as the input side, applied symmetrically to `response.rationale`; flagged output is retried, then falls back, exactly like a hallucination | Built and wired in |
-| Hallucinated flight_id/price in an LLM-generated explanation | Post-tool | `guardrails.validate_grounded_explanation()` — every mentioned id must exist in the actual proposal, enforced in `agent.py` on every call | Built and wired in |
+| Hallucinated flight_id/price in an LLM-generated explanation | Post-tool | `guardrails.validate_grounded_explanation()` — every mentioned id must exist in the actual proposal, enforced in `reasoning.py` on every call | Built and wired in |
 | Rejections silently dropped, undermining the explainability requirement | Post-tool | `domain.screen_flights()` records a reason for every excluded row | Built |
 | Audit trace tampered with after the fact | Post-response | `tracing.verify_hash_chain()` | Built |
 | Overbooking — proposing a flight without enough seats for the whole party | Correctness/availability | Party-size-aware seat filtering in `domain.py` | Built this session (was a real bug: only checked `seats_available > 0`, not against party size) |
-| Renegotiation constraint meant for one leg silently filtering the other leg too | Correctness/availability | `FlightConstraints.direction` scopes a constraint to the leg that triggered it | Built this session (was a real bug found while writing golden scenarios) |
+| Renegotiation constraint meant for one leg silently filtering the other leg too | Correctness/availability | `FlightConstraints.direction` scopes a constraint to the leg that triggered it | Built (was a real bug found while writing golden scenarios) |
+| **Accessibility filter inert against real input** | Correctness/fairness | `domain.needs_wheelchair()` strips the form's `"Traveler 1: "` prefix and matches on substring | Fixed 2026-08-05. The filter tested `"wheelchair" in accessibility_needs` — exact list membership — while the form sends free text (`"wheelchair assistance"`), so it never matched and excluded nothing. The control existed, passed its tests, and protected nobody, because its tests used idealised input rather than the form's actual output. The most consequential defect of the period |
+| **Refinement notes reaching the model unscreened** | Pre-model | `screen_input_text()` now takes `refinement_notes` alongside `preferences` | Fixed 2026-08-05. Free text from the "Refine your plan" panel bypassed the injection/bias/toxicity gates the initial preferences pass through |
+| **Unverified options presented as verified** | Post-response | `safeguards.enforce_provenance_disclosure()` writes the flag into `plan.limitations` and fails the assessment | Fixed 2026-08-05. Found in manual acceptance testing: an agent's "these are model estimates" warning was paraphrased into a milder sentence during orchestrator synthesis. No unit test caught it — each examines one agent's output, never what the orchestrator does with it downstream |
 | Resource exhaustion / abusive request volume | Pre-tool | Rate limiting | **Not built** — currently relies on whatever the orchestrator/API gateway does; Flight Agent has no rate limiting of its own |
 | Inventory data poisoning (once a real DB/ingestion pipeline replaces static seed data) | Pre-tool / data quality | — | **Not applicable yet** — `seed_data.py` is static, version-controlled Python; revisit once real inventory ingestion exists |
-| Fail-closed on internal error (explanation-LLM call throws or hallucinates) | Post-tool | `agent.run_flight_agent()` retries once, then falls back to a deterministic, still-grounded response — never returns ungrounded output, never blocks the tool's own result | Built |
+| Fail-closed on internal error (explanation-LLM call throws or hallucinates) | Post-tool | `reasoning.run_flight_agent()` retries once, then falls back to a deterministic, still-grounded response — never returns ungrounded output, never blocks the tool's own result | Built |
 
 **Resolved 2026-07-20**: the deferred item below was closed by reading
 `localfolder/XRAI/AI Agent 5b Chatbot with Guardrails and Policy (ext yaml file).ipynb`
