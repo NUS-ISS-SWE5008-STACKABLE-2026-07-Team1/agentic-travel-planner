@@ -142,12 +142,15 @@ if (intentForm) {
         }
       }
       submit.disabled = true;
+      conversation.querySelectorAll(".alert").forEach((alert) => alert.remove());
       try {
         const next = await post(intentForm.dataset.resolveEndpoint, {
           extracted: state.extracted, answers
         });
-        card.remove();
-        await advance(next);
+        /* The card is handed to advance() and removed only once the next step
+           has actually succeeded, so a rejected request never costs the
+           traveller the answers they already typed. */
+        await advance(next, card);
       } catch (error) {
         submit.disabled = false;
         showError(error.message);
@@ -157,13 +160,15 @@ if (intentForm) {
 
   /* Complete means we have a TravelRequest; hand it to the unchanged planning
      endpoint and follow it to the chat page. */
-  const advance = async (state) => {
+  const advance = async (state, previousCard = null) => {
     if (!state.complete) {
+      previousCard?.remove();
       renderCard(state);
       return;
     }
-    bubble("intake-bubble-assistant", "Thanks — briefing the specialist agents now.");
     const job = await post(intentForm.dataset.planEndpoint, state.request);
+    previousCard?.remove();
+    bubble("intake-bubble-assistant", "Thanks — briefing the specialist agents now.");
     sessionStorage.setItem("atlas-plan-payload", JSON.stringify(state.request));
     window.location.assign(job.chat_url);
   };

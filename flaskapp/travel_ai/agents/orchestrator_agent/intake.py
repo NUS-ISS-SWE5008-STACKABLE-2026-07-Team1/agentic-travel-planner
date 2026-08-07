@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from flaskapp.travel_ai.agents.base import compact
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_prompt import INTAKE_INSTRUCTION
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
     ExtractedIntent, IntakeExtraction, MissingField,
@@ -59,6 +58,17 @@ def compute_gaps(extracted: ExtractedIntent) -> list[MissingField]:
         for name, label, kind, hint in SCALAR_FIELDS
         if getattr(extracted, name) is None
     ]
+    # An impossible date pair is a question, not an error. Asking again keeps the
+    # traveller in the card with their other answers intact, rather than letting
+    # TravelRequest reject the whole thing after the card is gone.
+    if (
+        extracted.departure_date and extracted.return_date
+        and extracted.return_date < extracted.departure_date
+    ):
+        missing.append(MissingField(
+            name="return_date", label="Return date", input="date",
+            hint=f"Must be on or after {extracted.departure_date.isoformat()}",
+        ))
     # Per-traveller questions only exist once we know how many travellers there are.
     if extracted.travellers is None:
         return missing
