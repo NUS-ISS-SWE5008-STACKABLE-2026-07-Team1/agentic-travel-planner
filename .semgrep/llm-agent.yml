@@ -1,0 +1,156 @@
+# LLM/agent-specific static analysis rules.
+#
+# Semgrep's `--config auto` pulls general Python and Flask rules. Those know
+# about SQL injection and hardcoded passwords; they have no concept of a system
+# prompt, a structured-output contract, or an agent handoff, so they cannot see
+# the bug classes that actually threaten this codebase.
+#
+# Every rule below currently reports ZERO findings. That is the point: each one
+# encodes an invariant the code already satisfies, so the rule fires when
+# someone breaks it, not when someone writes it. Read them as executable
+# versions of the design decisions documented in safeguards.py, guardrails.py
+# and agents/base.py.
+
+rules:
+  - id: llm-untrusted-data-in-system-message
+    languages: [python]
+    severity: ERROR
+    message: >
+      Untrusted data is being interpolated into a SystemMessage. System-role
+      content must be built only from module-level prompt constants. User data
+      belongs in a HumanMessage, explicitly labelled as untrusted — see the
+      pattern in agents/base.py. Mixing the two lets a traveller's free-text
+      preference field edit the agent's instructions.
+    patterns:
+      - pattern-either:
+          - pattern: SystemMessage(content=<... $STATE[...] ...>)
+          - pattern: SystemMessage(content=<... compact(...) ...>)
+          - pattern: SystemMessage(content=f"...{...}...")
+          - pattern: SystemMessage(<... $STATE[...] ...>)
+
+  - id: llm-output-into-execution-sink
+    languages: [python]
+    severity: ERROR
+    message: >
+      Dynamic code execution inside the agent package. Model output and
+      tool-supplied content flow through this code; eval/exec/os.system/
+      subprocess/pickle turn a prompt injection into remote code execution.
+      There is currently no such sink in flaskapp/ and there should not be one.
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+          - pattern: os.system(...)
+          - pattern: os.popen(...)
+          - pattern: subprocess.$FUNC(...)
+          - pattern: pickle.loads(...)
+          - pattern: pickle.load(...)
+          - pattern: yaml.load($X)
+
+  - id: llm-content-rendered-unescaped
+    languages: [python]
+    severity: ERROR
+    message: >
+      Model-generated text reaching a template without escaping. Plan content,
+      rationales and warnings are attacker-influenceable (a traveller controls
+      the free-text fields that produce them), so Markup()/render_template_string()
+      turns model output into stored XSS. Let Jinja autoescape do its job.
+    patterns:
+      - pattern-either:
+          - pattern: Markup(...)
+          - pattern: flask.Markup(...)
+          - pattern: render_template_string(...)
+          - pattern: flask.render_template_string(...)
+
+  - id: llm-invoke-without-structured-output
+    languages: [python]
+    severity: WARNING
+    message: >
+      A chat client is being invoked directly instead of through
+      .with_structured_output(schema, method="json_schema"). Every agent in this
+      codebase returns a validated Pydantic object, which is what makes the
+      downstream safeguards meaningful — an unstructured .invoke() returns free
+      text that no schema constrains and no guardrail can reliably screen.
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  $LLM = ChatOpenAI(...)
+                  ...
+                  $LLM.invoke(...)
+          - patterns:
+              - pattern: |
+                  $LLM = AzureChatOpenAI(...)
+                  ...
+                  $LLM.invoke(...)
+          - patterns:
+              - pattern: |
+                  $LLM = ChatAnthropic(...)
+                  ...
+                  $LLM.invoke(...)
+          - patterns:
+              - pattern: |
+                  $LLM = ChatGoogleGenerativeAI(...)
+                  ...
+                  $LLM.invoke(...)
+
+  - id: llm-provider-tls-verification-disabled
+    languages: [python]
+    severity: ERROR
+    message: >
+      TLS verification disabled on a call path that carries API keys and
+      traveller data to a model provider. Never ship this, even temporarily.
+    patterns:
+      - pattern-either:
+          - pattern: $F(..., verify=False, ...)
+          - pattern: $OBJ.check_hostname = False
+          - pattern: ssl._create_unverified_context(...)
+
+  - id: llm-credential-written-to-log
+    languages: [python]
+    severity: ERROR
+    message: >
+      A credential-shaped value is being logged. config.get_llm_settings()
+      deliberately returns error strings that name which provider config is
+      incomplete without echoing the value; keep that discipline at every log
+      site. CI uploads app.log as a build artifact, so anything logged here is
+      downloadable by anyone with repo read access.
+    patterns:
+      - pattern-either:
+          - pattern: $LOGGER.$LEVEL(..., $CFG["$KEY"], ...)
+          - pattern: $LOGGER.$LEVEL(..., $CFG.get("$KEY"), ...)
+          - pattern: print(..., $CFG["$KEY"], ...)
+          - pattern: print(..., $CFG.get("$KEY"), ...)
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i).*(api_key|apikey|secret|password|token|credential).*
+      # Without this, any two-argument call whose first argument is a
+      # credential-named subscript matches — check_password_hash(
+      # user["password_hash"], password) in database.py is a correct use and was
+      # the rule's only false positive before the constraint was added.
+      - metavariable-regex:
+          metavariable: $LEVEL
+          regex: ^(debug|info|warning|warn|error|exception|critical|log)$
+
+  - id: llm-safeguard-exception-swallowed
+    languages: [python]
+    severity: WARNING
+    message: >
+      A SafetyError is being caught and discarded. These are raised by
+      safeguards.validate_request when a request is oversized, carries a
+      sensitive ranking attribute, or contains instruction-like text. The design
+      is fail-closed — swallowing the exception silently converts a blocked
+      request into an allowed one.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              try:
+                  ...
+              except SafetyError:
+                  pass
+          - pattern: |
+              try:
+                  ...
+              except SafetyError:
+                  ...
+                  return None
