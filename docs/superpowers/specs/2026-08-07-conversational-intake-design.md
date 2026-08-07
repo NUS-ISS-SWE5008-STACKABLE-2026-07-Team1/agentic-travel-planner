@@ -231,7 +231,8 @@ at intake time.
 | Model call times out | 502 `retryable: true`, matching `create_travel_plan` |
 | Sensitive key in `answers` | 422 listing the rejected keys |
 | Answer fails type validation | 422; the card re-renders with that field still listed as a gap |
-| `complete` payload rejected by `validate_request` | The existing 422 from `/travel-plans` surfaces in the intake area |
+| Return date before departure date | Reported as a gap on `return_date`, hinted with the departure date. Never reaches `/travel-plans` |
+| `complete` payload rejected by `validate_request` | The 422 surfaces in the intake area **and the card stays on screen with its answers**; only a successful submission removes it |
 
 ## Deviations from the design, as built
 

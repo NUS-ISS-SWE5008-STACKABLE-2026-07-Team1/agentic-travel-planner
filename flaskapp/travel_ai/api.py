@@ -30,6 +30,17 @@ from flaskapp.config import get_llm_settings
 travel_api_bp = Blueprint("travel_api", __name__)
 
 
+def validation_details(exc: ValidationError) -> list[dict]:
+    """JSON-safe validation errors.
+
+    `ValidationError.errors()` keeps the original exception object in
+    `ctx["error"]` for `model_validator` failures, so passing it to `jsonify`
+    raises TypeError and the caller receives Flask's HTML error page instead of
+    the 422 it is waiting for. `.json()` renders the same errors as text.
+    """
+    return json.loads(exc.json())
+
+
 @travel_api_bp.before_request
 def require_browser_session():
     """Protect API spend and traces with the current browser session."""
@@ -60,7 +71,7 @@ def create_travel_plan():
             chat_url=f"/chat/{job.request_id}",
         ), 202
     except (ValidationError, SafetyError) as exc:
-        details = exc.errors() if isinstance(exc, ValidationError) else [{"msg": str(exc)}]
+        details = validation_details(exc) if isinstance(exc, ValidationError) else [{"msg": str(exc)}]
         return jsonify(error="Invalid travel request", details=details), 422
     except Exception:
         current_app.logger.exception("Travel planning failed")
@@ -81,7 +92,7 @@ def create_travel_intent():
         return jsonify(error=str(exc)), 422
     except ValidationError as exc:
         return jsonify(error="The assistant could not read that request. Try the detailed form.",
-                       details=exc.errors()), 422
+                       details=validation_details(exc)), 422
     except Exception:
         current_app.logger.exception("Travel intent extraction failed")
         return jsonify(error="The assistant is unavailable. Please retry.", retryable=True), 502
@@ -99,7 +110,7 @@ def resolve_travel_intent():
     except SafetyError as exc:
         return jsonify(error=str(exc)), 422
     except ValidationError as exc:
-        return jsonify(error="Some answers could not be used", details=exc.errors()), 422
+        return jsonify(error="Some answers could not be used", details=validation_details(exc)), 422
     return jsonify(_intent_response(extracted, str(payload.get("question") or "")))
 
 

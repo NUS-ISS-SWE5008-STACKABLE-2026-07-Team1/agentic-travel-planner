@@ -116,3 +116,24 @@ def test_payload_defaults_currency_and_risk_tolerance():
     payload = to_request_payload(ExtractedIntent.model_validate({**COMPLETE, "currency": None}))
     assert payload["currency"] == "SGD"
     assert payload["risk_tolerance"] == "medium"
+
+
+def test_a_return_before_departure_is_asked_again_rather_than_sent_on():
+    """An impossible date pair must not reach the planner.
+
+    Reporting it as a gap keeps the traveller in the card with their other
+    answers intact, instead of failing validation after the card is gone.
+    """
+    extracted = ExtractedIntent.model_validate({
+        **COMPLETE, "departure_date": "2026-10-24", "return_date": "2026-10-10",
+    })
+    missing = compute_gaps(extracted)
+    assert keys(missing) == ["return_date"]
+    assert "on or after" in missing[0].hint
+
+
+def test_same_day_return_is_accepted():
+    extracted = ExtractedIntent.model_validate({
+        **COMPLETE, "departure_date": "2026-10-10", "return_date": "2026-10-10",
+    })
+    assert compute_gaps(extracted) == []
