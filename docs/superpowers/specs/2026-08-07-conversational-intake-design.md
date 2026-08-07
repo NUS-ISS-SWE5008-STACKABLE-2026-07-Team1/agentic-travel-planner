@@ -1,7 +1,12 @@
 # Conversational trip intake
 
-Status: approved design, not yet implemented
+Status: implemented
 Date: 2026-08-07
+
+Three things changed during implementation and are recorded in "Deviations"
+below: hints are static rather than model-written, provider-client construction
+was extracted to `travel_ai/llm.py`, and `TestConfig` had to be made
+credential-free.
 
 ## Problem
 
@@ -227,6 +232,28 @@ at intake time.
 | Sensitive key in `answers` | 422 listing the rejected keys |
 | Answer fails type validation | 422; the card re-renders with that field still listed as a gap |
 | `complete` payload rejected by `validate_request` | The existing 422 from `/travel-plans` surfaces in the intake area |
+
+## Deviations from the design, as built
+
+- **`MissingField.hint` is static helper text, not model-written.** The design
+  imagined a hint like "you mentioned about 2 weeks in October". Sourcing that
+  from the model would mean trusting it to describe its own omissions. The
+  acknowledgement sentence already carries that context — the live run produced
+  "You're planning a trip to Tokyo with your partner in October for about two
+  weeks, correct?" — so hints stayed as fixed guidance such as "Leave blank if
+  none".
+- **`flaskapp/travel_ai/llm.py` is new.** `TravelPlanningService.create_plan`
+  built its chat client through an eight-branch inline conditional. Intake needs
+  the same client, so that block moved to `build_llm` and both callers use it.
+  Adding a provider is now one edit rather than two.
+- **`tests/test_api.py::TestConfig` now clears every provider credential.** It
+  cleared only `AZURE_OPENAI_API_KEY`, so `test_plan_endpoint_requires_key`
+  passed or failed depending on whether the developer had a working `.env` —
+  it reads the process environment at import. Unrelated to intake, but it made
+  the suite red as soon as the app was configured to run.
+- **`question` round-trips through the client.** `/resolve` echoes back whatever
+  question it is given rather than regenerating one, which is what keeps that
+  endpoint free of model calls.
 
 ## Known limitations
 

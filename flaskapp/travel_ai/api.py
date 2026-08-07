@@ -9,8 +9,17 @@ from flask import Blueprint, current_app, jsonify, request, session
 from pydantic import ValidationError
 from werkzeug.security import generate_password_hash
 
-from flaskapp.travel_ai.safeguards import SafetyError, validate_request
+from flaskapp.travel_ai.safeguards import (
+    SafetyError, screen_answers, screen_prompt, validate_request,
+)
 from flaskapp.travel_ai.jobs import cancel_job, get_job, submit_plan
+from flaskapp.travel_ai.llm import build_llm
+from flaskapp.travel_ai.agents.orchestrator_agent.intake import (
+    compute_gaps, extract_intent, merge_answers, to_request_payload,
+)
+from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
+    ExtractedIntent, IntentResponse,
+)
 from flaskapp.database import (
     get_admin_activity, get_admin_token_summary, get_admins, get_platform_dashboard,
     get_recent_feedback, get_system_logs, register_admin, save_plan_feedback,
@@ -56,6 +65,55 @@ def create_travel_plan():
     except Exception:
         current_app.logger.exception("Travel planning failed")
         return jsonify(error="Travel planning failed", retryable=True), 502
+
+
+@travel_api_bp.post("/travel-intents")
+def create_travel_intent():
+    """Read a free-text trip request and report what is still missing."""
+    llm_settings, configuration_error = get_llm_settings(current_app.config)
+    if configuration_error:
+        return jsonify(error=configuration_error), 503
+    payload = request.get_json(silent=True) or {}
+    try:
+        prompt = screen_prompt(payload.get("prompt"), current_app.config["MAX_INPUT_CHARS"])
+        extraction = extract_intent(build_llm(**llm_settings), prompt)
+    except SafetyError as exc:
+        return jsonify(error=str(exc)), 422
+    except ValidationError as exc:
+        return jsonify(error="The assistant could not read that request. Try the detailed form.",
+                       details=exc.errors()), 422
+    except Exception:
+        current_app.logger.exception("Travel intent extraction failed")
+        return jsonify(error="The assistant is unavailable. Please retry.", retryable=True), 502
+    return jsonify(_intent_response(extraction.intent, extraction.question))
+
+
+@travel_api_bp.post("/travel-intents/resolve")
+def resolve_travel_intent():
+    """Apply the traveller's answers. Deterministic: no model call happens here."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        answers = screen_answers(payload.get("answers") or {})
+        extracted = ExtractedIntent.model_validate(payload.get("extracted") or {})
+        extracted = merge_answers(extracted, answers)
+    except SafetyError as exc:
+        return jsonify(error=str(exc)), 422
+    except ValidationError as exc:
+        return jsonify(error="Some answers could not be used", details=exc.errors()), 422
+    return jsonify(_intent_response(extracted, str(payload.get("question") or "")))
+
+
+def _intent_response(extracted, question: str):
+    """Shared reply shape for both intake endpoints."""
+    missing = compute_gaps(extracted)
+    complete = not missing
+    return IntentResponse(
+        complete=complete,
+        question=question,
+        extracted=extracted,
+        missing=missing,
+        request=to_request_payload(extracted) if complete else None,
+    ).model_dump(mode="json")
 
 
 @travel_api_bp.get("/travel-plans/<uuid:request_id>/status")

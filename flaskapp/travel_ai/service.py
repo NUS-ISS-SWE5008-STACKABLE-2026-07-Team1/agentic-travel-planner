@@ -5,9 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
-
 from flaskapp.travel_ai.graph import SPECIALISTS, build_travel_graph
+from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.a2a import request_message
 from flaskapp.travel_ai.safeguards import assess_plan
 from flaskapp.travel_ai.schemas import PlanResponse, TravelRequest
@@ -44,28 +43,11 @@ class TravelPlanningService:
             "has_accessibility_needs": bool(request.accessibility_needs),
             "preference_count": len(request.preferences),
         })
-        client_options = {"api_key": self.api_key, "timeout": self.timeout, "max_retries": 2}
-        if self.temperature is not None:
-            client_options["temperature"] = self.temperature
-        if self.provider == "azure_openai":
-            llm = AzureChatOpenAI(**client_options, azure_endpoint=self.endpoint,
-                                  azure_deployment=self.model, api_version=self.api_version)
-        elif self.provider in {"openai", "deepseek", "xai", "meta", "openai_compatible"}:
-            llm = ChatOpenAI(**client_options, model=self.model, base_url=self.base_url)
-        elif self.provider == "anthropic":
-            from langchain_anthropic import ChatAnthropic
-            llm = ChatAnthropic(**client_options, model=self.model)
-        elif self.provider == "google":
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            google_options = {
-                "google_api_key": self.api_key, "model": self.model,
-                "timeout": self.timeout, "max_retries": 2,
-            }
-            if self.temperature is not None:
-                google_options["temperature"] = self.temperature
-            llm = ChatGoogleGenerativeAI(**google_options)
-        else:
-            raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        llm = build_llm(
+            provider=self.provider, api_key=self.api_key, model=self.model,
+            temperature=self.temperature, timeout=self.timeout, endpoint=self.endpoint,
+            api_version=self.api_version, base_url=self.base_url,
+        )
         graph = build_travel_graph(llm, tracer, self.cancel_event)
         messages = [
             request_message(

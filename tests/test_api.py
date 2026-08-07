@@ -4,9 +4,26 @@ from flaskapp.database import connect, get_platform_dashboard
 
 
 class TestConfig(Config):
+    """Credential-free by construction.
+
+    Config reads the process environment at import, so a developer with a working
+    .env would otherwise see 'no credential configured' tests pass or fail
+    depending on their own machine. Every provider key is cleared here so the
+    unconfigured path is what the suite actually exercises.
+    """
+
     TESTING = True
     WTF_CSRF_ENABLED = False
+    LLM_PROVIDER = "auto"
     AZURE_OPENAI_API_KEY = None
+    AZURE_OPENAI_ENDPOINT = None
+    OPENAI_API_KEY = None
+    ANTHROPIC_API_KEY = None
+    GOOGLE_API_KEY = None
+    DEEPSEEK_API_KEY = None
+    XAI_API_KEY = None
+    META_API_KEY = None
+    LLM_API_KEY = None
 
 
 def test_health_page():
