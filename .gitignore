@@ -1,6 +1,7 @@
 .env
 .env.local
 .env.secrets
+.ebv.secrets
 crediential.env
 .venv/
 __pycache__/
