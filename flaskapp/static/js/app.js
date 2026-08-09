@@ -39,7 +39,8 @@ document.addEventListener("submit", (event) => {
   const form = event.target;
   const asynchronousForms = new Set([
     "travel-plan-form", "refinement-form", "chat-refinement-form",
-    "negative-feedback-form", "admin-registration-form"
+    "negative-feedback-form", "admin-registration-form",
+    "intent-form", "intake-card-form"
   ]);
   if (!asynchronousForms.has(form.id) && form.checkValidity()) {
     showPageLoader();
