@@ -14,6 +14,12 @@ class TestConfig(Config):
 
     TESTING = True
     WTF_CSRF_ENABLED = False
+    LOGIN_EMAIL = "demo@example.com"
+    LOGIN_PASSWORD_HASH = (
+        "scrypt:32768:8:1$99T3BfVwYO8CnqNC$"
+        "c85a15f2f167616564085724c37c79fc2ad151e306e5ec0414759a0f8a6eba28"
+        "a179494a8d39bfd838986ebbb2daa4d0586da0bee718d299fce4a89a7de45a95"
+    )
     LLM_PROVIDER = "auto"
     AZURE_OPENAI_API_KEY = None
     AZURE_OPENAI_ENDPOINT = None
@@ -50,6 +56,20 @@ def test_valid_login_redirects_to_main():
     assert b"Traveller" in main.data
     assert b"Select departure country" in main.data
     assert b"Select destination country" in main.data
+    assert b'id="origin_place"' in main.data
+    assert b'id="destination_place"' in main.data
+
+
+def test_manual_form_defaults_origin_to_signed_in_users_country():
+    client = create_app(TestConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_country"] = "Singapore"
+    response = client.get("/main")
+    assert response.status_code == 200
+    assert b'<option value="Singapore" selected>Singapore</option>' in response.data
+    assert b'id="origin_place" name="origin_place"' in response.data
+    assert b'name="traveller_preference"' not in response.data  # Rendered dynamically by JS.
 
 
 def test_anonymous_main_redirects_to_login():
@@ -110,6 +130,31 @@ def test_chat_page_requires_login_and_renders_for_user():
     assert b"cancel-and-home" in response.data
     assert b"Stop planning and return home?" in response.data
     assert b"Keep planning" in response.data
+
+
+def test_intake_chat_requires_login_and_hosts_orchestrator_clarification():
+    client = create_app(TestConfig).test_client()
+    assert client.get("/chat/intake").status_code == 302
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_name"] = "Alicia"
+    response = client.get("/chat/intake")
+    assert response.status_code == 200
+    assert b'data-auto-start="true"' in response.data
+    assert b"Preparing your request" in response.data
+    assert b"Travel assistant" in response.data
+    assert b"/api/v1/travel-intents/resolve" in response.data
+
+
+def test_admin_button_is_available_on_both_chat_modes():
+    client = create_app(TestConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_email"] = TestConfig.ADMIN_EMAIL
+    intake = client.get("/chat/intake")
+    planning = client.get("/chat/11111111-1111-4111-8111-111111111111")
+    assert b'href="/admin"' in intake.data
+    assert b'href="/admin"' in planning.data
 
 
 def test_cancel_endpoint_cancels_authenticated_users_job(monkeypatch):

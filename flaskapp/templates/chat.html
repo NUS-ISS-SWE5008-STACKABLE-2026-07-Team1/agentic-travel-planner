@@ -13,14 +13,59 @@
     <div class="container py-2">
       <span class="navbar-brand brand"><span class="brand-mark">✦</span><span>Atlas AI Travel</span></span>
       <div class="d-flex align-items-center gap-3">
+        {% if is_admin %}<a class="btn btn-outline-primary btn-sm" href="{{ url_for('pages.admin') }}" target="_blank" rel="noopener noreferrer">Admin</a>{% endif %}
         <span class="small text-body-secondary d-none d-sm-inline">{{ user_name }}</span>
+        {% if intake_mode %}
+        <a class="btn btn-outline-primary btn-sm" href="{{ url_for('pages.main') }}">Home</a>
+        {% else %}
         <button id="cancel-and-home" class="btn btn-outline-primary btn-sm" type="button"
                 data-cancel-url="{{ url_for('travel_api.cancel_travel_plan', request_id=request_id) }}"
                 data-home-url="{{ url_for('pages.main') }}">Home</button>
+        {% endif %}
       </div>
     </div>
   </nav>
   <main class="container py-5">
+    {% if intake_mode %}
+    <div id="chat-intake">
+      <div class="row g-4">
+        <section class="col-lg-5" aria-labelledby="activity-heading">
+          <div class="card border-0 shadow-sm sticky-lg-top agent-activity-card">
+            <div class="card-body p-4">
+              <div class="d-flex align-items-start gap-3 mb-3">
+                <div class="agent-thinking" aria-hidden="true">✦</div>
+                <div><h1 id="activity-heading" class="h5 mb-1">Preparing your request</h1><p class="small text-body-secondary mb-0">The orchestrator is checking that the specialist agents have everything they need.</p></div>
+              </div>
+              <ol class="agent-activity mb-0">
+                <li class="mb-3"><strong>Understand your trip</strong><div class="small text-body-secondary">Read the details you provided.</div></li>
+                <li class="mb-3"><strong>Complete required information</strong><div class="small text-body-secondary">Ask only for details that are still missing.</div></li>
+                <li><strong>Brief the specialist agents</strong><div class="small text-body-secondary">Start planning once your request is complete.</div></li>
+              </ol>
+            </div>
+          </div>
+        </section>
+        <section class="col-lg-7" aria-labelledby="result-heading">
+          <div class="card border-0 shadow-sm travel-assistant-card">
+            <div class="card-body p-4 travel-assistant-body">
+              <h2 id="result-heading" class="h5 mb-1">Travel assistant</h2>
+              <div id="intent-conversation" class="intent-conversation mt-3" aria-live="polite"></div>
+              <form id="intent-form" class="chat-composer mt-3 pt-3 border-top"
+                    data-auto-start="true"
+                    data-intent-endpoint="{{ url_for('travel_api.create_travel_intent') }}"
+                    data-resolve-endpoint="{{ url_for('travel_api.resolve_travel_intent') }}"
+                    data-plan-endpoint="{{ url_for('travel_api.create_travel_plan') }}">
+                <label class="form-label" for="intent-prompt">Tell me about your trip</label>
+                <div class="d-flex gap-2">
+                  <textarea class="form-control" id="intent-prompt" name="prompt" rows="2" maxlength="2000" required placeholder="Describe your trip"></textarea>
+                  <button class="btn btn-primary align-self-end" type="submit"><span class="button-label">Send</span><span class="spinner-border spinner-border-sm ms-2 d-none" aria-hidden="true"></span></button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+    {% else %}
     <div id="agent-chat"
          data-status-url="{{ url_for('travel_api.get_travel_plan_status', request_id=request_id) }}"
          data-trace-url="{{ url_for('travel_api.get_trace', request_id=request_id) }}"
@@ -81,7 +126,9 @@
         </section>
       </div>
     </div>
+    {% endif %}
   </main>
+  {% if not intake_mode %}
   <dialog id="cancel-warning" class="cancel-warning-dialog" aria-labelledby="cancel-warning-title">
     <div class="p-4">
       <div class="warning-icon mb-3" aria-hidden="true">!</div>
@@ -93,6 +140,9 @@
       </div>
     </div>
   </dialog>
+  {% endif %}
+  {% if intake_mode %}<script type="application/json" id="country-options">{{ countries|tojson }}</script>{% endif %}
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  {% if intake_mode %}<script src="{{ url_for('static', filename='js/intake.js') }}"></script>{% endif %}
 </body>
 </html>

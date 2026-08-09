@@ -17,6 +17,8 @@ class TravelRequest(BaseModel):
 
     origin: str = Field(min_length=2, max_length=100)
     destination: str = Field(min_length=2, max_length=100)
+    origin_place: str | None = Field(default=None, min_length=2, max_length=100)
+    destination_place: str | None = Field(default=None, min_length=2, max_length=100)
     departure_date: date
     return_date: date
     travellers: int = Field(default=1, ge=1, le=20)
