@@ -4,9 +4,34 @@ from flaskapp.database import connect, get_platform_dashboard
 
 
 class TestConfig(Config):
+    """Credential-free by construction.
+
+    Config reads the process environment at import, so a developer with a working
+    .env would otherwise see 'no credential configured' tests pass or fail
+    depending on their own machine. Every provider key is cleared here so the
+    unconfigured path is what the suite actually exercises.
+    """
+
     TESTING = True
     WTF_CSRF_ENABLED = False
+    LLM_PROVIDER = "auto"
     AZURE_OPENAI_API_KEY = None
+    AZURE_OPENAI_ENDPOINT = None
+    OPENAI_API_KEY = None
+    ANTHROPIC_API_KEY = None
+    GOOGLE_API_KEY = None
+    DEEPSEEK_API_KEY = None
+    XAI_API_KEY = None
+    META_API_KEY = None
+    LLM_API_KEY = None
+
+
+class ConfiguredConfig(TestConfig):
+    """A credential is present, so requests reach validation instead of stopping at 503."""
+
+    LLM_PROVIDER = "openai"
+    LLM_MODEL = "gpt-4.1-mini"
+    OPENAI_API_KEY = "test-key-not-used"
 
 
 def test_health_page():
@@ -237,3 +262,34 @@ def test_registration_rejects_country_outside_selection_list(tmp_path):
     })
     assert response.status_code == 200
     assert b"Not a valid choice" in response.data
+
+
+VALID_PLAN = {
+    "origin": "Singapore", "destination": "Tokyo",
+    "departure_date": "2026-10-05", "return_date": "2026-10-19",
+    "travellers": 1, "traveller_ages": [34], "traveller_genders": ["male"],
+    "traveller_accessibility_needs": [[]], "budget": 8000.0, "currency": "SGD",
+}
+
+
+def test_cross_field_validation_error_returns_json_not_an_html_error_page(monkeypatch):
+    """A model_validator failure must serialize.
+
+    Pydantic puts the raw ValueError object into ctx["error"] for validator
+    failures, so jsonify(exc.errors()) raised TypeError and Flask served its HTML
+    error page. The browser then failed on "Unexpected token '<'" instead of
+    showing the traveller what was wrong with their dates.
+    """
+    monkeypatch.setattr("flaskapp.travel_ai.api.submit_plan", lambda *_args: None)
+    client = create_app(ConfiguredConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+
+    response = client.post("/api/v1/travel-plans", json={
+        **VALID_PLAN, "departure_date": "2026-10-19", "return_date": "2026-10-05",
+    })
+
+    assert response.status_code == 422
+    assert response.is_json
+    body = response.get_json()
+    assert "return_date must be on or after departure_date" in str(body["details"])

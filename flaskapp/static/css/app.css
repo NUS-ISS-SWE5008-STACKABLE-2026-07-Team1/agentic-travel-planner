@@ -147,3 +147,31 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
   .ai-loader-spark, .ai-loader-orbit, .planning-travel-icon { animation: none !important; }
 }
+
+/* Conversational intake */
+.intake-bubble {
+  max-width: 85%;
+  padding: 0.75rem 1rem;
+  border-radius: 1rem;
+  margin-bottom: 0.75rem;
+  line-height: 1.5;
+}
+.intake-bubble-user {
+  margin-left: auto;
+  background: var(--bs-primary, #0d6efd);
+  color: #fff;
+  border-bottom-right-radius: 0.25rem;
+}
+.intake-bubble-assistant {
+  background: rgba(13, 110, 253, 0.08);
+  border-bottom-left-radius: 0.25rem;
+}
+.intake-card { background: #fff; }
+.manual-planner > summary {
+  cursor: pointer;
+  padding: 0.75rem 1rem;
+  border: 1px dashed rgba(0, 0, 0, 0.2);
+  border-radius: 0.75rem;
+  color: var(--bs-secondary-color, #6c757d);
+}
+.manual-planner > summary:hover { border-color: var(--bs-primary, #0d6efd); }
