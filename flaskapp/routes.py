@@ -104,7 +104,20 @@ def main():
 @login_required
 def chat(request_id: UUID):
     return render_template(
-        "chat.html", user_name=session.get("user_name", "Traveller"), request_id=request_id
+        "chat.html", user_name=session.get("user_name", "Traveller"), request_id=request_id,
+        intake_mode=False,
+        is_admin=is_admin_email(current_app.config, session.get("user_email")),
+    )
+
+
+@pages_bp.get("/chat/intake")
+@login_required
+def intake_chat():
+    """Host clarification before a complete request is sent to specialist agents."""
+    return render_template(
+        "chat.html", user_name=session.get("user_name", "Traveller"), countries=COUNTRIES,
+        intake_mode=True,
+        is_admin=is_admin_email(current_app.config, session.get("user_email")),
     )
 
 

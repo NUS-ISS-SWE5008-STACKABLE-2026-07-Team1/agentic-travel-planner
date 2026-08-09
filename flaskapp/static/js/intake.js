@@ -7,6 +7,7 @@
 const intentForm = document.querySelector("#intent-form");
 
 if (intentForm) {
+  const isIntakeChat = intentForm.dataset.autoStart === "true";
   const conversation = document.querySelector("#intent-conversation");
   const promptInput = document.querySelector("#intent-prompt");
   const submitButton = intentForm.querySelector("button[type='submit']");
@@ -18,6 +19,9 @@ if (intentForm) {
   ];
 
   const csrf = () => document.querySelector("meta[name='csrf-token']").content;
+  const scrollConversationToLatest = () => {
+    conversation.scrollTop = conversation.scrollHeight;
+  };
 
   const post = async (url, body) => {
     const response = await fetch(url, {
@@ -35,6 +39,7 @@ if (intentForm) {
     element.className = `intake-bubble ${className}`;
     element.textContent = text;
     conversation.append(element);
+    scrollConversationToLatest();
     return element;
   };
 
@@ -128,6 +133,7 @@ if (intentForm) {
     body.append(actions);
     card.append(body);
     conversation.append(card);
+    scrollConversationToLatest();
     card.querySelector("input, select")?.focus();
 
     card.addEventListener("submit", async (event) => {
@@ -173,16 +179,14 @@ if (intentForm) {
     window.location.assign(job.chat_url);
   };
 
-  intentForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (!intentForm.reportValidity()) return;
+  const submitPrompt = async (prompt) => {
     conversation.replaceChildren();
     submitButton.disabled = true;
     spinner.classList.remove("d-none");
     try {
-      bubble("intake-bubble-user", promptInput.value.trim());
+      bubble("intake-bubble-user", prompt);
       const state = await post(intentForm.dataset.intentEndpoint, {
-        prompt: promptInput.value.trim()
+        prompt
       });
       if (state.question) bubble("intake-bubble-assistant", state.question);
       await advance(state);
@@ -192,5 +196,28 @@ if (intentForm) {
       submitButton.disabled = false;
       spinner.classList.add("d-none");
     }
+  };
+
+  intentForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!intentForm.reportValidity()) return;
+    const prompt = promptInput.value.trim();
+    if (!isIntakeChat) {
+      sessionStorage.setItem("atlas-intake-prompt", prompt);
+      window.location.assign(intentForm.dataset.chatUrl);
+      return;
+    }
+    await submitPrompt(prompt);
   });
+
+  if (isIntakeChat) {
+    const initialPrompt = sessionStorage.getItem("atlas-intake-prompt");
+    if (initialPrompt) {
+      sessionStorage.removeItem("atlas-intake-prompt");
+      promptInput.value = initialPrompt;
+      submitPrompt(initialPrompt);
+    } else {
+      promptInput.focus();
+    }
+  }
 }

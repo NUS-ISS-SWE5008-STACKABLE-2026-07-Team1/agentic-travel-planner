@@ -62,6 +62,10 @@ document.querySelectorAll("[data-password-toggle]").forEach((button) => {
 
 const planner = document.querySelector("#travel-plan-form");
 if (planner) {
+  const originCountry = planner.querySelector("#origin");
+  const destinationCountry = planner.querySelector("#destination");
+  const originPlace = planner.querySelector("#origin_place");
+  const destinationPlace = planner.querySelector("#destination_place");
   const travelersInput = planner.querySelector("#travellers");
   const travelerDetails = planner.querySelector("#traveler-details");
   const addTravelerButton = planner.querySelector("#add-traveler");
@@ -73,6 +77,15 @@ if (planner) {
   const departureDate = planner.querySelector("#departure_date");
   const returnDate = planner.querySelector("#return_date");
   let latestPayload = null;
+
+  const syncPlaceInput = (country, place) => {
+    place.disabled = !country.value;
+    if (place.disabled) place.value = "";
+  };
+  originCountry.addEventListener("change", () => syncPlaceInput(originCountry, originPlace));
+  destinationCountry.addEventListener("change", () => syncPlaceInput(destinationCountry, destinationPlace));
+  syncPlaceInput(originCountry, originPlace);
+  syncPlaceInput(destinationCountry, destinationPlace);
 
   departureDate.addEventListener("change", () => {
     if (!departureDate.value) return;
@@ -86,7 +99,7 @@ if (planner) {
   const renderTravelerFields = () => {
     const previousAges = [...travelerDetails.querySelectorAll("[name='traveller_age']")].map((field) => field.value);
     const previousGenders = [...travelerDetails.querySelectorAll("[name='traveller_gender']")].map((field) => field.value);
-    const previousAccessibility = [...travelerDetails.querySelectorAll("[name='traveller_accessibility']")].map((field) => field.value);
+    const previousPreferences = [...travelerDetails.querySelectorAll("[name='traveller_preference']")].map((field) => field.value);
     const count = Math.min(20, Math.max(1, Number(travelersInput.value) || 1));
     travelerDetails.replaceChildren();
     for (let index = 0; index < count; index += 1) {
@@ -112,15 +125,15 @@ if (planner) {
               </select>
             </div>
             <div class="col-12 mt-3">
-              <label class="form-label" for="traveller-accessibility-${index}">Accessibility needs <span class="text-body-secondary fw-normal">(optional)</span></label>
-              <input class="form-control" id="traveller-accessibility-${index}" name="traveller_accessibility" placeholder="Step-free access, low walking distance">
-              <div class="form-text">Separate needs with commas. These are treated as hard constraints.</div>
+              <label class="form-label" for="traveller-preference-${index}">Preferences and accessibility needs <span class="text-body-secondary fw-normal">(optional)</span></label>
+              <textarea class="form-control" id="traveller-preference-${index}" name="traveller_preference" rows="3" maxlength="500" placeholder="Window seat, vegetarian meals, quiet room, step-free access"></textarea>
+              <div class="form-text">Add any preferences or accessibility requirements specific to this traveler.</div>
             </div>
           </div>
         </div>`;
       wrapper.querySelector("[name='traveller_age']").value = previousAges[index] || "";
       wrapper.querySelector("[name='traveller_gender']").value = previousGenders[index] || "";
-      wrapper.querySelector("[name='traveller_accessibility']").value = previousAccessibility[index] || "";
+      wrapper.querySelector("[name='traveller_preference']").value = previousPreferences[index] || "";
       travelerDetails.append(wrapper);
     }
     addTravelerButton.disabled = count >= 20;
@@ -129,21 +142,25 @@ if (planner) {
   const buildPayload = () => {
     const data = new FormData(planner);
     const commaList = (name) => String(data.get(name) || "").split(",").map((item) => item.trim()).filter(Boolean);
-    const perTravelerAccessibility = data.getAll("traveller_accessibility").map((value) =>
-      String(value).split(",").map((item) => item.trim()).filter(Boolean)
-    );
-    const combinedAccessibility = perTravelerAccessibility.flatMap((needs, index) =>
-      needs.map((need) => `Traveler ${index + 1}: ${need}`)
-    );
+    const travelerPreferences = data.getAll("traveller_preference")
+      .map((value) => String(value).trim());
+    const preferences = [
+      ...commaList("preferences"),
+      ...travelerPreferences.flatMap((preference, index) =>
+        preference ? [`Traveler ${index + 1}: ${preference}`] : []
+      )
+    ];
     return {
       origin: data.get("origin"), destination: data.get("destination"),
+      origin_place: String(data.get("origin_place") || "").trim() || null,
+      destination_place: String(data.get("destination_place") || "").trim() || null,
       departure_date: data.get("departure_date"), return_date: data.get("return_date"),
       travellers: Number(data.get("travellers")), currency: "SGD",
       traveller_ages: data.getAll("traveller_age").map(Number),
       traveller_genders: data.getAll("traveller_gender"),
-      traveller_accessibility_needs: perTravelerAccessibility,
+      traveller_accessibility_needs: travelerPreferences.map(() => []),
       budget: Number(data.get("budget")),
-      preferences: commaList("preferences"), accessibility_needs: combinedAccessibility,
+      preferences, accessibility_needs: [],
       refinement_notes: [...refinementNotes]
     };
   };
@@ -192,10 +209,10 @@ if (planner) {
     const index = Number(removeButton.dataset.index);
     const ageFields = [...travelerDetails.querySelectorAll("[name='traveller_age']")];
     const genderFields = [...travelerDetails.querySelectorAll("[name='traveller_gender']")];
-    const accessibilityFields = [...travelerDetails.querySelectorAll("[name='traveller_accessibility']")];
+    const preferenceFields = [...travelerDetails.querySelectorAll("[name='traveller_preference']")];
     ageFields[index].removeAttribute("name");
     genderFields[index].removeAttribute("name");
-    accessibilityFields[index].removeAttribute("name");
+    preferenceFields[index].removeAttribute("name");
     removeButton.closest(".col-md-6").remove();
     travelersInput.value = String(Math.max(1, Number(travelersInput.value) - 1));
     renderTravelerFields();
