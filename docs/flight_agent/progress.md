@@ -55,7 +55,7 @@ survivors: "why not that flight" is a question a traveller can reasonably ask.
 |---|---|
 | `agent.py` | The LangGraph node — deterministic when inventory covers the trip, fallback otherwise |
 | `adapter.py` | Translation between the team's `TravelRequest` and the flight contracts |
-| `airports.py` | Country → primary airport resolution |
+| `airports.py` | Country + city → airport resolution (data lives in `flaskapp/places.py`) |
 
 `adapter.py` is the only module that knows both schemas. As other agents evolve the
 shared contract, the changes land in one file rather than throughout the domain logic.
@@ -294,11 +294,14 @@ single agent's output rather than what the orchestrator does with it downstream.
 
 ## 6. Known limitations
 
-1. **Inventory is static.** 104 rows, five routes (SIN ↔ NRT/LHR/SYD/BKK/HKG), dates
-   2026-08-25 to 2026-10-08. Everything else takes the fallback path.
-2. **One airport per country.** The intake form collects countries, so `airports.py`
-   reduces each to a single gateway — wrong for a traveller wanting Osaka rather than
-   Tokyo. Collecting a city or airport at intake is the real fix.
+1. **Inventory is static.** 284 rows, SIN-origin hub-and-spoke across 18 airports,
+   dates 2026-08-24 to 2026-10-08. Everything else takes the fallback path.
+2. ~~**One airport per country.**~~ **Resolved.** Intake now collects country + city
+   (`flaskapp/places.py`, 253 cities / 283 airports), and a city resolves to *every*
+   airport serving it, so a Tokyo trip ranks Haneda and Narita together. Country-only
+   API requests still work by falling back to the country's main gateway, and that
+   assumption is disclosed in the finding rather than applied silently. See
+   [docs/places_contract.md](../places_contract.md).
 3. **No live model in CI.** See §4.
 4. **Relaxation context-sensitivity is unproven.** `demo_multi_gap_relaxation.py` runs a
    family and a solo traveller through an identical dual-gap scenario to test whether the

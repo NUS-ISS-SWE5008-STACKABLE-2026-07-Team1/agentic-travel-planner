@@ -22,6 +22,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 RNG = random.Random(42)
+# City routes were added after the original 100 rows and draw from their own
+# stream. Sharing `RNG` would shift every subsequent draw and rewrite all 100
+# existing rows on the next regeneration — a diff no reviewer could check, and
+# a silent change to data other tests read.
+CITY_RNG = random.Random(2026)
 
 ORIGIN = "SIN"
 ORIGIN_OFFSET = "+08:00"
@@ -47,6 +52,55 @@ TRIP_PLANS = {
     "BKK": [("2026-08-29", 3), ("2026-09-06", 4), ("2026-09-13", 3), ("2026-09-19", 4), ("2026-09-27", 3)],
     "HKG": [("2026-08-30", 4), ("2026-09-08", 3), ("2026-09-16", 4), ("2026-09-22", 3), ("2026-09-29", 4)],
 }
+
+# --- City-level routes ------------------------------------------------------
+# Added when the intake form moved from countries to cities. Two kinds:
+#
+# 1. **Second airports for cities already covered** (HND for Tokyo, LGW for
+#    London, DMK for Bangkok). These deliberately reuse the PRIMARY airport's
+#    departure dates so that a search for "Tokyo" on a given date finds both
+#    NRT and HND options and the cheaper one can win. Without the shared dates
+#    the multi-airport path would exist but never actually compete.
+# 2. **New cities**, so a traveller picking Osaka or Seoul gets real results
+#    rather than an empty flight section.
+#
+# Still SIN-origin hub-and-spoke, matching the existing dataset's shape.
+CITY_ROUTES = [
+    # Second airports for existing cities — dates shared with the primary.
+    ("HND", "+09:00", 420, [("SQ", "full"), ("NH", "full"), ("JL", "full")], "NRT"),
+    ("LGW", "+01:00", 810, [("SQ", "full"), ("BA", "full")], "LHR"),
+    ("DMK", "+07:00", 140, [("TR", "budget"), ("FD", "budget")], "BKK"),
+    # New cities.
+    ("KIX", "+09:00", 390, [("SQ", "full"), ("TR", "budget")], None),
+    ("MEL", "+10:00", 450, [("SQ", "full"), ("QF", "full"), ("JQ", "budget")], None),
+    ("ICN", "+09:00", 380, [("SQ", "full"), ("KE", "full"), ("OZ", "full")], None),
+    ("KUL", "+08:00", 60, [("SQ", "full"), ("MH", "full"), ("AK", "budget")], None),
+    ("DPS", "+08:00", 165, [("SQ", "full"), ("GA", "full"), ("TR", "budget")], None),
+    ("CGK", "+07:00", 105, [("SQ", "full"), ("GA", "full"), ("QG", "budget")], None),
+    ("HKT", "+07:00", 105, [("SQ", "full"), ("TR", "budget"), ("FD", "budget")], None),
+    ("TPE", "+08:00", 290, [("SQ", "full"), ("BR", "full"), ("CI", "full")], None),
+    ("DXB", "+04:00", 440, [("SQ", "full"), ("EK", "full")], None),
+    ("CDG", "+02:00", 800, [("SQ", "full"), ("AF", "full")], None),
+]
+
+# Departure dates for the NEW cities. Second airports reuse their primary's
+# dates instead (see the `shares_dates_with` field above).
+CITY_TRIP_PLANS = {
+    "KIX": [("2026-08-28", 5), ("2026-09-10", 4), ("2026-09-20", 6)],
+    "MEL": [("2026-08-27", 7), ("2026-09-11", 6), ("2026-09-24", 7)],
+    "ICN": [("2026-08-29", 5), ("2026-09-12", 4), ("2026-09-23", 5)],
+    "KUL": [("2026-08-26", 3), ("2026-09-07", 2), ("2026-09-18", 3)],
+    "DPS": [("2026-08-30", 5), ("2026-09-09", 4), ("2026-09-26", 5)],
+    "CGK": [("2026-08-31", 4), ("2026-09-14", 3), ("2026-09-25", 4)],
+    "HKT": [("2026-08-29", 4), ("2026-09-08", 3), ("2026-09-19", 4)],
+    "TPE": [("2026-08-27", 4), ("2026-09-13", 5), ("2026-09-22", 4)],
+    "DXB": [("2026-08-25", 8), ("2026-09-06", 7), ("2026-09-21", 8)],
+    "CDG": [("2026-08-24", 9), ("2026-09-05", 10), ("2026-09-27", 9)],
+}
+
+# New-route flight numbers start well above the originals so the two streams
+# can never mint the same flight_id.
+CITY_FLIGHT_NO_BASE = 600
 
 CABINS_BY_TIER = {
     "full": ["ECONOMY", "ECONOMY", "PREMIUM_ECONOMY", "BUSINESS"],
@@ -84,25 +138,28 @@ def _generate_leg(
     origin: str, origin_offset: str, dest: str, dest_offset: str,
     date_str: str, direct_duration: int, carriers: list[tuple[str, str]],
     flight_no_counter: dict[str, int],
+    rng: random.Random = RNG,
 ) -> list[dict]:
+    """Rows for one leg. `rng` defaults to the original stream so the existing
+    100 rows regenerate byte-identically; city routes pass `CITY_RNG`."""
     rows = []
-    chosen_carriers = RNG.sample(carriers, k=2)
+    chosen_carriers = rng.sample(carriers, k=2)
     for carrier, tier in chosen_carriers:
-        flight_no_counter[carrier] = flight_no_counter.get(carrier, 100) + RNG.randint(1, 9)
+        flight_no_counter[carrier] = flight_no_counter.get(carrier, 100) + rng.randint(1, 9)
         flight_no = f"{carrier}{flight_no_counter[carrier]}"
-        hour = RNG.choice(DEPARTURE_HOURS)
-        minute = RNG.choice([0, 5, 10, 15, 20, 30, 40, 45, 50])
-        stops = 1 if (tier == "budget" and RNG.random() < 0.35) else 0
-        duration = direct_duration + (RNG.randint(90, 240) if stops else RNG.randint(-15, 20))
+        hour = rng.choice(DEPARTURE_HOURS)
+        minute = rng.choice([0, 5, 10, 15, 20, 30, 40, 45, 50])
+        stops = 1 if (tier == "budget" and rng.random() < 0.35) else 0
+        duration = direct_duration + (rng.randint(90, 240) if stops else rng.randint(-15, 20))
         dep_ts, _ = _fmt_ts(date_str, hour, minute, origin_offset)
         arr_ts = _add_minutes(date_str, hour, minute, origin_offset, dest_offset, duration)
-        cabin = RNG.choice(CABINS_BY_TIER[tier])
+        cabin = rng.choice(CABINS_BY_TIER[tier])
         band_lo, band_hi = PRICE_BAND[tier]
-        base_price = direct_duration * RNG.uniform(band_lo, band_hi)
+        base_price = direct_duration * rng.uniform(band_lo, band_hi)
         price = round(base_price * CABIN_MULTIPLIER[cabin], 0)
-        seats = RNG.choice([1, 2, 3, 4, 6, 8, 9, 12, 14, 18, 22, 30, 40]) if cabin == "ECONOMY" else RNG.randint(1, 8)
-        wheelchair = RNG.random() > 0.05  # near-always True, small illustrative variance
-        step_free = tier == "full" or RNG.random() > 0.4
+        seats = rng.choice([1, 2, 3, 4, 6, 8, 9, 12, 14, 18, 22, 30, 40]) if cabin == "ECONOMY" else rng.randint(1, 8)
+        wheelchair = rng.random() > 0.05  # near-always True, small illustrative variance
+        step_free = tier == "full" or rng.random() > 0.4
         date_compact = date_str.replace("-", "")
 
         # Seat inventory, correlated with total seats so it reads plausibly.
@@ -111,13 +168,13 @@ def _generate_leg(
         # seats scarce (drives the wheelchair scenario). Fees scale with tier.
         window_avail = max(0, seats // 3)
         aisle_avail = max(0, seats // 3)
-        max_adjacent = RNG.choice([1, 2, 2, 3, min(seats, 4), min(seats, 5)]) if seats > 0 else 0
-        accessible_avail = RNG.choice([0, 0, 1, 1, 2]) if wheelchair else 0
-        std_fee = round(RNG.choice([0, 8, 12, 15, 20]) * (1.5 if tier == "budget" else 1.0), 0)
-        xleg_avail = RNG.choice([0, 2, 4, 6])
-        xleg_fee = round(RNG.uniform(35, 70) * (1.4 if tier == "budget" else 1.0), 0)
-        exit_avail = RNG.choice([0, 2, 4])
-        exit_fee = round(RNG.uniform(45, 90) * (1.4 if tier == "budget" else 1.0), 0)
+        max_adjacent = rng.choice([1, 2, 2, 3, min(seats, 4), min(seats, 5)]) if seats > 0 else 0
+        accessible_avail = rng.choice([0, 0, 1, 1, 2]) if wheelchair else 0
+        std_fee = round(rng.choice([0, 8, 12, 15, 20]) * (1.5 if tier == "budget" else 1.0), 0)
+        xleg_avail = rng.choice([0, 2, 4, 6])
+        xleg_fee = round(rng.uniform(35, 70) * (1.4 if tier == "budget" else 1.0), 0)
+        exit_avail = rng.choice([0, 2, 4])
+        exit_fee = round(rng.uniform(45, 90) * (1.4 if tier == "budget" else 1.0), 0)
 
         rows.append({
             "flight_id": f"{flight_no}-{date_compact}",
@@ -147,17 +204,50 @@ def _generate_leg(
     return rows
 
 
+def _round_trip(
+    dest: str, dest_offset: str, direct_duration: int, carriers: list[tuple[str, str]],
+    depart_date: str, trip_len: int, flight_no_counter: dict[str, int],
+    rng: random.Random,
+) -> list[dict]:
+    return_date = (
+        datetime.strptime(depart_date, "%Y-%m-%d") + timedelta(days=trip_len)
+    ).strftime("%Y-%m-%d")
+    return [
+        *_generate_leg(
+            ORIGIN, ORIGIN_OFFSET, dest, dest_offset, depart_date,
+            direct_duration, carriers, flight_no_counter, rng,
+        ),
+        *_generate_leg(
+            dest, dest_offset, ORIGIN, ORIGIN_OFFSET, return_date,
+            direct_duration, carriers, flight_no_counter, rng,
+        ),
+    ]
+
+
 def generate() -> list[dict]:
     all_rows: list[dict] = []
     flight_no_counter: dict[str, int] = {}
     for dest, dest_offset, direct_duration, carriers in ROUTES:
         for depart_date, trip_len in TRIP_PLANS[dest]:
-            return_date = (datetime.strptime(depart_date, "%Y-%m-%d") + timedelta(days=trip_len)).strftime("%Y-%m-%d")
-            all_rows.extend(_generate_leg(
-                ORIGIN, ORIGIN_OFFSET, dest, dest_offset, depart_date, direct_duration, carriers, flight_no_counter
+            all_rows.extend(_round_trip(
+                dest, dest_offset, direct_duration, carriers,
+                depart_date, trip_len, flight_no_counter, RNG,
             ))
-            all_rows.extend(_generate_leg(
-                dest, dest_offset, ORIGIN, ORIGIN_OFFSET, return_date, direct_duration, carriers, flight_no_counter
+
+    # City routes are appended AFTER the originals, on their own RNG stream and
+    # their own flight-number range, so regenerating never rewrites a row above.
+    city_counter: dict[str, int] = {}
+    for dest, dest_offset, direct_duration, carriers, shares_dates_with in CITY_ROUTES:
+        # A second airport for a city already covered flies on the SAME dates as
+        # its primary, so both compete on a given search instead of merely
+        # existing in the dataset.
+        plans = CITY_TRIP_PLANS.get(dest) or TRIP_PLANS[shares_dates_with]
+        for carrier, _tier in carriers:
+            city_counter.setdefault(carrier, CITY_FLIGHT_NO_BASE)
+        for depart_date, trip_len in plans:
+            all_rows.extend(_round_trip(
+                dest, dest_offset, direct_duration, carriers,
+                depart_date, trip_len, city_counter, CITY_RNG,
             ))
     return all_rows
 

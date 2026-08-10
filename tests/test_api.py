@@ -27,6 +27,28 @@ def test_valid_login_redirects_to_main():
     assert b"Select destination country" in main.data
 
 
+def test_the_intake_form_offers_dependent_city_selects():
+    """Cities are embedded in the page, so the select needs no extra request."""
+    import json
+    import re
+
+    client = create_app(TestConfig).test_client()
+    client.post("/", data={"email": "demo@example.com", "password": "TravelDemo2026!"})
+    html = client.get("/main").get_data(as_text=True)
+
+    assert 'id="origin_city"' in html and 'id="destination_city"' in html
+
+    embedded = re.search(
+        r'<script type="application/json" id="city-options">(.*?)</script>', html, re.S
+    )
+    assert embedded, "city options must be embedded for the dependent select to work"
+    options = json.loads(embedded.group(1))
+    # A multi-airport city must advertise every airport in its label, which is
+    # what tells a traveller that picking the city covers all of them.
+    london = next(c for c in options["United Kingdom"] if c["slug"] == "gb-london")
+    assert london["label"] == "London (LHR/LGW/STN/LTN)"
+
+
 def test_anonymous_main_redirects_to_login():
     response = create_app(TestConfig).test_client().get("/main")
     assert response.status_code == 302
@@ -70,6 +92,37 @@ def test_plan_submission_creates_async_chat_job(tmp_path, monkeypatch):
     })
     assert response.status_code == 202
     assert response.get_json()["chat_url"].endswith(FakeJob.request_id)
+
+
+def test_the_api_accepts_cities_and_still_accepts_country_only(tmp_path, monkeypatch):
+    """City fields are additive: existing country-only clients must not break."""
+    class AzureConfig(TestConfig):
+        DATABASE = tmp_path / "cities.sqlite3"
+        AZURE_OPENAI_API_KEY = "test-key"
+        AZURE_OPENAI_ENDPOINT = "https://example.openai.azure.com/"
+        AZURE_OPENAI_DEPLOYMENT = "test-deployment"
+
+    class FakeJob:
+        request_id = "11111111-1111-4111-8111-111111111111"
+        status = "queued"
+
+    monkeypatch.setattr("flaskapp.travel_ai.api.submit_plan", lambda *_args: FakeJob())
+    client = create_app(AzureConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_id"] = 7
+
+    base = {
+        "origin": "Singapore", "destination": "Japan",
+        "departure_date": "2026-10-10", "return_date": "2026-10-16",
+        "travellers": 1, "traveller_ages": [30],
+        "traveller_genders": ["prefer_not_to_say"],
+        "traveller_accessibility_needs": [[]], "budget": 3000,
+    }
+    with_cities = {**base, "origin_city": "Singapore", "destination_city": "Tokyo"}
+
+    assert client.post("/api/v1/travel-plans", json=with_cities).status_code == 202
+    assert client.post("/api/v1/travel-plans", json=base).status_code == 202
 
 
 def test_chat_page_requires_login_and_renders_for_user():
