@@ -1,9 +1,24 @@
 name: Security
 
 on:
+  # Feature branches are listed explicitly rather than using '**'. This is a
+  # shared repo, and enabling CI on every branch would spend minutes on other
+  # people's throwaway branches without asking them. Add your branch here.
   push:
-    branches: [main, release]
+    branches: [main, release, mark]
+  # Runs the same checks on the merge result before it lands, whether the PR
+  # targets a feature branch or main. NOTE: this makes the checks *run* on a
+  # PR; it does not make them *required* to merge — that is a branch
+  # protection setting on GitHub, not something this file can express.
+  pull_request:
+    branches: [main, release, mark]
   workflow_dispatch:
+
+# One run per branch or PR. Pushing again cancels the superseded run instead
+# of queueing both, which matters because DAST alone takes ~2 minutes.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
