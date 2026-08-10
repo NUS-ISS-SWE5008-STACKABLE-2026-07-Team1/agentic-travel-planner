@@ -47,18 +47,44 @@
           <form id="travel-plan-form" data-endpoint="{{ url_for('travel_api.create_travel_plan') }}">
             <div class="row g-4">
               <div class="col-md-6">
-                <label class="form-label" for="origin">Flying from</label>
-                <select class="form-select form-select-lg placeholder-select" id="origin" name="origin" required>
-                  <option value="" {% if not user_country %}selected{% endif %} disabled>Select departure country</option>
-                  {% for country in countries %}<option value="{{ country }}" {% if country == user_country %}selected{% endif %}>{{ country }}</option>{% endfor %}
-                </select>
+                <fieldset>
+                  <legend class="form-label mb-2">Flying from</legend>
+                  <div class="row g-2">
+                    <div class="col-12">
+                      <label class="visually-hidden" for="origin">Departure country</label>
+                      <select class="form-select form-select-lg placeholder-select" id="origin" name="origin" required>
+                        <option value="" {% if not user_country %}selected{% endif %} disabled>Select departure country</option>
+                        {% for country in countries %}<option value="{{ country }}" {% if country == user_country %}selected{% endif %}>{{ country }}</option>{% endfor %}
+                      </select>
+                    </div>
+                    <div class="col-12">
+                      <label class="visually-hidden" for="origin_city">Departure city</label>
+                      <select class="form-select placeholder-select" id="origin_city" name="origin_city" data-country-for="origin" required disabled>
+                        <option value="" selected disabled>Select a country first</option>
+                      </select>
+                    </div>
+                  </div>
+                </fieldset>
               </div>
               <div class="col-md-6">
-                <label class="form-label" for="destination">Destination</label>
-                <select class="form-select form-select-lg placeholder-select" id="destination" name="destination" required>
-                  <option value="" selected disabled>Select destination country</option>
-                  {% for country in countries %}<option value="{{ country }}">{{ country }}</option>{% endfor %}
-                </select>
+                <fieldset>
+                  <legend class="form-label mb-2">Destination</legend>
+                  <div class="row g-2">
+                    <div class="col-12">
+                      <label class="visually-hidden" for="destination">Destination country</label>
+                      <select class="form-select form-select-lg placeholder-select" id="destination" name="destination" required>
+                        <option value="" selected disabled>Select destination country</option>
+                        {% for country in countries %}<option value="{{ country }}">{{ country }}</option>{% endfor %}
+                      </select>
+                    </div>
+                    <div class="col-12">
+                      <label class="visually-hidden" for="destination_city">Destination city</label>
+                      <select class="form-select placeholder-select" id="destination_city" name="destination_city" data-country-for="destination" required disabled>
+                        <option value="" selected disabled>Select a country first</option>
+                      </select>
+                    </div>
+                  </div>
+                </fieldset>
               </div>
               <div class="col-md-3"><label class="form-label" for="departure_date">Depart</label><input class="form-control" type="date" id="departure_date" name="departure_date" required></div>
               <div class="col-md-3"><label class="form-label" for="return_date">Return</label><input class="form-control" type="date" id="return_date" name="return_date" required></div>
@@ -99,6 +125,10 @@
       </section>
     </section>
   </main>
+  <!-- Country -> cities for the dependent selects. A data block, not a script:
+       it is never executed, so it needs no CSP allowance and cannot be a
+       script-injection vector. app.js reads it by id. -->
+  <script type="application/json" id="city-options">{{ city_options | tojson }}</script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
