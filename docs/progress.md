@@ -21,6 +21,7 @@ never actually being committed.
 - [`docs/handoff/hotel_transport_agent.md`](handoff/hotel_transport_agent.md) — handoff to the Hotel & Transport developer
 - [`docs/places_contract.md`](places_contract.md) — shared city/airport dataset API
 - [`docs/flight_agent/inventory_sources.md`](flight_agent/inventory_sources.md) — seed vs Duffel
+- [`docs/security/cicd-improvement-plan.md`](security/cicd-improvement-plan.md) — CI/CD backlog, kept separate from this log
 - [`docs/individual_reports/flight_agent.md`](individual_reports/flight_agent.md) — earlier report draft, predates integration
 
 ---
