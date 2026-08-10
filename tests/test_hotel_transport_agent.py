@@ -68,3 +68,23 @@ def test_search_transport_returns_estimated_fallback_when_no_key(monkeypatch):
     assert results[0]["source"] == "estimated"
     assert results[0]["name"] == "Local transport estimate"
 
+
+def test_create_node_returns_callable():
+    mock_llm = MagicMock()
+    mock_tracer = MagicMock()
+    node = create_node(mock_llm, mock_tracer)
+    assert callable(node)
+
+
+def test_create_node_specialist_raises_when_no_incoming_message():
+    mock_llm = MagicMock()
+    mock_tracer = MagicMock()
+    node = create_node(mock_llm, mock_tracer)
+
+    with pytest.raises(ValueError, match="Missing A2A request"):
+        node({
+            "request_id": "test-id",
+            "request": {},
+            "findings": [],
+            "messages": [],
+        })
