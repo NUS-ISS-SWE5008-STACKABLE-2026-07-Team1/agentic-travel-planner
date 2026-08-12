@@ -14,6 +14,49 @@ from flaskapp.travel_ai.agents.hotel_transport_agent.agent import (
 )
 from flaskapp.travel_ai.schemas import AgentFinding, Option
 
+def test_search_hotels_uses_amadeus_when_configured(monkeypatch):
+    monkeypatch.setenv("AMADEUS_API_KEY", "test-key")
+    monkeypatch.setenv("AMADEUS_API_SECRET", "test-secret")
+    monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    token_resp = MagicMock()
+    token_resp.read.return_value = json.dumps({"access_token": "fake-token"}).encode()
+    token_resp.__enter__ = MagicMock(return_value=token_resp)
+    token_resp.__exit__ = MagicMock(return_value=False)
+
+    hotel_resp = MagicMock()
+    hotel_resp.read.return_value = json.dumps({
+        "data": [
+            {
+                "hotel": {
+                    "name": "Amadeus Hotel",
+                    "amenities": [{"name": "wifi"}, {"name": "pool"}],
+                },
+            },
+        ],
+    }).encode()
+    hotel_resp.__enter__ = MagicMock(return_value=hotel_resp)
+    hotel_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.side_effect = [token_resp, hotel_resp]
+        results = search_hotels({
+            "destination": "Tokyo",
+            "departure_date": "2026-10-10",
+            "return_date": "2026-10-16",
+            "travellers": 1,
+            "budget": 3000,
+            "currency": "USD",
+        })
+
+    assert len(results) == 1
+    assert results[0]["name"] == "Amadeus Hotel"
+    assert results[0]["source"] == "amadeus"
+    assert "wifi" in results[0]["amenities"]
+    assert "pool" in results[0]["amenities"]
+    assert results[0]["limitations"] == ["Test API only; verify with production endpoint"]
+
 def test_search_hotels_returns_estimated_fallback_when_no_keys(monkeypatch):
     monkeypatch.delenv("AMADEUS_API_KEY", raising=False)
     monkeypatch.delenv("AMADEUS_API_SECRET", raising=False)
