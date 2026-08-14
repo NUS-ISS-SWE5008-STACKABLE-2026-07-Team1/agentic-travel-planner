@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS travel_requests (
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     origin TEXT NOT NULL,
     destination TEXT NOT NULL,
+    origin_place TEXT,
+    destination_place TEXT,
     departure_date TEXT NOT NULL,
     return_date TEXT NOT NULL,
     travellers INTEGER NOT NULL CHECK (travellers BETWEEN 1 AND 20),
@@ -201,6 +203,9 @@ def initialize(path: Path | str) -> None:
                 connection.execute(
                     f"ALTER TABLE travel_requests ADD COLUMN {name} TEXT NOT NULL DEFAULT '[]'"
                 )
+        for name in ("origin_place", "destination_place"):
+            if name not in request_columns:
+                connection.execute(f"ALTER TABLE travel_requests ADD COLUMN {name} TEXT")
 
 
 def seed_login_user(path: Path | str, email: str, password_hash: str) -> None:
@@ -294,12 +299,14 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
         db.execute(
             """INSERT INTO travel_requests
                (id, user_id, origin, destination, departure_date, return_date, travellers,
+                origin_place, destination_place,
                 traveller_ages_json, traveller_genders_json, budget, currency, preferences_json,
                 traveller_accessibility_needs_json, accessibility_needs_json,
                 refinement_notes_json, risk_tolerance)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (request_id, user_id, request.origin, request.destination, str(request.departure_date),
-             str(request.return_date), request.travellers, _json(request.traveller_ages),
+             str(request.return_date), request.travellers, request.origin_place,
+             request.destination_place, _json(request.traveller_ages),
              _json(request.traveller_genders), request.budget, request.currency,
              _json(request.preferences), _json(request.traveller_accessibility_needs),
              _json(request.accessibility_needs), _json(request.refinement_notes),

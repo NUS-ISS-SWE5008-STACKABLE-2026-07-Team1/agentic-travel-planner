@@ -43,3 +43,28 @@ class AuditTracer:
                 from flaskapp.database import save_audit_event
                 save_audit_event(self.database_path, item)
             self._previous_hash = item["hash"]
+
+
+def verify_hash_chain(path: Path) -> bool:
+    """Recompute every event's hash and confirm the chain is unbroken.
+
+    True iff each event's stored hash matches its recomputed hash and each
+    event's previous_hash matches the prior event's actual hash (GENESIS for
+    the first). A mismatch means the trace file was edited or reordered after
+    the fact — the post-response gate for the explainability substrate, which
+    presumes the trace an explanation is built from has not been tampered with.
+    """
+    previous_hash = "GENESIS"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        stored_hash = item.pop("hash", None)
+        if item.get("previous_hash") != previous_hash:
+            return False
+        canonical = json.dumps(item, sort_keys=True, default=str)
+        recomputed = hashlib.sha256(canonical.encode()).hexdigest()
+        if recomputed != stored_hash:
+            return False
+        previous_hash = recomputed
+    return True
