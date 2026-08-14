@@ -4,9 +4,40 @@ from flaskapp.database import connect, get_platform_dashboard
 
 
 class TestConfig(Config):
+    """Credential-free by construction.
+
+    Config reads the process environment at import, so a developer with a working
+    .env would otherwise see 'no credential configured' tests pass or fail
+    depending on their own machine. Every provider key is cleared here so the
+    unconfigured path is what the suite actually exercises.
+    """
+
     TESTING = True
     WTF_CSRF_ENABLED = False
+    LOGIN_EMAIL = "demo@example.com"
+    LOGIN_PASSWORD_HASH = (
+        "scrypt:32768:8:1$99T3BfVwYO8CnqNC$"
+        "c85a15f2f167616564085724c37c79fc2ad151e306e5ec0414759a0f8a6eba28"
+        "a179494a8d39bfd838986ebbb2daa4d0586da0bee718d299fce4a89a7de45a95"
+    )
+    LLM_PROVIDER = "auto"
     AZURE_OPENAI_API_KEY = None
+    AZURE_OPENAI_ENDPOINT = None
+    OPENAI_API_KEY = None
+    ANTHROPIC_API_KEY = None
+    GOOGLE_API_KEY = None
+    DEEPSEEK_API_KEY = None
+    XAI_API_KEY = None
+    META_API_KEY = None
+    LLM_API_KEY = None
+
+
+class ConfiguredConfig(TestConfig):
+    """A credential is present, so requests reach validation instead of stopping at 503."""
+
+    LLM_PROVIDER = "openai"
+    LLM_MODEL = "gpt-4.1-mini"
+    OPENAI_API_KEY = "test-key-not-used"
 
 
 def test_health_page():
@@ -25,6 +56,20 @@ def test_valid_login_redirects_to_main():
     assert b"Traveller" in main.data
     assert b"Select departure country" in main.data
     assert b"Select destination country" in main.data
+    assert b'id="origin_place"' in main.data
+    assert b'id="destination_place"' in main.data
+
+
+def test_manual_form_defaults_origin_to_signed_in_users_country():
+    client = create_app(TestConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_country"] = "Singapore"
+    response = client.get("/main")
+    assert response.status_code == 200
+    assert b'<option value="Singapore" selected>Singapore</option>' in response.data
+    assert b'id="origin_place" name="origin_place"' in response.data
+    assert b'name="traveller_preference"' not in response.data  # Rendered dynamically by JS.
 
 
 def test_anonymous_main_redirects_to_login():
@@ -85,6 +130,31 @@ def test_chat_page_requires_login_and_renders_for_user():
     assert b"cancel-and-home" in response.data
     assert b"Stop planning and return home?" in response.data
     assert b"Keep planning" in response.data
+
+
+def test_intake_chat_requires_login_and_hosts_orchestrator_clarification():
+    client = create_app(TestConfig).test_client()
+    assert client.get("/chat/intake").status_code == 302
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_name"] = "Alicia"
+    response = client.get("/chat/intake")
+    assert response.status_code == 200
+    assert b'data-auto-start="true"' in response.data
+    assert b"Preparing your request" in response.data
+    assert b"Travel assistant" in response.data
+    assert b"/api/v1/travel-intents/resolve" in response.data
+
+
+def test_admin_button_is_available_on_both_chat_modes():
+    client = create_app(TestConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_email"] = TestConfig.ADMIN_EMAIL
+    intake = client.get("/chat/intake")
+    planning = client.get("/chat/11111111-1111-4111-8111-111111111111")
+    assert b'href="/admin"' in intake.data
+    assert b'href="/admin"' in planning.data
 
 
 def test_cancel_endpoint_cancels_authenticated_users_job(monkeypatch):
@@ -237,3 +307,34 @@ def test_registration_rejects_country_outside_selection_list(tmp_path):
     })
     assert response.status_code == 200
     assert b"Not a valid choice" in response.data
+
+
+VALID_PLAN = {
+    "origin": "Singapore", "destination": "Tokyo",
+    "departure_date": "2026-10-05", "return_date": "2026-10-19",
+    "travellers": 1, "traveller_ages": [34], "traveller_genders": ["male"],
+    "traveller_accessibility_needs": [[]], "budget": 8000.0, "currency": "SGD",
+}
+
+
+def test_cross_field_validation_error_returns_json_not_an_html_error_page(monkeypatch):
+    """A model_validator failure must serialize.
+
+    Pydantic puts the raw ValueError object into ctx["error"] for validator
+    failures, so jsonify(exc.errors()) raised TypeError and Flask served its HTML
+    error page. The browser then failed on "Unexpected token '<'" instead of
+    showing the traveller what was wrong with their dates.
+    """
+    monkeypatch.setattr("flaskapp.travel_ai.api.submit_plan", lambda *_args: None)
+    client = create_app(ConfiguredConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+
+    response = client.post("/api/v1/travel-plans", json={
+        **VALID_PLAN, "departure_date": "2026-10-19", "return_date": "2026-10-05",
+    })
+
+    assert response.status_code == 422
+    assert response.is_json
+    body = response.get_json()
+    assert "return_date must be on or after departure_date" in str(body["details"])

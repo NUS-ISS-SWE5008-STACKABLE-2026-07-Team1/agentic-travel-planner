@@ -1,0 +1,123 @@
+[
+  {
+    "id": "golden_scenario_1_round0",
+    "description": "db_schema.md §7 round 0: wheelchair user, no renegotiation yet — both the red-eye and mid-priced options surface, cheapest first.",
+    "request": {
+      "trip_context": {
+        "origin_airport": "SIN",
+        "dest_airport": "NRT",
+        "dest_city": "Tokyo",
+        "dest_country": "JP",
+        "depart_date": "2026-09-01",
+        "return_date": "2026-09-05",
+        "party": {"adults": 1, "children": 0},
+        "budget_total": 4000,
+        "accessibility_needs": ["wheelchair"],
+        "passport_country": "SG"
+      },
+      "constraints": null
+    },
+    "expected": {
+      "outbound_ids": ["SQ636-20260901", "SQ632-20260901"],
+      "inbound_ids": ["SQ637-20260905", "SQ633-20260905"]
+    }
+  },
+  {
+    "id": "golden_scenario_1_renegotiation_arrive_before",
+    "description": "db_schema.md §7 renegotiation: Hotel/Transport flagged the 23:40 arrival infeasible against last train service — Flight must drop the red-eye on the OUTBOUND leg only; the return leg is untouched.",
+    "request": {
+      "trip_context": {
+        "origin_airport": "SIN",
+        "dest_airport": "NRT",
+        "dest_city": "Tokyo",
+        "dest_country": "JP",
+        "depart_date": "2026-09-01",
+        "return_date": "2026-09-05",
+        "party": {"adults": 1, "children": 0},
+        "budget_total": 4000,
+        "accessibility_needs": ["wheelchair"],
+        "passport_country": "SG"
+      },
+      "constraints": {
+        "direction": "OUTBOUND",
+        "arrive_before": "2026-09-01T23:00+09:00"
+      }
+    },
+    "expected": {
+      "outbound_ids": ["SQ632-20260901"],
+      "inbound_ids": ["SQ637-20260905", "SQ633-20260905"]
+    }
+  },
+  {
+    "id": "budget_exceeded_no_outbound_option",
+    "description": "Budget Validator flagged the accessible-taxi + 24h hotel combo as exceeding cap — orchestrator re-proposes with a tighter max_price on the OUTBOUND leg only; both outbound options are priced above it, so the leg must come back empty, not fabricated.",
+    "request": {
+      "trip_context": {
+        "origin_airport": "SIN",
+        "dest_airport": "NRT",
+        "dest_city": "Tokyo",
+        "dest_country": "JP",
+        "depart_date": "2026-09-01",
+        "return_date": "2026-09-05",
+        "party": {"adults": 1, "children": 0},
+        "budget_total": 4000,
+        "accessibility_needs": ["wheelchair"],
+        "passport_country": "SG"
+      },
+      "constraints": {
+        "direction": "OUTBOUND",
+        "max_price": 300
+      }
+    },
+    "expected": {
+      "outbound_ids": [],
+      "inbound_ids": ["SQ637-20260905", "SQ633-20260905"]
+    }
+  },
+  {
+    "id": "no_availability_wrong_date",
+    "description": "Requested departure date has no matching inventory row — must return an empty leg, never a fabricated flight.",
+    "request": {
+      "trip_context": {
+        "origin_airport": "SIN",
+        "dest_airport": "NRT",
+        "dest_city": "Tokyo",
+        "dest_country": "JP",
+        "depart_date": "2026-12-25",
+        "return_date": "2026-09-05",
+        "party": {"adults": 1, "children": 0},
+        "budget_total": 4000,
+        "accessibility_needs": [],
+        "passport_country": "SG"
+      },
+      "constraints": null
+    },
+    "expected": {
+      "outbound_ids": [],
+      "inbound_ids": ["SQ637-20260905", "SQ633-20260905"]
+    }
+  },
+  {
+    "id": "multi_passenger_large_party",
+    "description": "Party of 10 — flights without enough remaining seats for the whole party must be excluded, not just flights with zero seats.",
+    "request": {
+      "trip_context": {
+        "origin_airport": "SIN",
+        "dest_airport": "NRT",
+        "dest_city": "Tokyo",
+        "dest_country": "JP",
+        "depart_date": "2026-09-01",
+        "return_date": "2026-09-05",
+        "party": {"adults": 10, "children": 0},
+        "budget_total": 20000,
+        "accessibility_needs": [],
+        "passport_country": "SG"
+      },
+      "constraints": null
+    },
+    "expected": {
+      "outbound_ids": ["SQ636-20260901"],
+      "inbound_ids": ["SQ633-20260905"]
+    }
+  }
+]
