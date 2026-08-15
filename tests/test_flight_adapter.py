@@ -44,13 +44,39 @@ def _travel_request(**overrides) -> TravelRequest:
     return TravelRequest(**{**FORM_PAYLOAD, **overrides})
 
 
-def test_countries_resolve_to_airports():
-    adapted = to_flight_request(_travel_request())
+def test_cities_resolve_to_every_serving_airport():
+    """The point of city intake: Tokyo means the city, so Haneda is included."""
+    adapted = to_flight_request(_travel_request(origin_city="Singapore", destination_city="Tokyo"))
     context = adapted.request.trip_context
+    assert (context.origin_city, context.dest_city) == ("Singapore", "Tokyo")
+    assert context.origin_airports == ["SIN"]
+    assert context.dest_airports == ["NRT", "HND"]
+    # The scalar stays available for display, as the primary gateway.
     assert (context.origin_airport, context.dest_airport) == ("SIN", "NRT")
-    assert (context.origin_country, context.dest_country) == ("Singapore", "Japan")
     assert adapted.is_routable and adapted.has_inventory
     assert adapted.unresolved == []
+
+
+def test_country_only_request_resolves_but_discloses_the_assumption():
+    """A request with no city still works — it just says which city it used.
+
+    This is the one place the old one-airport-per-country behaviour survives,
+    and the difference is that it is now stated rather than silent.
+    """
+    adapted = to_flight_request(_travel_request())
+    context = adapted.request.trip_context
+    assert (context.origin_country, context.dest_country) == ("Singapore", "Japan")
+    assert (context.origin_city, context.dest_city) == ("Singapore", "Tokyo")
+    assert adapted.is_routable and adapted.has_inventory
+    assert any("assumed Tokyo" in note for note in adapted.unresolved)
+
+
+def test_unrecognised_city_falls_back_to_the_country_and_says_so():
+    """Kyoto is a real city with no airport; it must not silently become Osaka."""
+    adapted = to_flight_request(_travel_request(destination_city="Kyoto"))
+    assert adapted.is_routable
+    assert any("'Kyoto' is not a recognised destination city" in n for n in adapted.unresolved)
+    assert adapted.request.trip_context.dest_city == "Tokyo"
 
 
 def test_unmappable_country_is_reported_not_raised():
@@ -62,13 +88,14 @@ def test_unmappable_country_is_reported_not_raised():
     assert propose_flights(adapted.request, SEED_FLIGHT_INVENTORY).candidates == []
 
 
-def test_routable_country_without_inventory_is_distinguished():
+def test_routable_route_without_inventory_is_distinguished():
     """"We cannot route this" and "we can route it but have no data" are
     different answers and a traveller deserves to be told which one applies."""
-    adapted = to_flight_request(_travel_request(destination="France"))
+    adapted = to_flight_request(_travel_request(destination="Iceland", destination_city="Reykjavik"))
     assert adapted.is_routable
     assert not adapted.has_inventory
-    assert any("No flight inventory loaded for France" in note for note in adapted.unresolved)
+    assert any("No flight inventory loaded for" in note for note in adapted.unresolved)
+    assert any("Reykjavik" in note for note in adapted.unresolved)
 
 
 def test_party_derived_from_traveller_ages():
@@ -162,24 +189,32 @@ def test_passport_country_comes_from_the_user_profile():
     assert to_flight_request(_travel_request()).request.trip_context.passport_country is None
 
 
-def test_every_form_country_either_resolves_or_is_explicitly_unmapped():
-    """Guards against a typo'd key: any airport mapping we do have must be for
-    a country the form can actually submit."""
+def test_every_primary_city_is_a_country_the_form_can_submit():
+    """Guards against a typo'd key: any fallback mapping we have must be for a
+    country the form can actually submit, and must name a real city."""
     from flaskapp.countries import COUNTRIES
-    from flaskapp.travel_ai.agents.flight_agent.airports import COUNTRY_PRIMARY_AIRPORT
+    from flaskapp.places import CITIES, PRIMARY_CITY
 
-    assert set(COUNTRY_PRIMARY_AIRPORT) <= set(COUNTRIES)
+    assert set(PRIMARY_CITY) <= set(COUNTRIES)
+    assert set(PRIMARY_CITY.values()) <= set(CITIES)
     assert resolve_airport("Nowhereland") is None
     assert resolve_airport(None) is None
 
 
-def test_seed_backed_countries_actually_have_inventory():
-    """The 'has inventory' claim must stay true as seed data changes."""
-    from flaskapp.travel_ai.agents.flight_agent.airports import (
-        SEED_BACKED_COUNTRIES,
-        COUNTRY_PRIMARY_AIRPORT,
-    )
+def test_the_has_inventory_claim_is_derived_from_the_dataset():
+    """The 'has inventory' claim must stay true as seed data changes.
 
-    stocked = {item.origin_airport for item in SEED_FLIGHT_INVENTORY}
-    for country in SEED_BACKED_COUNTRIES:
-        assert COUNTRY_PRIMARY_AIRPORT[country] in stocked
+    It is now computed from the rows rather than asserted by a hand-maintained
+    country list, so this checks the derivation agrees with the raw data
+    instead of checking that two lists were edited in lockstep.
+    """
+    from flaskapp.travel_ai.agents.flight_agent.seed_data import SEED_ROUTES, covers_route
+
+    stocked_pairs = {(item.origin_airport, item.dest_airport) for item in SEED_FLIGHT_INVENTORY}
+    assert SEED_ROUTES == stocked_pairs
+    assert covers_route(["SIN"], ["NRT"])
+    # Any one stocked pair is enough, even when other pairs for the city are not.
+    # KEF has no seed rows, so this passes only on the strength of NRT.
+    assert covers_route(["SIN"], ["NRT", "KEF"])
+    assert not covers_route(["SIN"], ["KEF"])
+    assert not covers_route([], ["NRT"])

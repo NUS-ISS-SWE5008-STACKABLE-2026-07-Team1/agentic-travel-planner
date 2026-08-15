@@ -1,0 +1,170 @@
+# =============================================================================
+# DRAFT — NOT ACTIVE. Lives in docs/security/drafts/ on purpose.
+#
+# Replaces the dast job of .github/workflows/security.yml.
+# Split from the fast tier per item 17 — this one is slow and expensive.
+# Addresses items 7, 13 (partial), 14, 15, 17.
+#
+# READ THIS BEFORE REVIEWING:
+# The ZAP scan here is still UNAUTHENTICATED. Full authenticated DAST needs
+# the ZAP Automation Framework with anti-CSRF handling, which is item 13's
+# expensive half and is NOT in this draft. What this draft adds is the
+# groundwork that makes that work possible, plus the assertion that turns a
+# silent auth failure into a loud one.
+# =============================================================================
+name: CI — DAST
+
+on:
+  push:
+    branches: [main, release]
+  pull_request:
+    branches: [main, release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dast-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dast:
+    name: DAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 20          # item 7
+
+    env:
+      # ---- Item 14, part 1: stop scanning a knowingly-broken build ---------
+      # Was falling back to config.py's published default
+      # "development-only-change-me". A random per-run key means any session
+      # finding ZAP reports is about the app, not about our CI config.
+      SECRET_KEY: ${{ github.run_id }}-${{ github.run_attempt }}-dast-ephemeral
+
+      # NOTE FOR REVIEW — deliberately NOT setting SESSION_COOKIE_SECURE=true.
+      # The owner notes suggested it, but the scan runs over plain HTTP on
+      # 127.0.0.1. Secure cookies are only sent over HTTPS, so setting it true
+      # would stop the session cookie being sent at all and break login
+      # entirely. Consequence to document in the report: ZAP's "cookie without
+      # Secure flag" finding is a CI artefact and must not be presented as an
+      # app defect. Fixing it properly means terminating TLS in CI — not worth
+      # it for this module.
+      SESSION_COOKIE_SECURE: "false"
+
+      # ---- Item 14, part 2: a stub model, never a real provider key --------
+      # Without a model, POST /travel-plans fails immediately and ZAP only ever
+      # sees the error path — the graph and plan-rendering code go unscanned.
+      LLM_PROVIDER: openai_compatible
+      LLM_API_KEY: stub-not-a-real-key
+      LLM_BASE_URL: http://127.0.0.1:8081/v1
+      LLM_MODEL: stub-model
+
+      # Keep CI's database and traces out of the repo tree so nothing the app
+      # writes can be swept into an artefact upload.
+      DATABASE: ${{ github.workspace }}/ci-instance/travel_planner.sqlite3
+      TRACE_DIR: ${{ github.workspace }}/ci-instance/traces
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.lock ]; then
+            python -m pip install -r requirements.lock
+          else
+            python -m pip install -r requirements.txt
+          fi
+
+      - name: Prepare CI instance directory
+        run: mkdir -p ci-instance/traces
+
+      # ---- Stub provider ---------------------------------------------------
+      # See scripts/ci_stub_provider.py (also a draft in this folder).
+      # UNVERIFIED: this is the piece item 14 says to budget an afternoon for.
+      - name: Start stub LLM provider
+        run: |
+          nohup python scripts/ci_stub_provider.py > stub.log 2>&1 &
+          for i in $(seq 1 15); do
+            curl -sf http://127.0.0.1:8081/healthz -o /dev/null && exit 0
+            sleep 1
+          done
+          echo "::error::Stub provider did not start"; cat stub.log; exit 1
+
+      # No seeding step is needed. flaskapp/__init__.py -> database.init_app()
+      # calls initialize() then seed_login_user() on every startup, so the
+      # demo account exists even against an empty database.
+      # (This corrects item 13 piece 1 in the owner notes, which assumed a
+      #  seeded user was a prerequisite created by untracking the sqlite file.)
+      - name: Start app
+        run: |
+          nohup python app.py > app.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:5000/ -o /dev/null && exit 0
+            sleep 1
+          done
+          echo "::error::App did not start in time"; cat app.log; exit 1
+
+      # ---- Item 13, piece 4: prove a session can actually be established ---
+      # BLOCKING even though the scan itself is not. Without this, a broken
+      # login degrades into a clean-looking report nobody questions.
+      #
+      # The grep differs from the owner notes' version. form.hidden_tag()
+      # renders <input id="csrf_token" name="csrf_token" type="hidden"
+      # value="..."> — attributes in that order — so a pattern expecting
+      # value= immediately after name= matches nothing. [^>]* bridges them.
+      - name: Verify an authenticated session is possible
+        run: |
+          set -euo pipefail
+          token=$(curl -s -c jar http://127.0.0.1:5000/ \
+            | grep -oP 'name="csrf_token"[^>]*value="\K[^"]+' | head -1)
+          if [ -z "${token}" ]; then
+            echo "::error::Could not extract a CSRF token from the login page"; exit 1
+          fi
+          curl -s -b jar -c jar -X POST http://127.0.0.1:5000/ \
+            -d "csrf_token=${token}" \
+            -d "email=demo@example.com" \
+            -d "password=TravelDemo2026!" \
+            -o /dev/null
+          code=$(curl -s -b jar -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:5000/api/v1/admin/activity)
+          if [ "${code}" != "200" ]; then
+            echo "::error::Login failed (got ${code} from /api/v1/admin/activity)."
+            echo "::error::DAST would scan unauthenticated and report a meaningless clean result."
+            exit 1
+          fi
+          echo "Authenticated session confirmed (admin/activity -> 200)."
+
+      # Still unauthenticated — see the header note. fail_action stays false
+      # per item 8: gating on a scan that only reaches the login page would be
+      # worse than not gating.
+      - name: ZAP baseline scan (UNAUTHENTICATED — see item 13)
+        uses: zaproxy/action-baseline@7c4deb10e6261301961c86d65d54a516394f9aed # v0.14.0
+        with:
+          target: "http://127.0.0.1:5000"
+          fail_action: false
+          allow_issue_writing: false
+
+      # ---- Item 15: check what we are about to publish ---------------------
+      # service.py log_payload() writes whole user submissions to stdout and
+      # this job captures stdout into app.log. Artefacts are downloadable by
+      # anyone with repo read access.
+      - name: Check app log for leaked material
+        if: always()
+        run: |
+          if grep -REn "sk-[A-Za-z0-9]{16,}|api[_-]?key['\"]?[[:space:]]*[:=][[:space:]]*\S{16,}" app.log; then
+            echo "::error::Credential-shaped string found in app.log; refusing to upload."
+            exit 1
+          fi
+          echo "No credential-shaped strings found in app.log."
+
+      - name: Upload app log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: app-log
+          path: app.log
+          retention-days: 14     # item 15 — was the 90-day default

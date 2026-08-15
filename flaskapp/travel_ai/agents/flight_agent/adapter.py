@@ -10,8 +10,8 @@ What the shared request cannot supply, and how each gap is handled:
 
 | Needed by Flight Agent | In `TravelRequest`? | Handling |
 |---|---|---|
-| Airport codes | No — countries only | `airports.resolve_airport`, reported when it fails |
-| Destination city | No | Left `None`; country granularity is what we have |
+| Airport codes | No — country + city | `airports.resolve_route`, reported when it fails |
+| Destination city | Yes, optional | Resolved via `places.py`; falls back to the country's main gateway, disclosed |
 | `party` split | Implicit in ages | Derived, under-18 counts as a child |
 | `passport_country` | No | Passed in from the signed-in user's profile |
 | Structured flight preferences | No — free text | Conservatively derived; see `derive_flight_preferences` |
@@ -30,7 +30,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from flaskapp.travel_ai.agents.flight_agent.airports import has_seed_inventory, resolve_airport
+from flaskapp.travel_ai.agents.flight_agent.airports import resolve_route
+from flaskapp.travel_ai.agents.flight_agent.seed_data import covers_route
 from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightPreferences,
     FlightProposalRequest,
@@ -62,18 +63,22 @@ class AdaptedRequest:
 
     @property
     def is_routable(self) -> bool:
-        """Whether both airports resolved. False means zero candidates, by
-        construction — worth checking before spending an LLM call."""
+        """Whether both ends resolved to at least one airport. False means zero
+        candidates, by construction — worth checking before an LLM call."""
         ctx = self.request.trip_context
-        return bool(ctx.origin_airport and ctx.dest_airport)
+        return bool(ctx.origin_airports and ctx.dest_airports)
 
     @property
     def has_inventory(self) -> bool:
-        """Routable AND backed by seed inventory. Distinguishes "cannot route"
-        from "can route, no data loaded yet"; both give no candidates, for
-        different reasons a traveller deserves to be told apart."""
+        """Routable AND stocked by the seed dataset. Distinguishes "cannot
+        route" from "can route, no data loaded yet"; both give no candidates,
+        for different reasons a traveller deserves to be told apart.
+
+        Asks the dataset directly rather than consulting a country allow-list,
+        so this stays true as the seed CSV grows.
+        """
         ctx = self.request.trip_context
-        return self.is_routable and has_seed_inventory(ctx.origin_country) and has_seed_inventory(ctx.dest_country)
+        return self.is_routable and covers_route(ctx.origin_airports, ctx.dest_airports)
 
 
 def strip_traveller_prefix(need: str) -> str:
@@ -127,17 +132,23 @@ def to_trip_context(travel_request, *, passport_country: str | None = None) -> t
 
     origin_country = travel_request.origin
     dest_country = travel_request.destination
-    origin_airport = resolve_airport(origin_country)
-    dest_airport = resolve_airport(dest_country)
+    origin_city = getattr(travel_request, "origin_city", None)
+    dest_city = getattr(travel_request, "destination_city", None)
 
-    if origin_airport is None:
-        unresolved.append(f"No airport mapping for departure country {origin_country!r}")
-    elif not has_seed_inventory(origin_country):
-        unresolved.append(f"No flight inventory loaded for {origin_country} ({origin_airport})")
-    if dest_airport is None:
-        unresolved.append(f"No airport mapping for destination country {dest_country!r}")
-    elif not has_seed_inventory(dest_country):
-        unresolved.append(f"No flight inventory loaded for {dest_country} ({dest_airport})")
+    origin = resolve_route(origin_country, origin_city, label="departure")
+    dest = resolve_route(dest_country, dest_city, label="destination")
+    unresolved.extend(origin.notes)
+    unresolved.extend(dest.notes)
+
+    # Reported separately from resolution failures: a stocked route and an
+    # unstocked one are both "no candidates", but only one of them is a
+    # coverage gap the traveller can do nothing about.
+    if origin.is_resolved and dest.is_resolved and not covers_route(origin.airports, dest.airports):
+        unresolved.append(
+            f"No flight inventory loaded for {origin.city.name if origin.city else origin_country} "
+            f"({'/'.join(origin.airports)}) to "
+            f"{dest.city.name if dest.city else dest_country} ({'/'.join(dest.airports)})"
+        )
 
     preferences = list(travel_request.preferences)
     needs = [strip_traveller_prefix(need) for need in travel_request.accessibility_needs]
@@ -145,8 +156,12 @@ def to_trip_context(travel_request, *, passport_country: str | None = None) -> t
     context = TripContext(
         origin_country=origin_country,
         dest_country=dest_country,
-        origin_airport=origin_airport,
-        dest_airport=dest_airport,
+        # The resolved city, not the raw input: if the traveller sent nothing
+        # or something unrecognised, this records what was actually searched.
+        origin_city=origin.city.name if origin.city else None,
+        dest_city=dest.city.name if dest.city else None,
+        origin_airports=list(origin.airports),
+        dest_airports=list(dest.airports),
         depart_date=travel_request.departure_date.isoformat(),
         return_date=travel_request.return_date.isoformat(),
         traveller_ages=list(travel_request.traveller_ages),
