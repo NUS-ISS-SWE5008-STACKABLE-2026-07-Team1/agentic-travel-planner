@@ -51,6 +51,44 @@ def extract_intent(llm, prompt: str) -> IntakeExtraction:
     ])
 
 
+def merge_intents(current: ExtractedIntent, update: ExtractedIntent) -> ExtractedIntent:
+    """Merge a newly extracted chat turn into the confirmed trip state."""
+    data = current.model_dump(mode="json")
+    incoming = update.model_dump(mode="json")
+    list_fields = {
+        "preferences", "accessibility_needs", "traveller_ages",
+        "traveller_genders", "traveller_accessibility_needs",
+    }
+    for name, value in incoming.items():
+        if value is not None and (name not in list_fields or value):
+            data[name] = value
+    travellers = data.get("travellers")
+    if travellers is not None:
+        for name, *_ in PER_TRAVELLER_FIELDS:
+            data[name] = _resize(data.get(name) or [], int(travellers))
+    return ExtractedIntent.model_validate(data)
+
+
+def clarification_question(missing: list[MissingField]) -> str:
+    """Turn deterministic gaps into a concise conversational question."""
+    if not missing:
+        return "Perfect — I have everything needed to brief the travel specialists."
+    labels: list[str] = []
+    for field in missing:
+        label = field.label.lower()
+        if field.traveller_index is not None:
+            label = f"traveller {field.traveller_index + 1}'s {label}"
+        if label not in labels:
+            labels.append(label)
+    if len(labels) == 1:
+        needed = labels[0]
+    elif len(labels) == 2:
+        needed = f"{labels[0]} and {labels[1]}"
+    else:
+        needed = f"{', '.join(labels[:-1])}, and {labels[-1]}"
+    return f"Before I brief the specialist agents, could you share {needed}?"
+
+
 def compute_gaps(extracted: ExtractedIntent) -> list[MissingField]:
     """Everything still needed before `TravelRequest` would accept this."""
     missing = [
@@ -74,6 +112,8 @@ def compute_gaps(extracted: ExtractedIntent) -> list[MissingField]:
         return missing
     for index in range(extracted.travellers):
         for name, label, kind, hint in PER_TRAVELLER_FIELDS:
+            if name == "traveller_accessibility_needs":
+                continue
             values = getattr(extracted, name)
             if index >= len(values) or values[index] is None:
                 missing.append(MissingField(
@@ -117,7 +157,12 @@ def to_request_payload(extracted: ExtractedIntent) -> dict:
     The result is a suggestion: `validate_request` is still the gate, and runs
     unchanged when the browser submits this to the planning endpoint.
     """
-    per_traveller = [needs or [] for needs in extracted.traveller_accessibility_needs]
+    per_traveller = [
+        needs or []
+        for needs in _resize(
+            extracted.traveller_accessibility_needs, extracted.travellers
+        )
+    ]
     combined = [
         f"Traveler {index + 1}: {need}"
         for index, needs in enumerate(per_traveller)

@@ -33,8 +33,9 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="travel-planner
 _logger = logging.getLogger(__name__)
 
 
-def submit_plan(request: TravelRequest, settings: dict, user_id: int | None) -> PlanningJob:
-    job = PlanningJob(request_id=str(uuid4()), user_id=user_id)
+def submit_plan(request: TravelRequest, settings: dict, user_id: int | None,
+                request_id: str | None = None) -> PlanningJob:
+    job = PlanningJob(request_id=request_id or str(uuid4()), user_id=user_id)
     create_planning_job(
         settings["database_path"], job.request_id, user_id, request.model_dump(mode="json")
     )

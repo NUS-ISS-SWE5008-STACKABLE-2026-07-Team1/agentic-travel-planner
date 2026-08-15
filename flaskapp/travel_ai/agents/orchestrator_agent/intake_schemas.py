@@ -75,3 +75,4 @@ class IntentResponse(BaseModel):
     extracted: ExtractedIntent
     missing: list[MissingField]
     request: dict | None = None
+    request_id: str | None = None
