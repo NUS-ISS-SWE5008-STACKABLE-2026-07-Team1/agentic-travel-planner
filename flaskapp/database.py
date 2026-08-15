@@ -31,8 +31,10 @@ CREATE TABLE IF NOT EXISTS travel_requests (
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     origin TEXT NOT NULL,
     destination TEXT NOT NULL,
-    origin_place TEXT,
-    destination_place TEXT,
+    -- Countries above, cities here. NULLable because city intake postdates
+    -- these rows and a country-only request stays valid.
+    origin_city TEXT,
+    destination_city TEXT,
     departure_date TEXT NOT NULL,
     return_date TEXT NOT NULL,
     travellers INTEGER NOT NULL CHECK (travellers BETWEEN 1 AND 20),
@@ -203,7 +205,11 @@ def initialize(path: Path | str) -> None:
                 connection.execute(
                     f"ALTER TABLE travel_requests ADD COLUMN {name} TEXT NOT NULL DEFAULT '[]'"
                 )
-        for name in ("origin_place", "destination_place"):
+        # Cities are NULLable, unlike the country columns: rows written before
+        # city intake existed have no city and must stay readable. A NULL here
+        # means "country granularity", which the flight adapter handles by
+        # falling back to the country's main gateway.
+        for name in ("origin_city", "destination_city"):
             if name not in request_columns:
                 connection.execute(f"ALTER TABLE travel_requests ADD COLUMN {name} TEXT")
 
@@ -298,15 +304,16 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
     with connect(path) as db:
         db.execute(
             """INSERT INTO travel_requests
-               (id, user_id, origin, destination, departure_date, return_date, travellers,
-                origin_place, destination_place,
+               (id, user_id, origin, destination, origin_city, destination_city,
+                departure_date, return_date, travellers,
                 traveller_ages_json, traveller_genders_json, budget, currency, preferences_json,
                 traveller_accessibility_needs_json, accessibility_needs_json,
                 refinement_notes_json, risk_tolerance)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (request_id, user_id, request.origin, request.destination, str(request.departure_date),
-             str(request.return_date), request.travellers, request.origin_place,
-             request.destination_place, _json(request.traveller_ages),
+            (request_id, user_id, request.origin, request.destination,
+             getattr(request, "origin_city", None), getattr(request, "destination_city", None),
+             str(request.departure_date),
+             str(request.return_date), request.travellers, _json(request.traveller_ages),
              _json(request.traveller_genders), request.budget, request.currency,
              _json(request.preferences), _json(request.traveller_accessibility_needs),
              _json(request.accessibility_needs), _json(request.refinement_notes),
@@ -662,7 +669,9 @@ def get_recent_feedback(path: Path | str, limit: int = 50) -> list[dict[str, Any
         return [dict(row) for row in db.execute(
             """SELECT f.request_id, f.rating, f.comment, f.created_at, f.updated_at,
                       u.name, u.email, json_extract(j.request_json, '$.origin') AS origin,
-                      json_extract(j.request_json, '$.destination') AS destination
+                      json_extract(j.request_json, '$.destination') AS destination,
+                      json_extract(j.request_json, '$.origin_city') AS origin_city,
+                      json_extract(j.request_json, '$.destination_city') AS destination_city
                FROM plan_feedback f JOIN users u ON u.id = f.user_id
                JOIN planning_jobs j ON j.request_id = f.request_id
                ORDER BY f.updated_at DESC LIMIT ?""",

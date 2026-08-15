@@ -1,241 +1,150 @@
-"""Hotel & Transport Agent development and tool-integration entry point."""
+"""Hotel & Transport Agent's LangGraph node — the grounded path.
+
+This node does NOT ask a model to think of hotels. `domain.py` searches,
+filters and ranks real inventory in code first; the model is then given that
+finished proposal and asked only to explain it, with `guardrails` rejecting any
+hotel_id it invents. Removing the model degrades the answer's prose, not its
+correctness — the candidate list is identical either way.
+
+Flow:
+
+    A2A request -> adapter.to_hotel_request  (shared contract -> hotel contract)
+                -> provider.fetch             (deterministic inventory)
+                -> domain.propose_hotels       (deterministic, always runs)
+                -> reasoning.run_hotel_agent   (model explains; grounding enforced)
+                -> AgentFinding               (back onto the shared contract)
+
+Inventory comes from an `HotelInventoryProvider` (see `providers/`), not from a
+module-level dataset. Seed is the default. The node's logic is identical either
+way — the only source-dependent things are the assumption text and whether
+accessibility is verified or unknown.
+
+Fallback: when the city or dates fall outside the loaded inventory, there is
+nothing to ground an answer in. Rather than return an empty finding that reads
+as a bug, the node falls back to the prompt-only specialist and attaches a
+warning saying the options are model estimates rather than inventory-backed.
+The orchestrator and traveller both see that distinction.
+
+The node never raises on a planning shortfall. "No hotels for this city" is
+an answer the orchestrator can act on; an exception is not.
+"""
 
 from __future__ import annotations
 
-import json
-import os
-import urllib.error
-import urllib.parse
-import urllib.request
-from typing import Any
-
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-
-from flaskapp.travel_ai.agents.shared import SYSTEM_POLICY
+from flaskapp.config import Config
+from flaskapp.database import save_agent_run
+from flaskapp.travel_ai.a2a import response_message
+from flaskapp.travel_ai.agents.base import make_specialist_node
+from flaskapp.travel_ai.agents.hotel_transport_agent.adapter import to_hotel_request
+from flaskapp.travel_ai.agents.hotel_transport_agent.domain import screen_hotels
+from flaskapp.travel_ai.agents.hotel_transport_agent.guardrails import (
+    validate_grounded_explanation,
+)
 from flaskapp.travel_ai.agents.hotel_transport_agent.prompt import INSTRUCTION
-from flaskapp.travel_ai.a2a import A2AMessage, response_message
-from flaskapp.travel_ai.schemas import AgentFinding, Option
-from flaskapp.travel_ai.tracing import AuditTracer
+from flaskapp.travel_ai.agents.hotel_transport_agent.providers import (
+    get_hotel_inventory_provider,
+)
+from flaskapp.travel_ai.agents.hotel_transport_agent.providers.seed import (
+    INVENTORY_ASSUMPTION,
+)
+from flaskapp.travel_ai.agents.hotel_transport_agent.reasoning import StructuredLLM, run_hotel_agent
+from flaskapp.travel_ai.agents.hotel_transport_agent.schemas import (
+    HotelCandidate,
+    HotelProposal,
+    TransportOption,
+)
+from flaskapp.travel_ai.agents.hotel_transport_agent.seed_data import transport_for
+from flaskapp.travel_ai.schemas import AgentFinding, Option, TravelRequest
 from flaskapp.travel_ai.terminal import log_payload
 from flaskapp.travel_ai.usage import TokenUsageCallback
-from flaskapp.database import save_agent_run
 
 NAME = "hotel_transport_agent"
 
-def _compact(value: object) -> str:
-    return json.dumps(value, default=str, ensure_ascii=False)
+__all__ = ["NAME", "INVENTORY_ASSUMPTION", "ESTIMATE_WARNING", "create_node"]
+
+ESTIMATE_WARNING = (
+    "These hotel and transport options are model estimates, not drawn from verified inventory. "
+    "Confirm every detail with the property or carrier before booking."
+)
 
 
-def _safe_get(url: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
-    """Minimal stdlib JSON GET helper (no extra dependencies)."""
-    req = urllib.request.Request(url, headers=headers or {})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        return {"error": str(exc), "status": exc.code}
-    except Exception as exc:
-        return {"error": str(exc)}
+class _InnerTracer:
+    """Forwards `run_hotel_agent`'s events except the lifecycle duplicates."""
+
+    def __init__(self, tracer):
+        self._tracer = tracer
+
+    def record(self, event: str, agent: str, details: dict | None = None) -> None:
+        if event not in {"agent_started", "agent_completed"}:
+            self._tracer.record(event, agent, details)
 
 
-def _safe_post_form(url: str, data: dict[str, str]) -> dict[str, Any]:
-    """Minimal stdlib form POST helper."""
-    encoded = urllib.parse.urlencode(data).encode()
-    req = urllib.request.Request(url, data=encoded, method="POST")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        return {"error": str(exc), "status": exc.code}
-    except Exception as exc:
-        return {"error": str(exc)}
+def _hotel_candidate_to_option(
+    candidate: HotelCandidate, currency: str, assumption: str
+) -> Option:
+    """One ranked candidate as a shared-contract `Option`."""
+    factors = [
+        f"{candidate.star_rating or 'N/A'} star rating" if candidate.star_rating else "Unrated",
+        f"Price per night: {candidate.price_per_night:.2f} {currency}",
+        f"Total estimated: {candidate.estimated_total_cost:.2f} {currency}" if candidate.estimated_total_cost else "",
+    ]
+    if candidate.distance_to_center_km is not None:
+        factors.append(f"{candidate.distance_to_center_km:.1f} km from centre")
+    if candidate.wheelchair_accessible:
+        factors.append("Wheelchair accessible")
+    if candidate.step_free_entrance:
+        factors.append("Step-free entrance")
+    if candidate.accessible_bathroom:
+        factors.append("Accessible bathroom")
+    if candidate.amenities:
+        factors.append(f"Amenities: {', '.join(candidate.amenities[:5])}")
 
-def search_hotels(request: dict[str, Any]) -> list[dict[str, Any]]:
-    """
-    Search accommodation options.
+    return Option(
+        name=candidate.name,
+        description=(
+            f"{candidate.room_type} room at {candidate.name}, "
+            f"{candidate.distance_to_center_km:.1f} km from centre. "
+            f"{candidate.star_rating or 'N/A'} star rating."
+        ),
+        estimated_cost=candidate.estimated_total_cost,
+        currency=currency,
+        assumptions=[assumption],
+        selection_factors=[f for f in factors if f],
+    )
 
-    Recommended free-tier providers:
-    - Amadeus Self-Service APIs (https://developers.amadeus.com)
-    - Google Places Text Search (https://developers.google.com/maps/documentation/places)
-    """
-    destination = request.get("destination", "")
-    check_in = str(request.get("departure_date", ""))
-    check_out = str(request.get("return_date", ""))
-    adults = request.get("travellers", 1)
-    currency = request.get("currency", "USD")
-    budget = request.get("budget")
-    accessibility = request.get("accessibility_needs", [])
 
-    amadeus_key = os.getenv("AMADEUS_API_KEY")
-    amadeus_secret = os.getenv("AMADEUS_API_SECRET")
-    google_key = os.getenv("GOOGLE_PLACES_API_KEY") or os.getenv("GOOGLE_API_KEY")
+def _transport_to_option(option: TransportOption, currency: str) -> Option:
+    """Transport option as a shared-contract Option."""
+    desc_parts = [f"{option.mode} — {option.name}"]
+    if option.duration_minutes:
+        desc_parts.append(f"{option.duration_minutes} min")
+    if option.distance_km:
+        desc_parts.append(f"{option.distance_km:.1f} km")
+    if option.estimated_cost:
+        desc_parts.append(f"~{option.estimated_cost:.2f} {currency}")
 
-    results: list[dict[str, Any]] = []
+    return Option(
+        name=option.name,
+        description=", ".join(desc_parts),
+        estimated_cost=option.estimated_cost,
+        currency=currency,
+        assumptions=option.assumptions,
+        limitations=option.limitations,
+        selection_factors=option.accessibility_notes or [],
+    )
 
-    if amadeus_key and amadeus_secret:
-        token = _safe_post_form(
-            "https://test.api.amadeus.com/v1/security/oauth2/token",
-            {
-                "grant_type": "client_credentials",
-                "client_id": amadeus_key,
-                "client_secret": amadeus_secret,
-            },
+
+def create_node(llm, tracer, provider=None, config=None):
+    """The graph node. Grounded when inventory covers the city, prompt-only otherwise."""
+    prompt_only_node = make_specialist_node(NAME, INSTRUCTION, llm, tracer)
+    provider_note = None
+    if provider is None:
+        provider, provider_note = get_hotel_inventory_provider(
+            vars(Config) if config is None else config
         )
-        access_token = token.get("access_token")
-        if access_token:
-            city = destination[:3].upper()
-            url = (
-                "https://test.api.amadeus.com/v2/shopping/hotel-offers"
-                f"?cityCode={urllib.parse.quote(city)}"
-                f"&checkInDate={check_in}&checkOutDate={check_out}"
-                f"&adults={adults}&currency={currency}&radius=20&radiusUnit=KM"
-            )
-            data = _safe_get(url, headers={"Authorization": f"Bearer {access_token}"})
-            for offer in data.get("data", [])[:5]:
-                hotel = offer.get("hotel", {})
-                results.append({
-                    "name": hotel.get("name", "Unknown Hotel"),
-                    "estimated_cost_per_night": None,
-                    "currency": currency,
-                    "room_type": "standard",
-                    "amenities": [a.get("name", "") for a in hotel.get("amenities", [])[:8]],
-                    "distance_to_center_km": None,
-                    "source": "amadeus",
-                    "source_urls": [url],
-                    "assumptions": ["Price and availability require supplier verification"],
-                    "limitations": ["Test API only; verify with production endpoint"],
-                })
+    assumption = getattr(provider, "assumption", INVENTORY_ASSUMPTION)
 
-    if not results and google_key:
-        query = f"hotels in {destination}"
-        url = (
-            "https://maps.googleapis.com/maps/api/place/textsearch/json"
-            f"?query={urllib.parse.quote(query)}&key={google_key}"
-        )
-        data = _safe_get(url)
-        for place in data.get("results", [])[:5]:
-            results.append({
-                "name": place.get("name", "Unknown Hotel"),
-                "estimated_cost_per_night": None,
-                "currency": currency,
-                "room_type": "standard",
-                "amenities": [],
-                "distance_to_center_km": None,
-                "source": "google_places",
-                "source_urls": [url],
-                "assumptions": [
-                    "Place search does not return pricing; use for location/name only"
-                ],
-                "limitations": [
-                    "Requires separate pricing API for rates",
-                    "Results are ranked by relevance, not price",
-                ],
-            })
-
-    if not results:
-        nightly = budget / max(((check_out != check_in) and 1 or 1), 1) if budget else 100.0
-        results.append({
-            "name": f"Sample Hotel in {destination}",
-            "estimated_cost_per_night": round(nightly, 2),
-            "currency": currency,
-            "room_type": "standard",
-            "amenities": ["wifi"],
-            "distance_to_center_km": 3.0,
-            "check_in": check_in,
-            "check_out": check_out,
-            "source": "estimated",
-            "source_urls": [],
-            "assumptions": [
-                "No provider API key configured.",
-                "Cost is a rough estimate, not a verified fare.",
-                "Replace with real provider data before any booking decision.",
-            ],
-            "limitations": [
-                "Mock data only; never treat as real availability or pricing"
-            ],
-        })
-
-    return results
-
-
-def search_transport(
-    request: dict[str, Any],
-    flight_findings: list[Any] | None = None,
-) -> list[dict[str, Any]]:
-    """
-    Search local transport / transfer options.
-
-    Recommended free-tier providers:
-    - Google Maps Directions API / Distance Matrix API
-    - Google Places API (find nearby stations / airports)
-    """
-    destination = request.get("destination", "")
-    origin = request.get("origin", "")
-    currency = request.get("currency", "USD")
-    budget = request.get("budget")
-    accessibility = request.get("accessibility_needs", [])
-
-    google_key = os.getenv("GOOGLE_PLACES_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    results: list[dict[str, Any]] = []
-
-    if google_key:
-        url = (
-            "https://maps.googleapis.com/maps/api/directions/json"
-            f"?origin=airport&destination={urllib.parse.quote(destination)}"
-            f"&mode=driving&key={google_key}"
-        )
-        data = _safe_get(url)
-        for route in data.get("routes", [])[:3]:
-            leg = route.get("legs", [{}])[0]
-            dur = leg.get("duration", {}).get("value", 0) // 60
-            dist = leg.get("distance", {}).get("value", 0) / 1000
-            results.append({
-                "name": "Airport transfer",
-                "mode": "taxi_or_rideshare",
-                "duration_minutes": dur,
-                "distance_km": round(dist, 1),
-                "estimated_cost": None,
-                "currency": currency,
-                "frequency": "on_demand",
-                "source": "google_directions",
-                "source_urls": [url],
-                "assumptions": [
-                    "Requires real airport IATA code for accurate routing",
-                ],
-                "limitations": [
-                    "Estimate only; verify with local transport providers",
-                ],
-            })
-
-    if not results:
-        results.append({
-            "name": "Local transport estimate",
-            "mode": "mixed",
-            "duration_minutes": 45,
-            "distance_km": 15.0,
-            "estimated_cost": round(budget * 0.15, 2) if budget else 50.0,
-            "currency": currency,
-            "frequency": "daily",
-            "source": "estimated",
-            "source_urls": [],
-            "assumptions": [
-                "No provider API key configured.",
-                "Cost and duration are rough estimates.",
-                "Replace with real provider data before any booking decision.",
-            ],
-            "limitations": [
-                "Mock data only; never treat as real schedule or pricing",
-            ],
-        })
-
-    return results
-
-def create_node(llm: ChatOpenAI, tracer: AuditTracer):
-    structured_llm = llm.with_structured_output(AgentFinding, method="json_schema")
-
-    def specialist(state: dict[str, Any]) -> dict[str, Any]:
+    def hotel_node(state) -> dict:
         incoming = next(
             (m for m in state.get("messages", [])
              if m.message_type == "request" and m.recipient == NAME),
@@ -244,86 +153,108 @@ def create_node(llm: ChatOpenAI, tracer: AuditTracer):
         if incoming is None:
             raise ValueError(f"Missing A2A request for {NAME}")
 
-        tracer.record("agent_started", NAME)
+        travel_request = TravelRequest.model_validate(state["request"])
+        adapted = to_hotel_request(
+            travel_request,
+            flight_candidates=[
+                opt.model_dump()
+                for finding in state.get("findings", [])
+                if finding.agent == "flight_agent"
+                for opt in finding.options
+            ],
+        )
+        notes = [*adapted.unresolved, *([provider_note] if provider_note else [])]
+
+        # One fetch per request, reused by both the proposal and the screening
+        # trace below.
+        hotel_inventory: list[Any] = []
+        transport_options: list[TransportOption] = []
+        if provider.covers(adapted.request):
+            result = provider.fetch(adapted.request)
+            hotel_inventory = result.items
+            notes.extend(result.notes)
+
+        # Transport seed data is static — no provider abstraction yet.
+        ctx = adapted.request.trip_context
+        arrival_airport = ctx.arrival_airport
+        if arrival_airport and ctx.dest_city_slug:
+            transport_options = transport_for(ctx.dest_city_slug, arrival_airport)
+        if not transport_options:
+            notes.append(
+                "No verified transport options are available for the selected arrival airport."
+            )
+
+        if not hotel_inventory and not transport_options:
+            tracer.record("agent_fallback", NAME, {
+                "reason": "no inventory for city/transport",
+                "source": provider.name,
+                "unresolved": notes,
+            })
+            result = prompt_only_node(state)
+            for finding in result.get("findings", []):
+                finding.warnings = [*finding.warnings, *notes, ESTIMATE_WARNING]
+            return result
+
+        tracer.record("agent_started", NAME, {"mode": "grounded", "source": provider.name})
         if tracer.database_path:
             save_agent_run(tracer.database_path, state["request_id"], NAME, "processing")
 
-        request = state["request"]
-
-        # Pull flight schedules from flight_agent findings (if available)
-        flight_schedules: list[dict[str, Any]] = []
-        for finding in state.get("findings", []):
-            if finding.agent == "flight_agent":
-                flight_schedules = [opt.model_dump() for opt in finding.options]
-                break
-
-        # Call provider tools
-        hotels = search_hotels(request)
-        transports = search_transport(request, flight_schedules)
-
-        # Assemble trusted context for the LLM
-        context_parts = [
-            "Travel request:\n" + _compact(request),
-            "\nVerified hotel options (sourced from provider APIs, estimates flagged):\n"
-            + _compact(hotels),
-            "\nVerified transport options (sourced from provider APIs, estimates flagged):\n"
-            + _compact(transports),
-        ]
-        if flight_schedules:
-            context_parts.insert(
-                1,
-                "\nFlight schedules from flight_agent (use to align check-in/out and transfers):\n"
-                + _compact(flight_schedules),
-            )
-
-        messages = [
-            SystemMessage(content=SYSTEM_POLICY + "\n" + INSTRUCTION),
-            HumanMessage(content="\n".join(context_parts)),
-        ]
-
         usage = TokenUsageCallback()
         try:
-            finding: AgentFinding = structured_llm.invoke(
-                messages, config={"callbacks": [usage]}
+            proposal, ranked_transport, response = run_hotel_agent(
+                adapted.request, hotel_inventory, transport_options,
+                StructuredLLM(llm), tracer=_InnerTracer(tracer),
             )
-            finding.agent = NAME
-            log_payload(
-                f"REQUEST {state['request_id']} | {NAME.upper()} RESPONSE",
-                finding,
+            screening = screen_hotels(adapted.request, hotel_inventory, ctx.dest_city_slug)
+
+            options = [
+                _hotel_candidate_to_option(c, travel_request.currency, assumption)
+                for c in proposal.candidates
+            ] + [
+                _transport_to_option(t, travel_request.currency)
+                for t in ranked_transport
+            ]
+
+            warnings = list(notes)
+            if response.escalate and response.escalation_reason:
+                warnings.append(f"Escalation requested: {response.escalation_reason}")
+
+            finding = AgentFinding(
+                agent=NAME,
+                summary=response.rationale,
+                options=options,
+                warnings=warnings,
+                confidence=response.confidence,
             )
+            log_payload(f"REQUEST {state['request_id']} | {NAME.upper()} RESPONSE", finding)
             tracer.record("agent_completed", NAME, {
+                "mode": "grounded",
+                "source": provider.name,
                 "confidence": finding.confidence,
                 "option_count": len(finding.options),
                 "warning_count": len(finding.warnings),
+                "hotel_candidate_count": len(proposal.candidates),
+                "transport_option_count": len(ranked_transport),
+                "screened_count": len(screening),
+                "excluded_count": sum(1 for s in screening if not s.included),
                 **usage.as_dict(),
             })
             if tracer.database_path:
                 save_agent_run(
-                    tracer.database_path,
-                    state["request_id"],
-                    NAME,
-                    "completed",
-                    usage.as_dict(),
-                    finding,
+                    tracer.database_path, state["request_id"], NAME, "completed",
+                    usage.as_dict(), finding,
                 )
             outgoing = response_message(
-                request=incoming,
-                sender=NAME,
-                payload_type="AgentFinding",
-                payload=finding,
+                request=incoming, sender=NAME, payload_type="AgentFinding", payload=finding
             )
             return {"findings": [finding], "messages": [outgoing]}
         except Exception as exc:
             tracer.record("agent_failed", NAME, {"error_type": type(exc).__name__})
             if tracer.database_path:
                 save_agent_run(
-                    tracer.database_path,
-                    state["request_id"],
-                    NAME,
-                    "failed",
-                    usage.as_dict(),
-                    error_type=type(exc).__name__,
+                    tracer.database_path, state["request_id"], NAME, "failed",
+                    usage.as_dict(), error_type=type(exc).__name__,
                 )
             raise
 
-    return specialist
+    return hotel_node

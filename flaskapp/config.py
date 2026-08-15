@@ -50,6 +50,19 @@ class Config:
     LLM_API_KEY = os.getenv("LLM_API_KEY")
     LLM_BASE_URL = os.getenv("LLM_BASE_URL")
     AI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "180"))
+    # Where Flight Agent's inventory comes from: "seed" (the project's static
+    # dataset, the default and what every golden scenario is pinned to) or
+    # "duffel" (live supplier search). Selecting duffel without a token falls
+    # back to seed with a visible warning rather than failing.
+    FLIGHT_INVENTORY_SOURCE = os.getenv("FLIGHT_INVENTORY_SOURCE", "seed").strip().lower()
+    DUFFEL_API_TOKEN = os.getenv("DUFFEL_API_TOKEN")
+    DUFFEL_API_VERSION = os.getenv("DUFFEL_API_VERSION", "v2")
+    DUFFEL_TIMEOUT_SECONDS = float(os.getenv("DUFFEL_TIMEOUT_SECONDS", "30"))
+    # Duffel's own cap on how long it waits for airlines, in ms (2000-60000).
+    # Keep it below DUFFEL_TIMEOUT_SECONDS so Duffel returns partial results
+    # before our HTTP client gives up on it.
+    DUFFEL_SUPPLIER_TIMEOUT_MS = int(os.getenv("DUFFEL_SUPPLIER_TIMEOUT_MS", "20000"))
+    DUFFEL_MAX_OFFERS = int(os.getenv("DUFFEL_MAX_OFFERS", "50"))
     TRACE_DIR = Path(os.getenv("TRACE_DIR", "instance/traces"))
     DATABASE = Path(os.getenv("DATABASE", "instance/travel_planner.sqlite3"))
     MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "12000"))

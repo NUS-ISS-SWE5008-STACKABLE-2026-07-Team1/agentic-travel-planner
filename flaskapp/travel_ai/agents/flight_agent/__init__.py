@@ -23,8 +23,9 @@ breaking other agents.
 
 from .agent import NAME, create_node
 from .adapter import AdaptedRequest, needs_wheelchair, to_flight_request, to_trip_context
-from .airports import resolve_airport
+from .airports import ResolvedRoute, resolve_airport, resolve_route
 from .domain import flight_preference_gaps, propose_flights, screen_flights
+from .providers import InventoryProvider, InventoryResult, get_inventory_provider
 from .reasoning import run_flight_agent
 from .schemas import (
     FlightAgentResponse,
@@ -46,10 +47,16 @@ __all__ = [
     "to_trip_context",
     "needs_wheelchair",
     "resolve_airport",
+    "resolve_route",
+    "ResolvedRoute",
     # Deterministic tool
     "propose_flights",
     "screen_flights",
     "flight_preference_gaps",
+    # Where inventory comes from — seed by default, Duffel when configured
+    "get_inventory_provider",
+    "InventoryProvider",
+    "InventoryResult",
     "SEED_FLIGHT_INVENTORY",
     # LLM reasoning layer over the tool's output
     "run_flight_agent",
