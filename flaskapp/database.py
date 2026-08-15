@@ -121,7 +121,17 @@ CREATE TABLE IF NOT EXISTS planning_jobs (
     request_json TEXT NOT NULL,
     submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TEXT,
-    error_type TEXT
+    error_type TEXT,
+    session_status TEXT NOT NULL DEFAULT 'active',
+    session_ended_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS intake_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL REFERENCES planning_jobs(request_id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS agent_runs (
@@ -155,6 +165,7 @@ CREATE INDEX IF NOT EXISTS idx_findings_request ON agent_findings(request_id);
 CREATE INDEX IF NOT EXISTS idx_messages_request ON a2a_messages(request_id);
 CREATE INDEX IF NOT EXISTS idx_audit_request ON audit_events(request_id, id);
 CREATE INDEX IF NOT EXISTS idx_jobs_submitted ON planning_jobs(submitted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_intake_messages_request ON intake_messages(request_id, id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_request ON agent_runs(request_id, agent);
 CREATE INDEX IF NOT EXISTS idx_feedback_created ON plan_feedback(created_at DESC);
 """
@@ -206,6 +217,13 @@ def initialize(path: Path | str) -> None:
         for name in ("origin_place", "destination_place"):
             if name not in request_columns:
                 connection.execute(f"ALTER TABLE travel_requests ADD COLUMN {name} TEXT")
+        job_columns = {row[1] for row in connection.execute("PRAGMA table_info(planning_jobs)")}
+        if "session_status" not in job_columns:
+            connection.execute(
+                "ALTER TABLE planning_jobs ADD COLUMN session_status TEXT NOT NULL DEFAULT 'active'"
+            )
+        if "session_ended_at" not in job_columns:
+            connection.execute("ALTER TABLE planning_jobs ADD COLUMN session_ended_at TEXT")
 
 
 def seed_login_user(path: Path | str, email: str, password_hash: str) -> None:
@@ -362,9 +380,76 @@ def create_planning_job(path: Path | str, request_id: str, user_id: int | None,
     with connect(path) as db:
         db.execute(
             """INSERT INTO planning_jobs (request_id, user_id, status, request_json)
-               VALUES (?, ?, 'queued', ?)""",
+               VALUES (?, ?, 'queued', ?)
+               ON CONFLICT(request_id) DO UPDATE SET status = 'queued',
+                   request_json = excluded.request_json""",
             (request_id, user_id, _json(request_payload)),
         )
+
+
+def save_intake_request(path: Path | str, request_id: str, user_id: int,
+                        request_payload: Any) -> bool:
+    """Create or update the durable row for a conversational user request."""
+    with connect(path) as db:
+        existing = db.execute(
+            "SELECT user_id, status FROM planning_jobs WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if existing and (existing["user_id"] != user_id or existing["status"] != "intake"):
+            return False
+        db.execute(
+            """INSERT INTO planning_jobs (request_id, user_id, status, request_json)
+               VALUES (?, ?, 'intake', ?)
+               ON CONFLICT(request_id) DO UPDATE SET request_json = excluded.request_json""",
+            (request_id, user_id, _json(request_payload)),
+        )
+        return True
+
+
+def owns_intake_request(path: Path | str, request_id: str, user_id: int) -> bool:
+    with connect(path) as db:
+        row = db.execute(
+            """SELECT 1 FROM planning_jobs
+               WHERE request_id = ? AND user_id = ? AND status = 'intake'""",
+            (request_id, user_id),
+        ).fetchone()
+        return row is not None
+
+
+def save_intake_message(path: Path | str, request_id: str, role: str, content: str) -> None:
+    """Append one visible intake-chat turn to its parent user request."""
+    if role not in {"user", "assistant"}:
+        raise ValueError("Unsupported intake message role")
+    with connect(path) as db:
+        db.execute(
+            "INSERT INTO intake_messages (request_id, role, content) VALUES (?, ?, ?)",
+            (request_id, role, content),
+        )
+
+
+def get_intake_conversation(path: Path | str, request_id: str,
+                            user_id: int | None) -> list[dict[str, Any]]:
+    """Return the ordered intake thread only to its owning user."""
+    if user_id is None:
+        return []
+    with connect(path) as db:
+        return [dict(row) for row in db.execute(
+            """SELECT m.role, m.content, m.created_at
+               FROM intake_messages m
+               JOIN planning_jobs j ON j.request_id = m.request_id
+               WHERE m.request_id = ? AND j.user_id = ? ORDER BY m.id""",
+            (request_id, user_id),
+        ).fetchall()]
+
+
+def end_user_request_session(path: Path | str, request_id: str, user_id: int) -> bool:
+    with connect(path) as db:
+        cursor = db.execute(
+            """UPDATE planning_jobs SET session_status = 'ended',
+                      session_ended_at = COALESCE(session_ended_at, CURRENT_TIMESTAMP)
+               WHERE request_id = ? AND user_id = ?""",
+            (request_id, user_id),
+        )
+        return cursor.rowcount == 1
 
 
 def update_planning_job(path: Path | str, request_id: str, status: str,
@@ -413,6 +498,10 @@ def get_admin_activity(path: Path | str, limit: int = 50) -> list[dict[str, Any]
         output = []
         for job in jobs:
             item = dict(job)
+            item["display_status"] = (
+                "Completed" if item["status"] in {"completed", "failed", "cancelled"}
+                else "In Progress"
+            )
             item["request"] = json.loads(item.pop("request_json"))
             runs = db.execute(
                 "SELECT * FROM agent_runs WHERE request_id = ? ORDER BY started_at, agent",
@@ -423,6 +512,11 @@ def get_admin_activity(path: Path | str, limit: int = 50) -> list[dict[str, Any]
                 agent = dict(run)
                 agent["response"] = json.loads(agent.pop("response_json")) if agent["response_json"] else None
                 item["agents"].append(agent)
+            item["conversation"] = [dict(message) for message in db.execute(
+                """SELECT role, content, created_at FROM intake_messages
+                   WHERE request_id = ? ORDER BY id""",
+                (job["request_id"],),
+            ).fetchall()]
             item["usage"] = {
                 "input_tokens": sum(run["input_tokens"] for run in runs),
                 "output_tokens": sum(run["output_tokens"] for run in runs),

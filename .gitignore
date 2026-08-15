@@ -8,5 +8,3 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 instance/traces/
-instance/*.sqlite3
-instance/*.sqlite3-*

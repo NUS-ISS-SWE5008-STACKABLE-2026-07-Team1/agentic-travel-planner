@@ -7,6 +7,7 @@ from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
     ExtractedIntent, IntakeExtraction,
 )
 from tests.test_api import TestConfig
+from flaskapp.database import get_admin_activity, get_system_logs
 
 
 class ConfiguredConfig(TestConfig):
@@ -61,6 +62,59 @@ def test_the_tokyo_prompt_returns_gaps_and_never_invents_dates(monkeypatch):
     assert "origin" in keys and "departure_date" in keys and "budget" in keys
     assert "destination" not in keys
     assert sum(1 for field in body["missing"] if field["name"] == "traveller_ages") == 2
+
+
+def test_follow_up_turn_merges_with_previously_collected_details(monkeypatch):
+    client = signed_in()
+    stub_extraction(monkeypatch, ExtractedIntent(origin="Singapore", budget=5000))
+    body = client.post("/api/v1/travel-intents", json={
+        "prompt": "We are leaving from Singapore with a budget of 5000 dollars",
+        "extracted": {"destination": "Tokyo", "travellers": 2},
+    }).get_json()
+    assert body["extracted"]["destination"] == "Tokyo"
+    assert body["extracted"]["origin"] == "Singapore"
+    assert body["extracted"]["budget"] == 5000
+    assert body["complete"] is False
+
+
+def test_first_intake_message_creates_an_active_admin_request(tmp_path, monkeypatch):
+    class IntakeConfig(ConfiguredConfig):
+        DATABASE = tmp_path / "intake-request.sqlite3"
+
+    client = create_app(IntakeConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_id"] = 1
+    stub_extraction(monkeypatch, ExtractedIntent(destination="Tokyo"))
+    response = client.post("/api/v1/travel-intents", json={"prompt": "Tokyo"})
+    assert response.status_code == 200
+    request_id = response.get_json()["request_id"]
+    rows = get_admin_activity(IntakeConfig.DATABASE)
+    assert rows[0]["request_id"] == request_id
+    assert rows[0]["status"] == "intake"
+    assert rows[0]["display_status"] == "In Progress"
+    assert rows[0]["request"]["destination"] == "Tokyo"
+    assert [(message["role"], message["content"]) for message in rows[0]["conversation"]] == [
+        ("user", "Tokyo"),
+        ("assistant", response.get_json()["question"]),
+    ]
+    events = [item["event"] for item in reversed(get_system_logs(IntakeConfig.DATABASE))]
+    assert events == [
+        "user_request_submitted",
+        "orchestrator_validation_started",
+        "orchestrator_validation_completed",
+    ]
+
+    follow_up = client.post("/api/v1/travel-intents", json={
+        "prompt": "I will leave from Singapore",
+        "request_id": request_id,
+        "extracted": response.get_json()["extracted"],
+    })
+    assert follow_up.status_code == 200
+    conversation = get_admin_activity(IntakeConfig.DATABASE)[0]["conversation"]
+    assert [message["role"] for message in conversation] == [
+        "user", "assistant", "user", "assistant",
+    ]
 
 
 def test_injection_is_rejected_before_the_model_is_called(monkeypatch):

@@ -21,6 +21,10 @@ class AuditTracer:
         self.request_id = request_id
         self._previous_hash = "GENESIS"
         self.database_path = database_path
+        if self.path.is_file():
+            lines = [line for line in self.path.read_text(encoding="utf-8").splitlines() if line]
+            if lines:
+                self._previous_hash = json.loads(lines[-1]).get("hash", "GENESIS")
 
     def record(self, event: str, agent: str, details: dict[str, Any] | None = None) -> None:
         # Do not record prompts, API keys, or raw personal data in production traces.

@@ -254,7 +254,7 @@ const agentChat = document.querySelector("#agent-chat");
 if (agentChat) {
   const activityList = document.querySelector("#agent-activity");
   const statusLabel = document.querySelector("#job-status");
-  const result = document.querySelector("#chat-result");
+  const result = document.querySelector("#plan-content");
   const refinementForm = document.querySelector("#chat-refinement-form");
   const feedbackSection = document.querySelector("#plan-feedback");
   const negativeFeedbackForm = document.querySelector("#negative-feedback-form");
@@ -275,6 +275,11 @@ if (agentChat) {
   const completedMilestones = new Set();
   const activeAgents = new Set();
   const travelIcon = document.querySelector("#planning-travel-icon");
+  const endRequestSession = () => fetch(agentChat.dataset.sessionEndUrl, {
+    method: "POST",
+    headers: {"X-CSRFToken": document.querySelector("meta[name='csrf-token']").content},
+    keepalive: true
+  }).catch(() => {});
 
   const agentNames = {
     system: "Planning system", flight_agent: "Flight agent",
@@ -338,7 +343,7 @@ if (agentChat) {
     const item = document.createElement("li");
     const time = new Date(event.timestamp).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
     item.textContent = `${time} · ${agentNames[event.agent] || event.agent} ${eventLabels[event.event] || event.event}`;
-    activityList.append(item);
+    if (activityList) activityList.append(item);
   };
 
   const renderPlan = (response) => {
@@ -527,10 +532,13 @@ if (agentChat) {
       });
     } finally {
       stopped = true;
+      await endRequestSession();
       showPageLoader();
       window.location.assign(homeButton.dataset.homeUrl);
     }
   });
+
+  window.addEventListener("pagehide", endRequestSession);
 
   poll();
 }
@@ -543,6 +551,12 @@ if (adminMonitor) {
   const liveStatus = document.querySelector("#admin-live-status");
   const tokenTotals = document.querySelector("#admin-token-totals");
   const userConsumption = document.querySelector("#admin-user-consumption");
+  const liveRequestLabel = document.querySelector("#live-request-label");
+  const liveRequestStatus = document.querySelector("#live-request-status");
+  const liveRequestConversation = document.querySelector("#live-request-conversation");
+  const liveAgentStages = document.querySelector("#live-agent-stages");
+  const liveProcessingLog = document.querySelector("#live-processing-log");
+  const processingTimelineDialog = document.querySelector("#processing-timeline-dialog");
   let selectedRequestId = null;
   let requests = [];
   let consumption = {totals: {}, users: []};
@@ -572,8 +586,76 @@ if (adminMonitor) {
   };
   const statusClass = (status) => ({
     completed: "text-bg-success", processing: "text-bg-primary",
-    queued: "text-bg-secondary", failed: "text-bg-danger", cancelled: "text-bg-warning"
+    intake: "text-bg-info", queued: "text-bg-secondary",
+    failed: "text-bg-danger", cancelled: "text-bg-warning"
   }[status] || "text-bg-secondary");
+
+  const renderLiveProcessing = () => {
+    const selected = requests.find((item) => item.request_id === selectedRequestId);
+    liveAgentStages.replaceChildren();
+    liveProcessingLog.replaceChildren();
+    liveRequestConversation.replaceChildren();
+    if (!selected) {
+      liveRequestLabel.textContent = "Select a request above to inspect its processing stages.";
+      liveRequestStatus.className = "badge text-bg-secondary";
+      liveRequestStatus.textContent = "Waiting";
+      return;
+    }
+    const liveRoute = selected.request.origin && selected.request.destination
+      ? `${selected.request.origin} → ${selected.request.destination}` : "Trip details being collected";
+    liveRequestLabel.textContent = `${liveRoute} · ${selected.request_id}`;
+    liveRequestStatus.className = `badge ${statusClass(selected.status)}`;
+    liveRequestStatus.textContent = selected.status;
+    (selected.conversation || []).forEach((entry) => {
+      const message = document.createElement("div");
+      message.className = `admin-conversation-message ${entry.role}`;
+      const speaker = entry.role === "user" ? "Traveller" : "Orchestrator";
+      const label = document.createElement("div");
+      label.className = "small fw-semibold mb-1";
+      label.textContent = `${speaker} · ${new Date(entry.created_at + "Z").toLocaleTimeString()}`;
+      const content = document.createElement("div");
+      content.textContent = entry.content;
+      message.append(label, content); liveRequestConversation.append(message);
+    });
+    if (!(selected.conversation || []).length) {
+      liveRequestConversation.textContent = "No orchestrator conversation was recorded for this request.";
+    }
+    selected.agents.forEach((agent) => {
+      const column = document.createElement("div");
+      column.className = "col-sm-6 col-xl-4";
+      const stage = document.createElement("div");
+      stage.className = "live-agent-stage";
+      const top = document.createElement("div");
+      top.className = "d-flex justify-content-between gap-2";
+      const name = document.createElement("strong");
+      name.textContent = agentNames[agent.agent] || agent.agent;
+      const badge = document.createElement("span");
+      badge.className = `badge ${statusClass(agent.status)}`;
+      badge.textContent = agent.status;
+      top.append(name, badge);
+      const timing = document.createElement("div");
+      timing.className = "small text-body-secondary mt-2";
+      timing.textContent = agent.completed_at
+        ? `Completed ${new Date(agent.completed_at + "Z").toLocaleTimeString()}`
+        : agent.started_at ? `Started ${new Date(agent.started_at + "Z").toLocaleTimeString()}` : "Queued";
+      stage.append(top, timing); column.append(stage); liveAgentStages.append(column);
+    });
+    if (!selected.agents.length) liveAgentStages.textContent = selected.status === "intake"
+      ? "Orchestrator intake is collecting and validating the required trip details."
+      : "Waiting for the first agent stage to start…";
+
+    const requestLogs = logs.filter((entry) => entry.request_id === selected.request_id).reverse();
+    requestLogs.forEach((entry) => {
+      const item = document.createElement("li");
+      const time = document.createElement("span");
+      time.className = "small text-body-secondary me-2";
+      time.textContent = new Date(entry.timestamp).toLocaleTimeString();
+      const message = document.createElement("span");
+      message.textContent = `${agentNames[entry.agent] || entry.agent}: ${entry.event.replaceAll("_", " ")}`;
+      item.append(time, message); liveProcessingLog.append(item);
+    });
+    if (!requestLogs.length) liveProcessingLog.textContent = "No processing events recorded yet.";
+  };
 
   const renderDetails = () => {
     const request = requests.find((item) => item.request_id === selectedRequestId);
@@ -784,13 +866,17 @@ if (adminMonitor) {
       row.className = item.request_id === selectedRequestId ? "table-primary admin-request" : "admin-request";
       row.tabIndex = 0;
       const values = [new Date(item.submitted_at + "Z").toLocaleString(), item.name || item.email || "Unknown user",
-        `${item.request.origin} → ${item.request.destination}`, item.status,
+        `${item.request.origin} → ${item.request.destination}`, item.display_status,
         item.feedback_rating === "up" ? "👍 Good Plan" : item.feedback_rating === "down" ? "👎 Needs Improvement" : "Not Rated",
         item.usage?.input_tokens || 0,
         item.usage?.output_tokens || 0, item.usage?.total_tokens || 0];
+      values[2] = item.request.origin && item.request.destination ? values[2] : "Details pending";
+      const sessionState = item.session_status === "ended" ? "Ended" : "Active";
+      values.splice(4, 0, sessionState);
       values.forEach((value, index) => {
         const cell = document.createElement("td");
-        cell.textContent = index >= 5 ? value.toLocaleString() : value;
+        cell.textContent = index >= 6 ? value.toLocaleString() : value;
+        if (index === 4) cell.className = sessionState === "Active" ? "text-success fw-semibold" : "text-body-secondary";
         row.append(cell);
       });
       const selectRequest = () => {
@@ -798,19 +884,25 @@ if (adminMonitor) {
         lastCompletionSignature = null;
         renderRequestTable();
         renderDetails();
+        renderLiveProcessing();
         lastCompletionSignature = completionSignature();
+        if (!processingTimelineDialog.open) processingTimelineDialog.showModal();
       };
       row.addEventListener("click", selectRequest);
       row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") selectRequest(); });
       requestList.append(row);
     });
-    if (!requests.length) requestList.innerHTML = '<tr><td colspan="8" class="text-body-secondary">No planning requests recorded yet.</td></tr>';
+    if (!requests.length) requestList.innerHTML = '<tr><td colspan="9" class="text-body-secondary">No user requests recorded yet.</td></tr>';
     document.querySelector("#request-page-status").textContent = `Page ${requestPage} of ${pageCount} · ${requests.length} requests`;
     document.querySelector("#request-page-previous").disabled = requestPage === 1;
     document.querySelector("#request-page-next").disabled = requestPage === pageCount;
   };
   document.querySelector("#request-page-previous").addEventListener("click", () => { requestPage -= 1; renderRequestTable(); });
   document.querySelector("#request-page-next").addEventListener("click", () => { requestPage += 1; renderRequestTable(); });
+  document.querySelector("#close-processing-timeline").addEventListener("click", () => processingTimelineDialog.close());
+  processingTimelineDialog.addEventListener("click", (event) => {
+    if (event.target === processingTimelineDialog) processingTimelineDialog.close();
+  });
 
   const renderPlatform = () => {
     const kpis = document.querySelector("#platform-kpis");
@@ -1040,6 +1132,7 @@ if (adminMonitor) {
       renderPrompts();
       renderAdministrators();
       renderFeedback();
+      renderLiveProcessing();
       const nextSignature = completionSignature();
       if (nextSignature !== lastCompletionSignature) {
         renderDetails();

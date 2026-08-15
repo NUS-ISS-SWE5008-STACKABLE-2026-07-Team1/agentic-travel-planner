@@ -1,8 +1,7 @@
 /* Conversational trip intake.
  *
- * One model call happens on the first submit. Everything after that is the
- * clarification card round-tripping through /travel-intents/resolve, which is
- * pure server-side merging - no tokens are spent filling gaps.
+ * Every message is read by the orchestrator and merged into the confirmed trip
+ * brief. Specialists start only after deterministic gap checks pass.
  */
 const intentForm = document.querySelector("#intent-form");
 
@@ -17,8 +16,17 @@ if (intentForm) {
     ["female", "Female"], ["male", "Male"],
     ["non_binary", "Non-binary"], ["prefer_not_to_say", "Prefer not to say"]
   ];
+  let intakeState = null;
+  let sessionHandoff = false;
 
   const csrf = () => document.querySelector("meta[name='csrf-token']").content;
+  const endSession = () => {
+    const requestId = intakeState?.request_id;
+    if (!requestId) return Promise.resolve();
+    return fetch(`${intentForm.dataset.sessionEndBase}/${requestId}/session/end`, {
+      method: "POST", headers: {"X-CSRFToken": csrf()}, keepalive: true
+    }).catch(() => {});
+  };
   const scrollConversationToLatest = () => {
     conversation.scrollTop = conversation.scrollHeight;
   };
@@ -49,6 +57,29 @@ if (intentForm) {
     alert.setAttribute("role", "alert");
     alert.textContent = message;
     conversation.append(alert);
+  };
+
+  const renderProgress = (state) => {
+    conversation.querySelector(".intake-progress")?.remove();
+    if (state.complete) return;
+    const progress = document.createElement("div");
+    progress.className = "intake-progress";
+    const title = document.createElement("div");
+    title.className = "intake-progress-title";
+    title.textContent = `${state.missing.length} detail${state.missing.length === 1 ? "" : "s"} still needed`;
+    progress.append(title);
+    const chips = document.createElement("div");
+    chips.className = "intake-gap-chips";
+    for (const field of state.missing) {
+      const chip = document.createElement("span");
+      chip.textContent = field.traveller_index === null
+        ? field.label
+        : `Traveller ${field.traveller_index + 1}: ${field.label}`;
+      chips.append(chip);
+    }
+    progress.append(chips);
+    conversation.append(progress);
+    scrollConversationToLatest();
   };
 
   /* One input per gap, typed by the server's `input` kind. */
@@ -168,25 +199,31 @@ if (intentForm) {
      endpoint and follow it to the chat page. */
   const advance = async (state, previousCard = null) => {
     if (!state.complete) {
-      previousCard?.remove();
-      renderCard(state);
+      intakeState = state;
+      renderProgress(state);
+      promptInput.value = "";
+      promptInput.placeholder = "Reply with the missing details…";
+      promptInput.focus();
       return;
     }
+    state.request._request_id = state.request_id;
     const job = await post(intentForm.dataset.planEndpoint, state.request);
     previousCard?.remove();
     bubble("intake-bubble-assistant", "Thanks — briefing the specialist agents now.");
     sessionStorage.setItem("atlas-plan-payload", JSON.stringify(state.request));
+    sessionHandoff = true;
     window.location.assign(job.chat_url);
   };
 
   const submitPrompt = async (prompt) => {
-    conversation.replaceChildren();
     submitButton.disabled = true;
     spinner.classList.remove("d-none");
     try {
       bubble("intake-bubble-user", prompt);
       const state = await post(intentForm.dataset.intentEndpoint, {
-        prompt
+        prompt,
+        extracted: intakeState?.extracted || {},
+        request_id: intakeState?.request_id || null
       });
       if (state.question) bubble("intake-bubble-assistant", state.question);
       await advance(state);
@@ -217,7 +254,16 @@ if (intentForm) {
       promptInput.value = initialPrompt;
       submitPrompt(initialPrompt);
     } else {
+      bubble("intake-bubble-assistant", "Tell me what you have in mind. I’ll make sure the trip brief is complete before involving the specialist agents.");
       promptInput.focus();
     }
   }
+  document.querySelector("#intake-home")?.addEventListener("click", async (event) => {
+    event.preventDefault();
+    await endSession();
+    window.location.assign(event.currentTarget.href);
+  });
+  window.addEventListener("pagehide", () => {
+    if (!sessionHandoff) endSession();
+  });
 }
