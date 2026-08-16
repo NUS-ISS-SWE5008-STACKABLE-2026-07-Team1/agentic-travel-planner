@@ -11,6 +11,7 @@ from werkzeug.security import generate_password_hash
 
 from flaskapp.database import authenticate_user, create_user, get_intake_conversation
 from flaskapp.countries import COUNTRIES
+from flaskapp.places import city_options
 from flaskapp.forms import LoginForm, RegistrationForm
 from flaskapp.admin_auth import is_admin_email
 
@@ -93,10 +94,14 @@ def register():
 @pages_bp.get("/main")
 @login_required
 def main():
+    # `city_options` is embedded in the page rather than fetched, so the
+    # dependent city <select> repopulates instantly and the form still works if
+    # a later request fails. It is public reference data — no per-user content.
     return render_template(
         "main.html", user_name=session.get("user_name", "Traveller"), countries=COUNTRIES,
         is_admin=is_admin_email(current_app.config, session.get("user_email")),
         user_country=session.get("user_country", ""),
+        city_options=city_options(),
     )
 
 

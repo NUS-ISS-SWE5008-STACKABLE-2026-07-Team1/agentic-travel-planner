@@ -8,11 +8,10 @@ Accessibility Agent, and Risk & Advisory Agent.
 
 The four specialists run concurrently from a typed shared state. LangGraph waits
 at a fan-in barrier, then the orchestrator synthesizes their structured findings.
-No agent performs a booking. Flight inventory remains static demo data, while the
-Accessibility Agent can optionally perform a bounded, allowlisted Tavily search.
-Prices, availability, advisories, and unsupported accessibility claims remain
-estimates or verification tasks; use approved live supplier APIs before relying on
-the planner for real-time decisions.
+No agent performs a booking. The starter also has no live supplier/search tools,
+so generated prices, availability, advisories, and accessibility claims are
+explicitly estimates or verification tasks. Add approved data-provider tools before
+using it for real-time decisions.
 
 Each response includes agent findings, concise selection factors, alternatives,
 sources, assumptions, limitations, confidence, and safety warnings. This is useful
@@ -28,8 +27,8 @@ in `prompt.py`, reducing merge conflicts between team members.
 | --- | --- | --- |
 | Flight Agent | `agents/flight_agent/` | Flight search and reasoning under arrival-time, schedule, connection, baggage, and budget constraints. |
 | Hotel & Transport Agent | `agents/hotel_transport_agent/` | Accommodation and local transit selection compatible with flights and traveller requirements. |
-| Accessibility Agent | `agents/accessibility_agent/` | Source-grounded accessibility research, evidence ratings, end-to-end validation, and explicit veto warnings. |
-| Risk & Advisory Agent | `agents/risk_advisory_agent/` | Visa, seasonal, disruption, event, health, and safety risks with high-severity escalation. |
+| Accessibility Agent | `agents/accessibility_agent/` | End-to-end accessibility validation, explicit veto warnings, and future bias-audit tooling. |
+| Risk & Advisory Agent | `agents/risk_advisory_a1gent/` | Visa, seasonal, disruption, event, health, and safety risks with high-severity escalation. |
 | Orchestrator Agent | `agents/orchestrator_agent/` | Coordination, governance, conflict/escalation handling, and final itinerary synthesis. |
 
 The resulting layout is:
@@ -43,20 +42,22 @@ flaskapp/travel_ai/
 |   |   |-- agent.py               # LangGraph node (what the graph runs today)
 |   |   |-- prompt.py
 |   |   |-- adapter.py             # TravelRequest <-> Flight Agent contracts
-|   |   |-- airports.py            # country -> primary airport resolution
+|   |   |-- airports.py            # country + city -> airport resolution
 |   |   |-- schemas.py             # flight-specific contracts
 |   |   |-- domain.py              # deterministic search/filter/rank
 |   |   |-- guardrails.py          # input/output screening and grounding
 |   |   |-- reasoning.py           # LLM layer over the deterministic tool
-|   |   `-- seed_data.py           # static inventory (+ seed_data_extended.csv)
+|   |   |-- seed_data.py           # static inventory (+ seed_data_extended.csv)
+|   |   `-- providers/             # where inventory comes from
+|   |       |-- base.py            # InventoryProvider protocol + InventoryResult
+|   |       |-- seed.py            # the static dataset (default)
+|   |       `-- duffel.py          # live Duffel supplier search (opt-in)
 |   |-- hotel_transport_agent/
 |   |   |-- agent.py
 |   |   `-- prompt.py
 |   |-- accessibility_agent/
 |   |   |-- agent.py
-|   |   |-- guardrails.py          # input, evidence and output policy gates
-|   |   |-- prompt.py
-|   |   `-- retrieval.py           # allowlisted accessibility evidence search
+|   |   `-- prompt.py
 |   |-- risk_advisory_agent/
 |   |   |-- agent.py
 |   |   `-- prompt.py
@@ -99,11 +100,25 @@ node, so runtime behaviour is unchanged. Connecting them is one change to
 `reasoning.run_flight_agent` needs), deliberately left as its own reviewed step
 because it changes what every downstream agent receives.
 
-Two limits to know before wiring it in. Inventory is 104 static rows covering
-SIN <-> NRT/LHR/SYD/BKK/HKG between 2026-08-25 and 2026-10-08, so anything else
-correctly returns no candidates. The manual form now collects an optional place or
-city separately from each country, but `airports.py` still reduces the country to one
-primary gateway. Live airport search is required to route the place precisely.
+One limit to know before wiring it in: by default inventory is 284 static rows,
+SIN-origin hub-and-spoke across 18 airports between 2026-08-24 and 2026-10-08,
+so anything else correctly returns no candidates.
+
+The intake form collects a country **and a city**, and a city resolves to every
+airport serving it — picking Tokyo ranks Haneda and Narita together rather than
+silently meaning Narita. The dataset (`flaskapp/places.py`, 253 cities across 61
+countries) is shared with the other agents, so hotel and transport inventory can
+be keyed on the same cities; see
+[docs/places_contract.md](docs/places_contract.md).
+
+`domain.py` takes inventory as a plain argument and never fetches it, so the
+source is swappable. `providers/` holds that seam: `seed` is the default (and
+what the golden scenarios are pinned to), and `FLIGHT_INVENTORY_SOURCE=duffel`
+with a `DUFFEL_API_TOKEN` swaps in a live Duffel supplier search. Duffel
+publishes no accessibility or seat-availability data, which is handled as an
+explicit "unverified" third state rather than guessed either way — see
+[docs/flight_agent/inventory_sources.md](docs/flight_agent/inventory_sources.md)
+for the full trade-off table and setup steps.
 
 Two demo scripts exercise it against a live model:
 
@@ -201,25 +216,6 @@ owning execution module, pass a small and sourced result into the model context,
 retain the shared tracing and safeguards. Keep API keys in environment configuration,
 never in prompts or traces.
 
-## User experience
-
-After login, users can start with free text or open **Prefer to fill in a form
-instead**.
-
-- **Conversational intake:** **Start planning** routes to `/chat/intake`, which uses
-  the existing chat layout. The orchestrator extracts the initial message and asks
-  for required missing details in a scrollable Travel Assistant card. Once complete,
-  the request moves to `/chat/<request-id>` for live agent status, the final plan,
-  refinement, and feedback.
-- **Manual form:** the departure country defaults to the registered user's country.
-  Selecting a country enables an optional place/city field. The return date cannot
-  be earlier than the selected departure date.
-- **Traveller details:** changing the traveller count creates one card per person
-  for age, gender, and a combined free-text field for preferences and accessibility
-  needs.
-- **Administration:** configured administrators can open `/admin` to monitor
-  requests, agent runs, token usage, feedback, and registered administrators.
-
 ## Setup
 
 Requires Python 3.11 or newer.
@@ -267,15 +263,6 @@ compatibility but should not be used for new setups.
 Run `python app.py` after configuration. The local address is
 `http://127.0.0.1:5000`. Never paste credentials into prompts, logs, source code, or
 Git. If a key is exposed, revoke and replace it with the provider immediately.
-
-For source-grounded accessibility findings, add `TAVILY_API_KEY` to
-`.env.secrets`. The accessibility agent performs one bounded search restricted to
-Wheel the World, accessibleGO, Pantou, AccessAble, Wheelmap/accessibility.cloud,
-and configured official transport, airline, government, and tourism domains. Add
-other verified provider domains with the comma-separated
-`ACCESSIBILITY_EXTRA_DOMAINS` setting in `.env`. Without the search key—or when a
-search fails—the agent must report the evidence gap and cannot claim verified
-features or high-confidence ratings.
 
 For local development, set `FLASK_DEBUG=true` in the ignored `.env` file. Running
 `python app.py` then automatically restarts the server when application code or
@@ -325,9 +312,7 @@ Send `POST /api/v1/travel-plans`:
 ```json
 {
   "origin": "Singapore",
-  "origin_place": "Singapore city centre",
-  "destination": "Korea, South",
-  "destination_place": "Seoul",
+  "destination": "Tokyo",
   "departure_date": "2026-10-10",
   "return_date": "2026-10-16",
   "travellers": 2,
@@ -361,6 +346,5 @@ add representative evaluation datasets, outcome-parity tests, human escalation,
 incident handling, red-team testing, supplier monitoring, authentication, rate
 limiting, encrypted trace storage, and a named system owner.
 
-Run tests with `pytest -q`. The current suite contains 207 tests and does not call
-OpenAI or Tavily. Pin exact dependency versions in a generated lock file for
-production deployment.
+Run tests with `pytest -q`. Tests do not call OpenAI. Pin exact dependency versions
+in a generated lock file for production deployment.

@@ -8,6 +8,7 @@ lands on for either, this module should not need to change.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime
 
 from flaskapp.travel_ai.agents.flight_agent.schemas import (
@@ -20,6 +21,11 @@ from flaskapp.travel_ai.agents.flight_agent.schemas import (
     PreferenceRelaxation,
     TripContext,
 )
+
+# One airport code, or every airport serving a chosen city. Route filtering
+# takes either so a caller that has resolved a city and one that only knows a
+# single gateway share the same functions.
+AirportCodes = str | Sequence[str]
 
 RED_EYE_DEPARTURE_HOUR = 22  # local hour and later counts as a red-eye departure
 RED_EYE_ARRIVAL_HOUR = 6  # local hour before this counts as a red-eye arrival
@@ -48,8 +54,27 @@ def _parse_ts(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
-def _matches_route(item: FlightInventoryItem, origin: str, dest: str) -> bool:
-    return item.origin_airport == origin and item.dest_airport == dest
+def _as_codes(value: AirportCodes | None) -> tuple[str, ...]:
+    """Normalise one airport code or several into a tuple.
+
+    Callers pass a list once a city has been resolved (Tokyo -> NRT, HND) and a
+    bare string from anywhere predating city intake — golden scenarios, unit
+    tests, a renegotiation that names one gateway. Accepting both keeps every
+    existing call site working untouched.
+    """
+    if value is None:
+        return ()
+    return (value,) if isinstance(value, str) else tuple(value)
+
+
+def _matches_route(item: FlightInventoryItem, origin: AirportCodes, dest: AirportCodes) -> bool:
+    """Whether this flight serves any origin airport -> any destination airport.
+
+    Membership, not equality: a traveller who chose Tokyo should see flights
+    into Haneda and Narita both, and comparing against a single code here is
+    exactly the single-gateway limitation that collecting a city removes.
+    """
+    return item.origin_airport in _as_codes(origin) and item.dest_airport in _as_codes(dest)
 
 
 def _party_size(ctx: TripContext) -> int:
@@ -144,15 +169,30 @@ def _effective_cost(item: FlightInventoryItem, prefs: FlightPreferences, party_s
     return item.price * party_size + seat_fee_estimate(item, prefs, party_size)
 
 
-def _rank_key(item: FlightInventoryItem, prefs: FlightPreferences, direction: str, party_size: int) -> tuple:
+def _rank_key(
+    item: FlightInventoryItem,
+    prefs: FlightPreferences,
+    direction: str,
+    party_size: int,
+    *,
+    needs_wheelchair_assist: bool = False,
+) -> tuple:
     """Lexicographic, not a blended score — each position is individually
-    nameable ("violates avoid_red_eye", "violates prefer_direct", "can't meet
-    the seat configuration", "later than the traveller's soft arrival
-    preference"), so ranking stays explainable instead of an opaque weighted
-    number nobody can justify.
+    nameable ("accessibility unverified", "violates avoid_red_eye", "violates
+    prefer_direct", "can't meet the seat configuration", "later than the
+    traveller's soft arrival preference"), so ranking stays explainable
+    instead of an opaque weighted number nobody can justify.
+
+    The unverified-accessibility position leads because it outranks every
+    other consideration for the traveller it applies to: if a wheelchair user
+    can be given a flight whose assistance is confirmed, that beats a cheaper
+    or better-timed flight whose assistance is merely unknown. It is inert for
+    everyone else, and inert for seed inventory (every seed row states a real
+    True/False), so pre-existing rankings are unchanged.
     """
     soft_pref = _soft_arrival_preference(prefs, direction)
     return (
+        1 if (needs_wheelchair_assist and item.wheelchair_assist_available is None) else 0,
         1 if (prefs.avoid_red_eye and _is_red_eye(item)) else 0,
         1 if (prefs.prefer_direct and item.stops > 0) else 0,
         1 if _seat_config_unsatisfiable(item, prefs) else 0,
@@ -191,8 +231,17 @@ def _constraint_failure_reasons(
     applies_to_this_leg = constraints is not None and constraints.direction in (None, direction)
     reasons: list[str] = []
     if applies_to_this_leg:
-        if constraints.require_wheelchair_assist and not item.wheelchair_assist_available:
-            reasons.append("constraint require_wheelchair_assist not met")
+        # Fail-closed on unknown here, unlike the implicit filter below. An
+        # explicit require_wheelchair_assist is orchestrator-issued mid-
+        # negotiation — typically because Accessibility Agent already vetoed a
+        # round — so "the supplier doesn't publish it" is not good enough to
+        # satisfy it. Unverified is not met.
+        if constraints.require_wheelchair_assist and item.wheelchair_assist_available is not True:
+            reasons.append(
+                "constraint require_wheelchair_assist not met"
+                if item.wheelchair_assist_available is False
+                else "constraint require_wheelchair_assist cannot be verified for this flight"
+            )
         if constraints.max_price is not None and item.price > constraints.max_price:
             reasons.append(f"price {item.price} exceeds constraint max_price {constraints.max_price}")
         if constraints.arrive_before is not None and _parse_ts(item.arr_ts) > _parse_ts(constraints.arrive_before):
@@ -202,8 +251,17 @@ def _constraint_failure_reasons(
     # constraint is scoped to the other leg) — fall back to the implicit
     # proactive filter. Accessibility Agent still holds veto authority
     # end-to-end regardless of what Flight filters here.
+    #
+    # `None` (source doesn't publish the field) deliberately does NOT exclude.
+    # Excluding on unknown would return zero options to every wheelchair user
+    # the moment inventory comes from a live feed, which reads as "no flights
+    # exist for you" rather than the truth, "we could not check". The flight
+    # stays in, carries `wheelchair_assist_available=None` through to the
+    # candidate, and agent.py turns that into an explicit unverified
+    # limitation on the traveller-facing option. Accessibility Agent's veto is
+    # the backstop, and an explicit constraint above is fail-closed.
     needs_wheelchair_assist = needs_wheelchair(request.trip_context.accessibility_needs)
-    if needs_wheelchair_assist and not item.wheelchair_assist_available:
+    if needs_wheelchair_assist and item.wheelchair_assist_available is False:
         reasons.append("accessibility_needs includes wheelchair but wheelchair_assist_available is False")
     return reasons
 
@@ -234,8 +292,8 @@ def screen_leg(
     inventory: list[FlightInventoryItem],
     request: FlightProposalRequest,
     *,
-    origin: str,
-    dest: str,
+    origin: AirportCodes,
+    dest: AirportCodes,
     leg_date: date,
     direction: str,
 ) -> list[FlightScreeningResult]:
@@ -262,8 +320,8 @@ def _survivors_for_leg(
     inventory: list[FlightInventoryItem],
     request: FlightProposalRequest,
     *,
-    origin: str,
-    dest: str,
+    origin: AirportCodes,
+    dest: AirportCodes,
     leg_date: date,
     direction: str,
 ) -> list[FlightInventoryItem]:
@@ -282,8 +340,8 @@ def preference_gap_for_leg(
     inventory: list[FlightInventoryItem],
     request: FlightProposalRequest,
     *,
-    origin: str,
-    dest: str,
+    origin: AirportCodes,
+    dest: AirportCodes,
     leg_date: date,
     direction: str,
 ) -> list[str]:
@@ -317,12 +375,12 @@ def flight_preference_gaps(request: FlightProposalRequest, inventory: list[Fligh
     return {
         "OUTBOUND": preference_gap_for_leg(
             inventory, request,
-            origin=ctx.origin_airport, dest=ctx.dest_airport,
+            origin=ctx.origin_airports, dest=ctx.dest_airports,
             leg_date=_parse_date(ctx.depart_date), direction="OUTBOUND",
         ),
         "RETURN": preference_gap_for_leg(
             inventory, request,
-            origin=ctx.dest_airport, dest=ctx.origin_airport,
+            origin=ctx.dest_airports, dest=ctx.origin_airports,
             leg_date=_parse_date(ctx.return_date), direction="RETURN",
         ),
     }
@@ -361,8 +419,8 @@ def _candidates_for_leg(
     inventory: list[FlightInventoryItem],
     request: FlightProposalRequest,
     *,
-    origin: str,
-    dest: str,
+    origin: AirportCodes,
+    dest: AirportCodes,
     leg_date: date,
     direction: str,
     top_n: int,
@@ -370,7 +428,12 @@ def _candidates_for_leg(
     matches = _survivors_for_leg(inventory, request, origin=origin, dest=dest, leg_date=leg_date, direction=direction)
     prefs = request.trip_context.flight_preferences
     party_size = _party_size(request.trip_context)
-    matches.sort(key=lambda item: _rank_key(item, prefs, direction, party_size))
+    needs_assist = needs_wheelchair(request.trip_context.accessibility_needs)
+    matches.sort(
+        key=lambda item: _rank_key(
+            item, prefs, direction, party_size, needs_wheelchair_assist=needs_assist
+        )
+    )
     return [
         FlightCandidate(
             flight_id=item.flight_id,
@@ -384,6 +447,7 @@ def _candidates_for_leg(
             wheelchair_assist_available=item.wheelchair_assist_available,
             step_free_boarding=item.step_free_boarding,
             seat_fee_estimate=seat_fee_estimate(item, prefs, party_size),
+            source=item.source,
         )
         for item in matches[:top_n]
     ]
@@ -406,8 +470,8 @@ def propose_flights(
     outbound = _candidates_for_leg(
         inventory,
         request,
-        origin=ctx.origin_airport,
-        dest=ctx.dest_airport,
+        origin=ctx.origin_airports,
+        dest=ctx.dest_airports,
         leg_date=_parse_date(ctx.depart_date),
         direction="OUTBOUND",
         top_n=top_n,
@@ -415,8 +479,8 @@ def propose_flights(
     inbound = _candidates_for_leg(
         inventory,
         request,
-        origin=ctx.dest_airport,
-        dest=ctx.origin_airport,
+        origin=ctx.dest_airports,
+        dest=ctx.origin_airports,
         leg_date=_parse_date(ctx.return_date),
         direction="RETURN",
         top_n=top_n,
@@ -433,16 +497,16 @@ def screen_flights(
     outbound = screen_leg(
         inventory,
         request,
-        origin=ctx.origin_airport,
-        dest=ctx.dest_airport,
+        origin=ctx.origin_airports,
+        dest=ctx.dest_airports,
         leg_date=_parse_date(ctx.depart_date),
         direction="OUTBOUND",
     )
     inbound = screen_leg(
         inventory,
         request,
-        origin=ctx.dest_airport,
-        dest=ctx.origin_airport,
+        origin=ctx.dest_airports,
+        dest=ctx.origin_airports,
         leg_date=_parse_date(ctx.return_date),
         direction="RETURN",
     )
