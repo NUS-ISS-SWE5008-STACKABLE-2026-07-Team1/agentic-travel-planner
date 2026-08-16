@@ -60,12 +60,17 @@ document.querySelectorAll("[data-password-toggle]").forEach((button) => {
   });
 });
 
+// Route label for a stored request: city when one was chosen, country
+// otherwise. Requests predating city intake have no city fields at all, so the
+// fallback is the normal path for them, not an error case.
+const routeEnd = (place, city) => (city ? `${city}, ${place}` : place || "-");
+const routeLabel = (request) =>
+  `${routeEnd(request.origin, request.origin_city)} → ${routeEnd(request.destination, request.destination_city)}`;
+
 const planner = document.querySelector("#travel-plan-form");
 if (planner) {
   const originCountry = planner.querySelector("#origin");
   const destinationCountry = planner.querySelector("#destination");
-  const originPlace = planner.querySelector("#origin_place");
-  const destinationPlace = planner.querySelector("#destination_place");
   const travelersInput = planner.querySelector("#travellers");
   const travelerDetails = planner.querySelector("#traveler-details");
   const addTravelerButton = planner.querySelector("#add-traveler");
@@ -77,15 +82,51 @@ if (planner) {
   const departureDate = planner.querySelector("#departure_date");
   const returnDate = planner.querySelector("#return_date");
   let latestPayload = null;
+  // Cities are embedded in the page as a JSON data block, so changing country
+  // repopulates instantly with no request to fail or wait on.
+  const cityOptionsNode = document.querySelector("#city-options");
+  const cityOptions = cityOptionsNode ? JSON.parse(cityOptionsNode.textContent) : {};
 
-  const syncPlaceInput = (country, place) => {
-    place.disabled = !country.value;
-    if (place.disabled) place.value = "";
+  const populateCities = (countrySelect, citySelect) => {
+    const previous = citySelect.value;
+    const cities = cityOptions[countrySelect.value] || [];
+    citySelect.replaceChildren();
+
+    if (!countrySelect.value) {
+      citySelect.append(new Option("Select a country first", "", true, true));
+      citySelect.disabled = true;
+    } else if (cities.length === 0) {
+      // A country we have no mapped cities for. Say so rather than offering an
+      // empty dropdown, and leave the field non-blocking so the trip can still
+      // be submitted at country granularity.
+      citySelect.append(new Option("No cities available for this country", "", true, true));
+      citySelect.disabled = true;
+    } else {
+      citySelect.append(new Option("Select a city", "", true, true));
+      for (const city of cities) {
+        // `label` carries the airport codes ("Tokyo (NRT/HND)"); the posted
+        // value is the plain name, which is what the resolver looks up.
+        citySelect.append(new Option(city.label, city.name));
+      }
+      citySelect.disabled = false;
+      // Keep the choice if the same city exists under the new country, so a
+      // stray re-selection of the same country is not punished.
+      if (previous && cities.some((city) => city.name === previous)) {
+        citySelect.value = previous;
+      }
+    }
+    // `required` only when there is something to choose, or the browser blocks
+    // submission on a field the traveller cannot fill.
+    citySelect.required = !citySelect.disabled;
   };
-  originCountry.addEventListener("change", () => syncPlaceInput(originCountry, originPlace));
-  destinationCountry.addEventListener("change", () => syncPlaceInput(destinationCountry, destinationPlace));
-  syncPlaceInput(originCountry, originPlace);
-  syncPlaceInput(destinationCountry, destinationPlace);
+
+  const cityPairs = [...planner.querySelectorAll("[data-country-for]")].map((citySelect) => {
+    const countrySelect = planner.querySelector(`#${citySelect.dataset.countryFor}`);
+    countrySelect.addEventListener("change", () => populateCities(countrySelect, citySelect));
+    return [countrySelect, citySelect];
+  });
+  // Run once at load: the departure country may be prefilled from the profile.
+  cityPairs.forEach(([countrySelect, citySelect]) => populateCities(countrySelect, citySelect));
 
   departureDate.addEventListener("change", () => {
     if (!departureDate.value) return;
@@ -152,8 +193,11 @@ if (planner) {
     ];
     return {
       origin: data.get("origin"), destination: data.get("destination"),
-      origin_place: String(data.get("origin_place") || "").trim() || null,
-      destination_place: String(data.get("destination_place") || "").trim() || null,
+      // Omitted rather than sent empty when a country has no mapped cities —
+      // the API rejects a blank string but accepts an absent city, which the
+      // flight adapter then resolves to the country's main gateway.
+      ...(data.get("origin_city") ? {origin_city: data.get("origin_city")} : {}),
+      ...(data.get("destination_city") ? {destination_city: data.get("destination_city")} : {}),
       departure_date: data.get("departure_date"), return_date: data.get("return_date"),
       travellers: Number(data.get("travellers")), currency: "SGD",
       traveller_ages: data.getAll("traveller_age").map(Number),
@@ -661,7 +705,7 @@ if (adminMonitor) {
     const request = requests.find((item) => item.request_id === selectedRequestId);
     if (!request) return;
     const completedAgents = request.agents.filter((agent) => agent.status === "completed");
-    selectedLabel.textContent = `${request.request.origin} → ${request.request.destination} · ${request.request_id}`;
+    selectedLabel.textContent = `${routeLabel(request.request)} · ${request.request_id}`;
     const labels = completedAgents.map((agent) => agentNames[agent.agent] || agent.agent);
     const chartData = {
       labels,
@@ -732,7 +776,7 @@ if (adminMonitor) {
       const top = document.createElement("div");
       top.className = "d-flex justify-content-between gap-2";
       const route = document.createElement("strong");
-      route.textContent = `${request.request.origin} → ${request.request.destination}`;
+      route.textContent = routeLabel(request.request);
       const badge = document.createElement("span");
       badge.className = `badge ${statusClass(request.status)}`;
       badge.textContent = request.status;
@@ -866,7 +910,7 @@ if (adminMonitor) {
       row.className = item.request_id === selectedRequestId ? "table-primary admin-request" : "admin-request";
       row.tabIndex = 0;
       const values = [new Date(item.submitted_at + "Z").toLocaleString(), item.name || item.email || "Unknown user",
-        `${item.request.origin} → ${item.request.destination}`, item.display_status,
+        routeLabel(item.request), item.display_status,
         item.feedback_rating === "up" ? "👍 Good Plan" : item.feedback_rating === "down" ? "👎 Needs Improvement" : "Not Rated",
         item.usage?.input_tokens || 0,
         item.usage?.output_tokens || 0, item.usage?.total_tokens || 0];
@@ -959,7 +1003,7 @@ if (adminMonitor) {
     feedbackEntries.forEach((entry) => {
       const row = document.createElement("tr");
       const values = [new Date(entry.updated_at + "Z").toLocaleString(), entry.name || entry.email,
-        `${entry.origin || "-"} → ${entry.destination || "-"}`, entry.rating === "up" ? "👍 Good" : "👎 Needs Improvement",
+        routeLabel(entry), entry.rating === "up" ? "👍 Good" : "👎 Needs Improvement",
         entry.comment || "No written comment"];
       values.forEach((value, index) => {
         const cell = document.createElement("td");
