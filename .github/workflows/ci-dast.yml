@@ -185,6 +185,32 @@ jobs:
       # ever scan logged out against a CSRF-protected app. Findings stay
       # advisory per item 8; the *authentication* is what blocks, via the
       # requestor responseCode checks and the 401 statistic test in the plan.
+      # Render the two placeholders into the plan before ZAP sees it.
+      #
+      # The obvious approach — passing them as docker_env_vars and letting the
+      # Automation Framework expand ${ZAP_SESSION_COOKIE} — does not work here.
+      # ZAP logged the rule as
+      #     replacementString = session=${ZAP_SESSION_COOKIE}
+      # with the placeholder intact, so every request carried a literal dollar
+      # sign as its session and the scan ran logged out. Substituting here is
+      # one sed instead of a dependency on the action's env plumbing.
+      #
+      # The rendered file holds an ephemeral cookie for a throwaway CI database
+      # and is never uploaded: the artifact step below globs only the ZAP
+      # reports.
+      - name: Render the scan plan
+        run: |
+          set -euo pipefail
+          sed -i \
+            -e "s|\${ZAP_SESSION_COOKIE}|${ZAP_SESSION_COOKIE}|g" \
+            -e "s|\${ZAP_CSRF_TOKEN}|${ZAP_CSRF_TOKEN}|g" \
+            .zap/authenticated-scan.yaml
+          if grep -q 'ZAP_SESSION_COOKIE\|ZAP_CSRF_TOKEN' .zap/authenticated-scan.yaml; then
+            echo "::error::A placeholder survived rendering; ZAP would scan logged out."
+            exit 1
+          fi
+          echo "Plan rendered."
+
       # NOT continue-on-error. It was, and that was wrong: it swallowed the
       # Automation Framework's own failure signal, so the requestor job's
       # responseCode mismatches (200 expected, 401 received) could not fail the
@@ -194,9 +220,6 @@ jobs:
         uses: zaproxy/action-af@d186d5d9536d0f1380e5eaa58168432fefc8ed6d # v0.3.0
         with:
           plan: ".zap/authenticated-scan.yaml"
-          docker_env_vars: |
-            ZAP_SESSION_COOKIE=${{ env.ZAP_SESSION_COOKIE }}
-            ZAP_CSRF_TOKEN=${{ env.ZAP_CSRF_TOKEN }}
 
       # The PRIMARY gate is not here — it is the requestor job's responseCode
       # fields in .zap/authenticated-scan.yaml, which fail the plan when /main
