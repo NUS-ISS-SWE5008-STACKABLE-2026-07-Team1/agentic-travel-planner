@@ -13,24 +13,28 @@
 name: CI — DAST
 
 on:
-  # Team decision of 2026-08-17 — pull requests into the shared branches only.
-  # See the longer note in ci-fast.yml; the reasoning is identical.
+  # Team decision of 2026-08-17 — pull requests into the two shared branches,
+  # plus those same two branches on push. See the long note in ci-fast.yml for
+  # why push is here: branch protection is a paid feature this org does not
+  # have, so a direct push to main or release cannot be blocked, only caught.
   pull_request:
+    branches: [main, release]
+  push:
     branches: [main, release]
 
   workflow_dispatch:
 
-  # LATER — push checks. This job is the expensive one (~1m40s against ~50s for
-  # the fast tier), so it is a fair candidate to stay pull-request-only even
-  # once ci-fast.yml goes back to running on push.
-  # push:
-  #   branches: [main, release]
+  # This is the expensive job — roughly 1m40s against 50s for the fast tier,
+  # and it now runs twice per merge. If that becomes annoying, drop the push
+  # trigger HERE first and leave ci-fast.yml's in place: a direct push would
+  # still be caught, just by the cheaper tier.
 
 permissions:
   contents: read
 
-# head_ref on a pull_request, github.ref otherwise — see the note in
-# ci-fast.yml for why this matters once push triggers return.
+# head_ref on a pull_request, github.ref otherwise. Without this a PR run keys
+# on refs/pull/N/merge and a push run on refs/heads/x — two groups for the same
+# commit, so neither cancels the other.
 concurrency:
   group: dast-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
