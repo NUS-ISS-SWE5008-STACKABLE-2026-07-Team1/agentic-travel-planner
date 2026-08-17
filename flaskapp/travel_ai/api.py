@@ -13,7 +13,7 @@ from flaskapp.travel_ai.safeguards import SafetyError, validate_request
 from flaskapp.travel_ai.jobs import cancel_job, get_job, submit_plan
 from flaskapp.database import (
     get_admin_activity, get_admin_token_summary, get_admins, get_platform_dashboard,
-    get_recent_feedback, get_system_logs, register_admin, save_plan_feedback,
+    get_recent_feedback, get_system_logs, owns_request, register_admin, save_plan_feedback,
 )
 from flaskapp.admin_auth import is_admin_email
 from flaskapp.config import get_llm_settings
@@ -156,7 +156,22 @@ def submit_plan_feedback(request_id):
 
 @travel_api_bp.get("/traces/<uuid:request_id>")
 def get_trace(request_id):
-    """Return sanitized decision metadata; protect this endpoint with auth in production."""
+    """Return sanitized decision metadata to the user who owns the request.
+
+    The ownership check is the substance of this handler. The blueprint's
+    before_request establishes only that *somebody* is signed in; it says
+    nothing about whose request this is. Without the check below, any signed-in
+    user could read any trace whose id they had — from a shared /chat/<uuid>
+    link, a referrer header, or the admin activity view.
+
+    404 rather than 403, deliberately, and it matches every sibling endpoint: a
+    distinct 403 would make this a probe for whether a given request id exists.
+    Not-yours and not-here should be indistinguishable from outside.
+    """
+    if not owns_request(
+        current_app.config["DATABASE"], str(request_id), session.get("user_id")
+    ):
+        return jsonify(error="Trace not found"), 404
     path = current_app.config["TRACE_DIR"] / f"{request_id}.jsonl"
     if not path.is_file():
         return jsonify(error="Trace not found"), 404
