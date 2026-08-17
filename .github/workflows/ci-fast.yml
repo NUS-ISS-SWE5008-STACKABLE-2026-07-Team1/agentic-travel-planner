@@ -1,0 +1,210 @@
+# =============================================================================
+# Replaces the secrets + tests + sast jobs of .github/workflows/security.yml.
+# Split from DAST per backlog item 17: this tier is ~2 minutes, DAST is not.
+# Addresses items 6, 7, 9, 12, 15, 17.
+# =============================================================================
+name: CI — fast checks
+
+on:
+  # Item 6, and the team decision of 2026-08-17: checks run on pull requests
+  # into the two shared branches, and nowhere else. This supersedes the earlier
+  # item 17 decision to run on everyone's own branch on push.
+  #
+  # Because a pull_request event reads its workflow files from the MERGED
+  # result, this covers every PR into main or release no matter which branch it
+  # came from — including branches that have never seen this file. That is the
+  # whole reason this file must also exist on main.
+  pull_request:
+    branches: [main, release]
+
+  # Manual runs, so this file can be exercised without opening a PR.
+  workflow_dispatch:
+
+  # Push triggers were removed deliberately, not forgotten. A direct push to
+  # main or release therefore runs NOTHING — branch protection is the companion
+  # to this decision, not an optional extra.
+  #
+  # LATER — per-branch push checks (item 17). Uncommenting this block is the
+  # whole change. Two things to know first:
+  #   - A workflow file only ever runs on the branch it physically sits on.
+  #     This list does nothing for a branch that has not merged main or release.
+  #   - Some steps should not run on both events. In particular the advisory
+  #     "Gitleaks (git history)" step below wants `if: github.event_name ==
+  #     'push'` — on a PR it just re-reports the same known historical key
+  #     every single time, which trains people to ignore it.
+  # push:
+  #   branches: [main, release, mark, andrew, andy, subbu-feature, subbu-feature-001]
+
+permissions:
+  contents: read
+
+# Supersede in-progress runs on the same ref. Without this, three pushes in
+# five minutes run three full copies of everything.
+#
+# head_ref is the source branch on a pull_request event and empty otherwise, so
+# this keys on the branch under both event types. Using github.ref alone would
+# key a PR run on refs/pull/N/merge and a push run on refs/heads/x — two
+# different groups for the same commit, so neither would cancel the other once
+# push triggers come back.
+concurrency:
+  group: fast-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10          # item 7 — was GitHub's 360-minute default
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history so the advisory step below can walk past commits.
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          version=8.18.4
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      # BLOCKING: no credential may exist in the checked-out tree.
+      # NOTE: this stays RED until `git rm --cached .env.secrets` is committed.
+      # That is correct — red is the accurate signal right now.
+      - name: Gitleaks (working tree)
+        run: >
+          gitleaks detect --no-git --source . --redact
+          --report-format sarif --report-path gitleaks-tree.sarif
+
+      # ADVISORY by design, permanently. History contains the Azure key from
+      # c309d7a and we decided not to rewrite history. Rotating the key is the
+      # real fix. Do not "fix" this by deleting the step.
+      #
+      # `if: always()` is load-bearing and was found by an actual test run.
+      # Without it this step is SKIPPED whenever the blocking step above fails
+      # — which is exactly the situation the repo is in today — so the
+      # advisory scan silently never ran. The same bug exists in the current
+      # .github/workflows/security.yml.
+      - name: Gitleaks (git history)
+        if: always()
+        continue-on-error: true
+        run: >
+          gitleaks detect --source . --redact
+          --report-format sarif --report-path gitleaks-history.sarif
+
+      - name: Upload secret scan reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gitleaks-reports
+          path: gitleaks-*.sarif
+          retention-days: 14     # item 15 — 90-day default outlives usefulness
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Item 12 — install from the lockfile when it exists so two runs a week
+      # apart install identical code. Falls back until requirements.lock lands.
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.lock ]; then
+            echo "Installing from requirements.lock"
+            python -m pip install -r requirements.lock
+          else
+            echo "::warning::requirements.lock missing (backlog item 12) — installing unpinned ranges"
+            python -m pip install -r requirements.txt
+          fi
+
+      # BLOCKING. These are the deterministic controls around a probabilistic
+      # model (safeguards, guardrails, bias audit, golden scenarios).
+      #
+      # `-m "not live"` depends on the marker registered by backlog item 10
+      # (tests/conftest.py + pytest.ini). Harmless before item 10 lands —
+      # pytest treats an unknown marker filter as "select everything".
+      - name: Run pytest
+        run: python -m pytest -q -m "not live" --junitxml=pytest-report.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pytest-report
+          path: pytest-report.xml
+          retention-days: 14
+
+  sast:
+    name: SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.lock ]; then
+            python -m pip install -r requirements.lock
+          else
+            python -m pip install -r requirements.txt
+          fi
+
+      - name: Install scanners
+        run: python -m pip install semgrep bandit pip-audit
+
+      # ADVISORY, and the team decision in item 8 recommends it stays that way:
+      # registry rules change upstream with no local change on our side.
+      - name: Semgrep (registry rules)
+        continue-on-error: true
+        run: >
+          semgrep scan --config auto --error
+          --exclude-rule python.django.security.django-no-csrf-token.django-no-csrf-token
+          --json --output semgrep-report.json flaskapp
+
+      # BLOCKING. Hand-written rules in .semgrep/ encoding invariants this
+      # codebase already satisfies. Zero findings today, so any finding is a
+      # new violation from a specific commit, not pre-existing debt.
+      - name: Semgrep (LLM/agent rules)
+        run: >
+          semgrep scan --config .semgrep/ --error --metrics=off
+          --json --output semgrep-llm-report.json flaskapp
+
+      # Item 9 — was `-ll` (MEDIUM and above), which silently dropped every
+      # LOW finding from the report. The report is an artefact, not a gate,
+      # so report everything and decide gating separately under item 8.
+      - name: Bandit (static code scan)
+        continue-on-error: true
+        run: bandit -r flaskapp -l -f json -o bandit-report.json
+
+      # Item 12 — stays advisory until requirements.lock exists. Gating an
+      # unpinned tree means someone else's release breaks our build.
+      - name: pip-audit (dependency vulnerability scan)
+        continue-on-error: true
+        run: |
+          if [ -f requirements.lock ]; then
+            pip-audit -r requirements.lock
+          else
+            pip-audit -r requirements.txt
+          fi
+
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sast-reports
+          path: |
+            semgrep-report.json
+            semgrep-llm-report.json
+            bandit-report.json
+          retention-days: 14
