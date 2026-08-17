@@ -178,9 +178,7 @@ jobs:
           # SECRET_KEY. Masked anyway so they never appear in a log or artefact.
           echo "::add-mask::${session}"
           echo "::add-mask::${api_token}"
-          # TEMPORARY — deliberately break the session to prove the assertion below
-          # can fail. Reverted in the next commit.
-          echo "ZAP_SESSION_COOKIE=deliberately-invalid-for-verification" >> "$GITHUB_ENV"
+          echo "ZAP_SESSION_COOKIE=${session}" >> "$GITHUB_ENV"
           echo "ZAP_CSRF_TOKEN=${api_token}" >> "$GITHUB_ENV"
 
       # Item 13 — AUTHENTICATED. Replaces action-baseline, which could only
