@@ -4,30 +4,39 @@
 # Addresses items 7, 13 (partial), 14, 15, 17.
 #
 # READ THIS BEFORE REVIEWING:
-# The ZAP scan here is still UNAUTHENTICATED. Full authenticated DAST needs
-# the ZAP Automation Framework with anti-CSRF handling, which is item 13's
-# expensive half and is NOT in this draft. What this draft adds is the
-# groundwork that makes that work possible, plus the assertion that turns a
-# silent auth failure into a loud one.
+# The scan is now AUTHENTICATED (item 13, phase 3). It no longer stops at the
+# login page. The mechanism, and the trade-off it makes, are documented in
+# .zap/authenticated-scan.yaml — read that before changing anything here.
+#
+# Findings stay advisory per item 8. What BLOCKS is the authentication itself:
+# if ZAP scans logged out, the plan's own checks trip and the "Prove the scan
+# was actually authenticated" step below fails the job. A clean report from a
+# logged-out scan is the failure mode this exists to prevent.
 # =============================================================================
 name: CI — DAST
 
 on:
-  # Team decision of 2026-08-17 — pull requests into the two shared branches,
-  # plus those same two branches on push. See the long note in ci-fast.yml for
-  # why push is here: branch protection is a paid feature this org does not
-  # have, so a direct push to main or release cannot be blocked, only caught.
+  # Pull requests only. This is the narrowing the previous comment predicted:
+  # "if the double run on every merge becomes annoying, drop the push trigger
+  # HERE first and leave ci-fast.yml's in place." Authenticated scanning made
+  # it annoying — this job now spiders, ajax-spiders and active-scans behind a
+  # login, which is minutes rather than the 1m40s the logged-out scan took.
+  #
+  # What this gives up: DAST no longer forms half of the push tripwire agreed
+  # on 2026-08-17. ci-fast.yml KEEPS its push trigger, so a direct push to a
+  # shared branch is still scanned and still goes red — by the ~50s tier
+  # instead of this one. Since branch protection is unavailable on the free
+  # plan and neither tier can actually block a push, giving up the slower half
+  # of a detection-only control is a fair trade for the minutes.
   pull_request:
-    branches: [main, release]
-  push:
     branches: [main, release]
 
   workflow_dispatch:
 
-  # This is the expensive job — roughly 1m40s against 50s for the fast tier,
-  # and it now runs twice per merge. If that becomes annoying, drop the push
-  # trigger HERE first and leave ci-fast.yml's in place: a direct push would
-  # still be caught, just by the cheaper tier.
+  # LATER — push on the shared branches, if the team wants the fuller tripwire
+  # back and will pay for two authenticated scans per merge:
+  # push:
+  #   branches: [main, release]
 
 permissions:
   contents: read
@@ -127,7 +136,11 @@ jobs:
       # renders <input id="csrf_token" name="csrf_token" type="hidden"
       # value="..."> — attributes in that order — so a pattern expecting
       # value= immediately after name= matches nothing. [^>]* bridges them.
-      - name: Verify an authenticated session is possible
+      # This step now does double duty. It still fails loudly if a session
+      # cannot be established, and it exports that session for ZAP to reuse —
+      # see .zap/authenticated-scan.yaml for why we hand ZAP a working session
+      # instead of teaching it to log in.
+      - name: Establish a session and hand it to ZAP
         run: |
           set -euo pipefail
           token=$(curl -s -c jar http://127.0.0.1:5000/ \
@@ -149,15 +162,132 @@ jobs:
           fi
           echo "Authenticated session confirmed (admin/activity -> 200)."
 
-      # Still unauthenticated — see the header note. fail_action stays false
-      # per item 8: gating on a scan that only reaches the login page would be
-      # worse than not gating.
-      - name: ZAP baseline scan (UNAUTHENTICATED — see item 13)
-        uses: zaproxy/action-baseline@7c4deb10e6261301961c86d65d54a516394f9aed # v0.14.0
+          # The session cookie, and a CSRF token read from an authenticated
+          # page. The login form's token is bound to the pre-login session, so
+          # re-read it from /main rather than reusing the one above.
+          session=$(awk '$6 == "session" {print $7}' jar | tail -1)
+          if [ -z "${session}" ]; then
+            echo "::error::No session cookie in the jar after a successful login"; exit 1
+          fi
+          api_token=$(curl -s -b jar http://127.0.0.1:5000/main \
+            | grep -oP 'name="csrf-token" content="\K[^"]+' | head -1)
+          if [ -z "${api_token}" ]; then
+            echo "::error::No csrf-token meta tag on /main"; exit 1
+          fi
+          # Not secrets: a throwaway CI database and a per-run random
+          # SECRET_KEY. Masked anyway so they never appear in a log or artefact.
+          echo "::add-mask::${session}"
+          echo "::add-mask::${api_token}"
+          echo "ZAP_SESSION_COOKIE=${session}" >> "$GITHUB_ENV"
+          echo "ZAP_CSRF_TOKEN=${api_token}" >> "$GITHUB_ENV"
+
+      # Item 13 — AUTHENTICATED. Replaces action-baseline, which could only
+      # ever scan logged out against a CSRF-protected app. Findings stay
+      # advisory per item 8; the *authentication* is what blocks, via the
+      # requestor responseCode checks and the 401 statistic test in the plan.
+      # Render the two placeholders into the plan before ZAP sees it.
+      #
+      # The obvious approach — passing them as docker_env_vars and letting the
+      # Automation Framework expand ${ZAP_SESSION_COOKIE} — does not work here.
+      # ZAP logged the rule as
+      #     replacementString = session=${ZAP_SESSION_COOKIE}
+      # with the placeholder intact, so every request carried a literal dollar
+      # sign as its session and the scan ran logged out. Substituting here is
+      # one sed instead of a dependency on the action's env plumbing.
+      #
+      # The rendered file holds an ephemeral cookie for a throwaway CI database
+      # and is never uploaded: the artifact step below globs only the ZAP
+      # reports.
+      - name: Render the scan plan
+        run: |
+          set -euo pipefail
+          sed -i \
+            -e "s|\${ZAP_SESSION_COOKIE}|${ZAP_SESSION_COOKIE}|g" \
+            -e "s|\${ZAP_CSRF_TOKEN}|${ZAP_CSRF_TOKEN}|g" \
+            .zap/authenticated-scan.yaml
+          if grep -q 'ZAP_SESSION_COOKIE\|ZAP_CSRF_TOKEN' .zap/authenticated-scan.yaml; then
+            echo "::error::A placeholder survived rendering; ZAP would scan logged out."
+            exit 1
+          fi
+          echo "Plan rendered."
+
+      # NOT continue-on-error. It was, and that was wrong: it swallowed the
+      # Automation Framework's own failure signal, so the requestor job's
+      # responseCode mismatches (200 expected, 401 received) could not fail the
+      # build. Scan FINDINGS remain advisory — the plan does not gate on alerts
+      # — but the plan failing to run correctly must be loud.
+      - name: ZAP authenticated scan (Automation Framework)
+        uses: zaproxy/action-af@d186d5d9536d0f1380e5eaa58168432fefc8ed6d # v0.3.0
         with:
-          target: "http://127.0.0.1:5000"
-          fail_action: false
-          allow_issue_writing: false
+          plan: ".zap/authenticated-scan.yaml"
+
+      # The PRIMARY gate is not here — it is the requestor job's responseCode
+      # fields in .zap/authenticated-scan.yaml, which fail the plan when /main
+      # answers 302 or /admin/activity answers 401. Both are impossible with a
+      # working session, and the step above no longer swallows that failure.
+      #
+      # This step adds the one thing the plan cannot check about itself: that
+      # the session was still alive when the scan finished. ZAP spidering into
+      # POST /logout would end its own session part-way through and quietly
+      # scan the rest logged out — which is why /logout is excluded from the
+      # context, and why this verifies the exclusion actually held.
+      #
+      # An earlier version of this step asserted that authenticated URLs
+      # appeared in the report. That assertion was worthless: the URLs appear
+      # because ZAP *requested* them, whatever the response code, so it passed
+      # happily against a deliberately invalid session. Recorded here because
+      # it is the same class of mistake as the check it was written to prevent.
+      - name: Prove the session survived the scan
+        if: always()
+        run: |
+          set -euo pipefail
+          code=$(curl -s -b jar -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:5000/api/v1/admin/activity)
+          if [ "${code}" != "200" ]; then
+            echo "::error::The session is dead after the scan (got ${code})."
+            echo "::error::ZAP most likely reached POST /logout. Check excludePaths"
+            echo "::error::in .zap/authenticated-scan.yaml — everything scanned after"
+            echo "::error::that point was scanned logged out."
+            exit 1
+          fi
+          echo "Session still valid after the scan; /logout was not reached."
+
+          report=$(find . -name 'zap-authenticated-report.json' | head -1)
+          if [ -z "${report}" ]; then
+            echo "::error::ZAP produced no JSON report — the scan did not complete."
+            exit 1
+          fi
+          # The traditional-json report exposes URLs only through alert
+          # instances, which is why the plan asks for info-level risks too:
+          # every page raises at least an informational alert, so this is a
+          # usable view of where ZAP actually went.
+          urls=$(jq -r '[.site[]?.alerts[]?.instances[]?.uri] | unique[]?' "${report}")
+          echo "--- URLs ZAP reached ---"
+          echo "${urls}"
+
+          if [ -z "${urls}" ]; then
+            echo "::error::The report contains no URLs at all."
+            echo "::error::Either the scan never ran, or the report template changed."
+            exit 1
+          fi
+
+          # Printed for the record and for the report, NOT asserted on. The
+          # presence of a URL says only that ZAP sent a request to it — a
+          # logged-out scan produces almost the same list, every entry a 401.
+          # Whether those requests were authenticated is settled upstream by
+          # the requestor responseCode checks.
+          echo "For the record, ZAP reached $(echo "${urls}" | wc -l) URLs."
+
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zap-authenticated-reports
+          path: |
+            **/zap-authenticated-report.json
+            **/zap-authenticated-report.html
+          retention-days: 14
+          if-no-files-found: warn
 
       # ---- Item 15: check what we are about to publish ---------------------
       # service.py log_payload() writes whole user submissions to stdout and
