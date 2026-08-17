@@ -13,17 +13,26 @@
 name: CI — DAST
 
 on:
-  push:
-    branches: [main, release]
+  # Team decision of 2026-08-17 — pull requests into the shared branches only.
+  # See the longer note in ci-fast.yml; the reasoning is identical.
   pull_request:
     branches: [main, release]
+
   workflow_dispatch:
+
+  # LATER — push checks. This job is the expensive one (~1m40s against ~50s for
+  # the fast tier), so it is a fair candidate to stay pull-request-only even
+  # once ci-fast.yml goes back to running on push.
+  # push:
+  #   branches: [main, release]
 
 permissions:
   contents: read
 
+# head_ref on a pull_request, github.ref otherwise — see the note in
+# ci-fast.yml for why this matters once push triggers return.
 concurrency:
-  group: dast-${{ github.workflow }}-${{ github.ref }}
+  group: dast-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:

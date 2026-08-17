@@ -6,32 +6,48 @@
 name: CI — fast checks
 
 on:
-  # Item 17 — AGREED by the team: the quick checks run on everyone's own
-  # branch, not just the shared ones. Named explicitly rather than '**' so a
-  # stray or abandoned branch does not silently spend shared Actions minutes.
-  # Add a branch here when someone starts one.
-  push:
-    branches:
-      - main
-      - release
-      - mark
-      - andrew
-      - andy
-      - subbu-feature
-      - subbu-feature-001
-  # Item 6 — the highest-value change in the backlog. Checks now run on the
-  # proposed change instead of after it has already merged.
+  # Item 6, and the team decision of 2026-08-17: checks run on pull requests
+  # into the two shared branches, and nowhere else. This supersedes the earlier
+  # item 17 decision to run on everyone's own branch on push.
+  #
+  # Because a pull_request event reads its workflow files from the MERGED
+  # result, this covers every PR into main or release no matter which branch it
+  # came from — including branches that have never seen this file. That is the
+  # whole reason this file must also exist on main.
   pull_request:
     branches: [main, release]
+
+  # Manual runs, so this file can be exercised without opening a PR.
   workflow_dispatch:
+
+  # Push triggers were removed deliberately, not forgotten. A direct push to
+  # main or release therefore runs NOTHING — branch protection is the companion
+  # to this decision, not an optional extra.
+  #
+  # LATER — per-branch push checks (item 17). Uncommenting this block is the
+  # whole change. Two things to know first:
+  #   - A workflow file only ever runs on the branch it physically sits on.
+  #     This list does nothing for a branch that has not merged main or release.
+  #   - Some steps should not run on both events. In particular the advisory
+  #     "Gitleaks (git history)" step below wants `if: github.event_name ==
+  #     'push'` — on a PR it just re-reports the same known historical key
+  #     every single time, which trains people to ignore it.
+  # push:
+  #   branches: [main, release, mark, andrew, andy, subbu-feature, subbu-feature-001]
 
 permissions:
   contents: read
 
 # Supersede in-progress runs on the same ref. Without this, three pushes in
 # five minutes run three full copies of everything.
+#
+# head_ref is the source branch on a pull_request event and empty otherwise, so
+# this keys on the branch under both event types. Using github.ref alone would
+# key a PR run on refs/pull/N/merge and a push run on refs/heads/x — two
+# different groups for the same commit, so neither would cancel the other once
+# push triggers come back.
 concurrency:
-  group: fast-${{ github.workflow }}-${{ github.ref }}
+  group: fast-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
