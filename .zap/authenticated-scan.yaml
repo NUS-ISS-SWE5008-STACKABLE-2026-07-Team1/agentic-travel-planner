@@ -61,7 +61,12 @@ jobs:
   - type: replacer
     parameters:
       deleteAllRules: false
-      rules:
+    # `rules` is a SIBLING of parameters, not a child. Nesting it produces
+    # "Unrecognised parameter for job replacer : rules" — one info-level line in
+    # a 700-line log — and the job then runs successfully having configured
+    # nothing at all. Caught only by deliberately breaking the session and
+    # noticing the scan stayed green.
+    rules:
         - description: "Authenticated session cookie"
           url: ".*"
           matchType: "req_header"
@@ -125,15 +130,12 @@ jobs:
       - url: "http://127.0.0.1:5000/api/v1/traces/11111111-1111-4111-8111-111111111111"
         name: "Audit trace (authorization-sensitive)"
         method: GET
-    tests:
-      # If ZAP is scanning logged out, every /api/v1 request answers 401 and
-      # this trips. onFail error stops the plan rather than reporting success.
-      - name: "ZAP must not be scanning logged out"
-        type: stats
-        statistic: "stats.code.401"
-        operator: "=="
-        value: 0
-        onFail: "error"
+
+    # No stats test here. `stats.code.401` was tried and reported [0 == 0] while
+    # a 401 was demonstrably happening on the line above it — the counter is not
+    # populated at the point the test runs. The responseCode fields above are
+    # the real gate: /main must answer 200 and not 302, and /admin/activity must
+    # answer 200 and not 401. Both are impossible without a session.
 
   - type: spider
     parameters:
