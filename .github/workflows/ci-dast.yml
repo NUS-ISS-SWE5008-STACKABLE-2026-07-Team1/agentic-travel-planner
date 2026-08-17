@@ -8,35 +8,48 @@
 # login page. The mechanism, and the trade-off it makes, are documented in
 # .zap/authenticated-scan.yaml — read that before changing anything here.
 #
-# Findings stay advisory per item 8. What BLOCKS is the authentication itself:
-# if ZAP scans logged out, the plan's own checks trip and the "Prove the scan
-# was actually authenticated" step below fails the job. A clean report from a
-# logged-out scan is the failure mode this exists to prevent.
+# Findings stay advisory per item 8. What FAILS THE JOB is the authentication
+# itself: if ZAP scans logged out, the plan's own checks trip and the "Prove the
+# session survived the scan" step below fails. A clean report from a logged-out
+# scan is the failure mode this exists to prevent.
+#
+# Note the wording. Nothing here BLOCKS anything — see the trigger note below.
 # =============================================================================
 name: CI — DAST
 
 on:
-  # Pull requests only. This is the narrowing the previous comment predicted:
-  # "if the double run on every merge becomes annoying, drop the push trigger
-  # HERE first and leave ci-fast.yml's in place." Authenticated scanning made
-  # it annoying — this job now spiders, ajax-spiders and active-scans behind a
-  # login, which is minutes rather than the 1m40s the logged-out scan took.
+  # PUSH ONLY, on the two shared branches. Team decision, 2026-08-18, and it
+  # reverses the pull-request-only choice made in PR #13 the day before.
   #
-  # What this gives up: DAST no longer forms half of the push tripwire agreed
-  # on 2026-08-17. ci-fast.yml KEEPS its push trigger, so a direct push to a
-  # shared branch is still scanned and still goes red — by the ~50s tier
-  # instead of this one. Since branch protection is unavailable on the free
-  # plan and neither tier can actually block a push, giving up the slower half
-  # of a detection-only control is a fair trade for the minutes.
-  pull_request:
+  # The reasoning that changed it: a pull_request run cannot BLOCK anything
+  # here. Branch protection — the setting that refuses a merge until named
+  # checks pass — is a paid feature, and this org is on GitHub Free with a
+  # private repo. So a red PR check is a note on a screen that anyone can merge
+  # straight past. Earlier comments in this repo described PR checks as
+  # "gating"; that was wrong, and this note exists so nobody believes it again.
+  #
+  # Given nothing blocks either way, push is the more complete of the two:
+  #   - merging a pull request IS a push to the base branch, so this catches
+  #     everything that lands;
+  #   - it also catches a direct push, which a pull_request trigger never sees.
+  #
+  # What we give up: finding a DAST problem before it reaches the shared branch
+  # rather than after. Judged an acceptable trade for this job specifically,
+  # because the authenticated scan costs ~5m40s and running it on both events
+  # pays that twice for every merge.
+  #
+  # ci-fast.yml deliberately keeps BOTH triggers. It is ~2 minutes, and failing
+  # tests are worth knowing about before you merge, not after.
+  push:
     branches: [main, release]
 
   workflow_dispatch:
 
-  # LATER — push on the shared branches, if the team wants the fuller tripwire
-  # back and will pay for two authenticated scans per merge:
-  # push:
-  #   branches: [main, release]
+  # Consequence to expect: DAST no longer appears as a check on pull requests.
+  # A PR will show three checks, not four. That is this decision working, not a
+  # broken pipeline. If branch protection ever becomes available, add
+  # pull_request back FIRST — a required check that never runs on a PR would
+  # block every merge forever.
 
 permissions:
   contents: read
