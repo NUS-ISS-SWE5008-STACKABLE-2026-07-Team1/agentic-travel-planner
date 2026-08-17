@@ -6,32 +6,62 @@
 name: CI — fast checks
 
 on:
-  # Item 17 — AGREED by the team: the quick checks run on everyone's own
-  # branch, not just the shared ones. Named explicitly rather than '**' so a
-  # stray or abandoned branch does not silently spend shared Actions minutes.
-  # Add a branch here when someone starts one.
-  push:
-    branches:
-      - main
-      - release
-      - mark
-      - andrew
-      - andy
-      - subbu-feature
-      - subbu-feature-001
-  # Item 6 — the highest-value change in the backlog. Checks now run on the
-  # proposed change instead of after it has already merged.
+  # Item 6, and the team decision of 2026-08-17: the pipeline runs on pull
+  # requests into the two shared branches. This supersedes the earlier item 17
+  # decision to run the fast tier on everyone's own branch on push.
+  #
+  # Because a pull_request event reads its workflow files from the MERGED
+  # result, this covers every PR into main or release no matter which branch it
+  # came from — including branches that have never seen this file. That is the
+  # whole reason this file must also exist on main.
   pull_request:
     branches: [main, release]
+
+  # The two shared branches on push as well, and ONLY those two.
+  #
+  # This is a tripwire, not a gate, and the distinction matters. The intended
+  # control was branch protection requiring the four checks, which would make a
+  # direct push to a shared branch impossible. That is a paid feature: this org
+  # is on GitHub Free and the repo is private, so both rulesets and classic
+  # branch protection answer
+  #     403 "Upgrade to GitHub Pro or make this repository public"
+  # Making the repo public is not an option — git history holds a rotated
+  # credential and instance/travel_planner.sqlite3 holds traveller gender and
+  # age data.
+  #
+  # So a direct push cannot be BLOCKED here. What this does is make one
+  # visible: the pushed code is scanned and the branch goes red where the whole
+  # team can see it. Replace this with real branch protection if the org ever
+  # moves to GitHub Team.
+  #
+  # Known cost, so nobody is surprised by it: merging a pull request is itself
+  # a push to the base branch, so every merge runs the pipeline a second time.
+  push:
+    branches: [main, release]
+
+  # Manual runs, so this file can be exercised without opening a PR.
   workflow_dispatch:
+
+  # LATER — push checks on everyone's own feature branch (item 17). Add these
+  # names to the push list above when the team wants them:
+  #     mark, andrew, andy, subbu-feature, subbu-feature-001
+  # Remember that a workflow file only ever runs on the branch it physically
+  # sits on, so adding a name here does nothing until that branch has merged
+  # main or release and actually has this file.
 
 permissions:
   contents: read
 
 # Supersede in-progress runs on the same ref. Without this, three pushes in
 # five minutes run three full copies of everything.
+#
+# head_ref is the source branch on a pull_request event and empty otherwise, so
+# this keys on the branch under both event types. Using github.ref alone would
+# key a PR run on refs/pull/N/merge and a push run on refs/heads/x — two
+# different groups for the same commit, so neither would cancel the other once
+# push triggers come back.
 concurrency:
-  group: fast-${{ github.workflow }}-${{ github.ref }}
+  group: fast-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -53,24 +83,30 @@ jobs:
           gitleaks version
 
       # BLOCKING: no credential may exist in the checked-out tree.
-      # NOTE: this stays RED until `git rm --cached .env.secrets` is committed.
-      # That is correct — red is the accurate signal right now.
+      # Green since .env.secrets was untracked. It stayed red for a while
+      # before that, correctly.
       - name: Gitleaks (working tree)
         run: >
           gitleaks detect --no-git --source . --redact
           --report-format sarif --report-path gitleaks-tree.sarif
 
       # ADVISORY by design, permanently. History contains the Azure key from
-      # c309d7a and we decided not to rewrite history. Rotating the key is the
-      # real fix. Do not "fix" this by deleting the step.
+      # c309d7a and we decided not to rewrite history. Rotating the key was the
+      # real fix and it has been done. Do not "fix" this by deleting the step.
       #
-      # `if: always()` is load-bearing and was found by an actual test run.
-      # Without it this step is SKIPPED whenever the blocking step above fails
-      # — which is exactly the situation the repo is in today — so the
-      # advisory scan silently never ran. The same bug exists in the current
-      # .github/workflows/security.yml.
+      # PUSH ONLY. Git history is identical between a pull request and the
+      # merge it becomes, so on a PR this step re-reports the same known key
+      # every single time — which is precisely how a team learns to scroll past
+      # a red check. On a push to a shared branch it is a real signal.
+      #
+      # `always()` must stay, and must stay FIRST in the expression. Without it
+      # this step is SKIPPED whenever the blocking step above fails, which is
+      # how it went unnoticed for weeks: the advisory scan we believed was
+      # running had never once executed. Found by an actual trial run, not by
+      # reading the file. The same bug still exists in every security.yml that
+      # has not yet been replaced.
       - name: Gitleaks (git history)
-        if: always()
+        if: always() && github.event_name == 'push'
         continue-on-error: true
         run: >
           gitleaks detect --source . --redact
