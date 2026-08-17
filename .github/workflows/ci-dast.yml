@@ -187,27 +187,50 @@ jobs:
       # ever scan logged out against a CSRF-protected app. Findings stay
       # advisory per item 8; the *authentication* is what blocks, via the
       # requestor responseCode checks and the 401 statistic test in the plan.
+      # NOT continue-on-error. It was, and that was wrong: it swallowed the
+      # Automation Framework's own failure signal, so the requestor job's
+      # responseCode mismatches (200 expected, 401 received) could not fail the
+      # build. Scan FINDINGS remain advisory — the plan does not gate on alerts
+      # — but the plan failing to run correctly must be loud.
       - name: ZAP authenticated scan (Automation Framework)
         uses: zaproxy/action-af@d186d5d9536d0f1380e5eaa58168432fefc8ed6d # v0.3.0
-        continue-on-error: true
         with:
           plan: ".zap/authenticated-scan.yaml"
           docker_env_vars: |
             ZAP_SESSION_COOKIE=${{ env.ZAP_SESSION_COOKIE }}
             ZAP_CSRF_TOKEN=${{ env.ZAP_CSRF_TOKEN }}
 
-      # BLOCKING, and the reason this rework was worth doing.
+      # The PRIMARY gate is not here — it is the requestor job's responseCode
+      # fields in .zap/authenticated-scan.yaml, which fail the plan when /main
+      # answers 302 or /admin/activity answers 401. Both are impossible with a
+      # working session, and the step above no longer swallows that failure.
       #
-      # The failure mode being guarded against is not "the scan found nothing".
-      # It is "the scan silently ran logged out and therefore found nothing",
-      # which looks identical from the outside and is what the old baseline job
-      # did on every single run. If the report does not show that ZAP reached
-      # URLs which only exist behind a session, the result is not evidence of
-      # anything and must not be presented as coverage.
-      - name: Prove the scan was actually authenticated
+      # This step adds the one thing the plan cannot check about itself: that
+      # the session was still alive when the scan finished. ZAP spidering into
+      # POST /logout would end its own session part-way through and quietly
+      # scan the rest logged out — which is why /logout is excluded from the
+      # context, and why this verifies the exclusion actually held.
+      #
+      # An earlier version of this step asserted that authenticated URLs
+      # appeared in the report. That assertion was worthless: the URLs appear
+      # because ZAP *requested* them, whatever the response code, so it passed
+      # happily against a deliberately invalid session. Recorded here because
+      # it is the same class of mistake as the check it was written to prevent.
+      - name: Prove the session survived the scan
         if: always()
         run: |
           set -euo pipefail
+          code=$(curl -s -b jar -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:5000/api/v1/admin/activity)
+          if [ "${code}" != "200" ]; then
+            echo "::error::The session is dead after the scan (got ${code})."
+            echo "::error::ZAP most likely reached POST /logout. Check excludePaths"
+            echo "::error::in .zap/authenticated-scan.yaml — everything scanned after"
+            echo "::error::that point was scanned logged out."
+            exit 1
+          fi
+          echo "Session still valid after the scan; /logout was not reached."
+
           report=$(find . -name 'zap-authenticated-report.json' | head -1)
           if [ -z "${report}" ]; then
             echo "::error::ZAP produced no JSON report — the scan did not complete."
@@ -227,17 +250,12 @@ jobs:
             exit 1
           fi
 
-          # /main, /admin, /chat and everything under /api/v1 sit behind
-          # login_required or the API blueprint's session guard. Reaching any of
-          # them is proof the session survived into ZAP's own traffic, which is
-          # the one thing the old baseline job could never demonstrate.
-          if ! echo "${urls}" | grep -qE '/(api/v1|main|admin|chat)'; then
-            echo "::error::No authenticated URL appears in the ZAP report."
-            echo "::error::The scan ran logged out, so a clean result here means nothing."
-            echo "::error::See .zap/authenticated-scan.yaml and backlog item 13."
-            exit 1
-          fi
-          echo "Authenticated URLs present; the scan had a working session."
+          # Printed for the record and for the report, NOT asserted on. The
+          # presence of a URL says only that ZAP sent a request to it — a
+          # logged-out scan produces almost the same list, every entry a 401.
+          # Whether those requests were authenticated is settled upstream by
+          # the requestor responseCode checks.
+          echo "For the record, ZAP reached $(echo "${urls}" | wc -l) URLs."
 
       - name: Upload ZAP reports
         if: always()
