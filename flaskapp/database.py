@@ -360,6 +360,26 @@ def create_planning_job(path: Path | str, request_id: str, user_id: int | None,
         )
 
 
+def owns_request(path: Path | str, request_id: str, user_id: int | None) -> bool:
+    """Does this user own this planning request, in whatever state it is in?
+
+    Authorization, not authentication. The API blueprint's before_request
+    establishes that somebody is signed in; this answers whose request it is.
+
+    An absent user_id is not a wildcard. A caller with no session owns nothing,
+    and a request with no matching row is owned by nobody, so both answer False
+    rather than falling open.
+    """
+    if user_id is None:
+        return False
+    with connect(path) as db:
+        row = db.execute(
+            "SELECT 1 FROM planning_jobs WHERE request_id = ? AND user_id = ?",
+            (request_id, user_id),
+        ).fetchone()
+        return row is not None
+
+
 def update_planning_job(path: Path | str, request_id: str, status: str,
                         error_type: str | None = None) -> None:
     with connect(path) as db:
