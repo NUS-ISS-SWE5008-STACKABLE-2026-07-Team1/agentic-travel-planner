@@ -11,8 +11,12 @@ import uuid
 import pytest
 
 from flaskapp.database import (
-    connect, create_planning_job, create_user, get_platform_dashboard,
-    initialize, save_plan_feedback, update_planning_job,
+    connect, create_planning_job, create_user, get_admin_token_summary,
+    get_platform_dashboard, get_recent_feedback, initialize, save_agent_run,
+    save_plan, save_plan_feedback, update_planning_job,
+)
+from flaskapp.travel_ai.schemas import (
+    AgentFinding, Option, PlanResponse, TravelPlan, TravelRequest,
 )
 
 DSN = os.getenv("TEST_DATABASE_URL", "")
@@ -128,6 +132,107 @@ def test_dashboard_queries_run(database):
     # the None case above no longer applies to any key.
     for key, value in dashboard.items():
         assert value is not None, f"{key} came back None"
+
+
+def test_save_plan_recent_feedback_and_token_summary_round_trip(database):
+    """Exercises the two hardest-won Postgres fixes that
+    test_dashboard_queries_run never touches, because get_platform_dashboard
+    -- the only function it calls -- contains neither:
+
+    * the `json_extract(...)` -> `(...)::json->>'field'` rewrite, which only
+      get_recent_feedback uses (reading planning_jobs.request_json);
+    * the numeric/Decimal FloatLoader registration in connect(), which only
+      matters for a column computed with SQL ROUND()/AVG() -- Postgres
+      returns those as `numeric`, and psycopg maps `numeric` to Decimal
+      unless the loader is registered. get_admin_token_summary's
+      agent_performance rows (completion_rate, average_tokens) are the only
+      values in this module built that way.
+
+    Also covers the save_plan round trip the spec's Testing section promised
+    and no task implemented: a real TravelRequest/PlanResponse, including an
+    agent finding with an option, saved and read back through the actual
+    application helper rather than a hand-written INSERT.
+    """
+    with connect(database) as db:
+        user_id = db.insert_returning_id(
+            "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+            ("Round Tripper", f"{uuid.uuid4()}@example.com", "hash"),
+        )
+    request_id = str(uuid.uuid4())
+
+    request = TravelRequest(
+        origin="Singapore", destination="Japan", origin_city="Singapore",
+        destination_city="Tokyo", departure_date="2026-10-10",
+        return_date="2026-10-16", travellers=1, traveller_ages=[30],
+        traveller_genders=["prefer_not_to_say"], traveller_accessibility_needs=[[]],
+        budget=3000,
+    )
+    response = PlanResponse(
+        request_id=request_id,
+        plan=TravelPlan(
+            title="Japan plan", summary="A test plan", itinerary=["Day 1"],
+            rationale=["Matches budget"],
+        ),
+        agent_findings=[AgentFinding(
+            agent="flight_agent", summary="Found flights", confidence=0.9,
+            options=[Option(name="SQ flight", description="Direct", estimated_cost=800)],
+        )],
+        trace_url="/trace",
+    )
+    save_plan(database, request, response, [], user_id=user_id)
+
+    with connect(database) as db:
+        saved = db.execute(
+            "SELECT title FROM travel_plans WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        option_count = db.execute(
+            """SELECT COUNT(*) AS n FROM options o
+               JOIN agent_findings f ON f.id = o.finding_id
+               WHERE f.request_id = ?""",
+            (request_id,),
+        ).fetchone()["n"]
+    assert saved["title"] == "Japan plan"
+    assert option_count == 1, "save_plan's agent_findings/options round trip must persist"
+
+    # get_recent_feedback needs a planning_jobs row -- its request_json is
+    # exactly what json_extract/->>'field' reads -- and a 'completed'
+    # status, since save_plan_feedback only accepts feedback on those.
+    create_planning_job(database, request_id, user_id, {
+        "origin": "Singapore", "destination": "Japan",
+        "origin_city": "Singapore", "destination_city": "Tokyo",
+    })
+    update_planning_job(database, request_id, "completed")
+    feedback = save_plan_feedback(database, request_id, user_id, "up", "loved it")
+    assert feedback is not None, "seeding failed: feedback was not recorded"
+
+    recent = get_recent_feedback(database)
+    assert len(recent) == 1
+    entry = recent[0]
+    assert entry["rating"] == "up"
+    assert entry["origin"] == "Singapore", "json_extract($.origin) must survive the rewrite"
+    assert entry["destination"] == "Japan"
+    assert entry["origin_city"] == "Singapore"
+    assert entry["destination_city"] == "Tokyo"
+
+    # get_admin_token_summary: ROUND(...)/AVG(...) columns.
+    save_agent_run(
+        database, request_id, "flight_agent", "completed",
+        usage={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+    )
+
+    summary = get_admin_token_summary(database)
+    assert summary["totals"]["total_tokens"] == 150
+    performance = {row["agent"]: row for row in summary["agent_performance"]}
+    completion_rate = performance["flight_agent"]["completion_rate"]
+    average_tokens = performance["flight_agent"]["average_tokens"]
+    assert completion_rate == 100.0
+    assert average_tokens == 150.0
+    # The regression this guards against: without the FloatLoader
+    # registered, psycopg hands back a Decimal here, and Flask's JSON
+    # provider serializes Decimal as the *string* "100.0" -- not a number
+    # the admin dashboard's charts can plot.
+    assert isinstance(completion_rate, float), f"got {type(completion_rate).__name__}, not float"
+    assert isinstance(average_tokens, float), f"got {type(average_tokens).__name__}, not float"
 
 
 def test_create_user_rejects_a_duplicate_email(database):
