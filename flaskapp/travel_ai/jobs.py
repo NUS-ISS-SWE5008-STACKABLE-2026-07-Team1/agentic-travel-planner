@@ -60,7 +60,10 @@ def _run_plan(request_id: str, request: TravelRequest, settings: dict,
             endpoint=settings.get("endpoint"), api_version=settings.get("api_version"),
             base_url=settings.get("base_url"),
             temperature=settings["temperature"], timeout=settings["timeout"],
-            trace_dir=Path(settings["trace_dir"]), database_path=Path(settings["database_path"]),
+            trace_dir=Path(settings["trace_dir"]),
+            # NOT Path(...): this may be a postgresql:// DSN, and Path would
+            # normalise the // away and silently turn it back into SQLite.
+            database_path=settings["database_path"],
             user_id=user_id,
             cancel_event=_cancel_events[request_id],
         )
