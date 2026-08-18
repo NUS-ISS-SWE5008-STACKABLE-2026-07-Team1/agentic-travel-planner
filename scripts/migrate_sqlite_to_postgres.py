@@ -12,6 +12,15 @@ colliding primary key silently keeps the destination's row and drops the
 source's, with no error raised — the wrong failure mode to discover after the
 fact.
 
+Also refuses to silently drop a column: a source table can carry columns no
+schema constant declares (a half-reverted feature SQLite cannot drop a
+column for), and every copy is checked against what the destination actually
+has, not against SCHEMA_SQLITE/SCHEMA_POSTGRES. An all-NULL source-only
+column is skipped with a printed note; one holding real data aborts the run
+rather than dropping it. --dry-run runs the same check against the
+destination (read-only — it opens a connection but writes nothing) so this
+surfaces before anything is copied.
+
     python scripts/migrate_sqlite_to_postgres.py \
         --source instance/travel_planner.sqlite3 \
         --destination "$DATABASE_URL"
@@ -27,6 +36,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from flaskapp.database import connect, initialize, is_postgres  # noqa: E402
+
+
+class SchemaDriftError(RuntimeError):
+    """A source column the destination schema does not declare holds real
+    data. Raised instead of silently dropping the column on INSERT."""
+
 
 # Parents before children. options follows agent_findings; agent_runs and
 # plan_feedback follow planning_jobs.
@@ -77,12 +92,102 @@ TABLE_PRIMARY_KEYS = {
 }
 
 
+def destination_table_exists(destination, table: str) -> bool:
+    """Whether `table` exists yet in the destination.
+
+    False for a brand-new Postgres database before `initialize()` has run —
+    the common state a `--dry-run` hits on a first-ever migration. In that
+    case there is nothing yet to compare columns against, so the caller
+    treats it as "not checkable yet" rather than as drift.
+    """
+    dialect = getattr(destination, "dialect", "sqlite")
+    if dialect == "postgres":
+        row = destination.execute(
+            "SELECT 1 AS present FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = ?", (table,),
+        ).fetchone()
+    else:
+        row = destination.execute(
+            "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+    return row is not None
+
+
+def destination_columns(destination, table: str) -> set[str]:
+    """The destination table's actual columns, read from its own catalog
+    (information_schema for Postgres, PRAGMA table_info for the SQLite
+    destination the tests use) rather than trusted from
+    SCHEMA_POSTGRES/SCHEMA_SQLITE, so this reflects a live database even if
+    its DDL has drifted from what those constants declare.
+    """
+    dialect = getattr(destination, "dialect", "sqlite")
+    if dialect == "postgres":
+        rows = destination.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = ?", (table,),
+        ).fetchall()
+        return {row["column_name"] for row in rows}
+    rows = destination.execute(f"PRAGMA table_info({table})").fetchall()
+    return {row["name"] for row in rows}
+
+
+def check_column_drift(source, destination, table: str) -> tuple[list[str], list[str]]:
+    """Decide which of `table`'s source columns are safe to copy.
+
+    Returns (columns_to_copy, skipped_columns): the source/destination
+    intersection, in source column order, and any source-only columns
+    dropped because the destination has no place for them (e.g.
+    travel_requests.origin_place/destination_place, left behind by a
+    half-reverted feature — SQLite cannot drop a column, so they linger,
+    always NULL, in the source file).
+
+    Raises SchemaDriftError instead of dropping a column silently if it
+    holds any non-NULL value in the source: that would be real data loss,
+    not a harmless gap, and deserves a loud abort naming the column and how
+    many rows are affected.
+    """
+    source_columns = [
+        row["name"] for row in source.execute(f"PRAGMA table_info({table})").fetchall()
+    ]
+    if not destination_table_exists(destination, table):
+        # Nothing to compare against yet; initialize() creates the table
+        # before the real copy runs. Copy every source column and let a
+        # genuine "relation does not exist" surface on its own — an
+        # ordinary, loud error, not silent data loss.
+        return source_columns, []
+    dest_columns = destination_columns(destination, table)
+    extra = [column for column in source_columns if column not in dest_columns]
+    if extra:
+        total = source.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+        for column in extra:
+            populated = source.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE {column} IS NOT NULL"
+            ).fetchone()["n"]
+            if populated:
+                raise SchemaDriftError(
+                    f"{table}.{column} exists in the source but not in the "
+                    f"destination schema, and holds a non-NULL value in "
+                    f"{populated} of {total} row(s). Refusing to drop real "
+                    "data silently — resolve the schema drift (add the "
+                    "column to the destination, or confirm dropping it is "
+                    "safe) before re-running."
+                )
+    columns = [column for column in source_columns if column in dest_columns]
+    return columns, extra
+
+
 def copy_table(source, destination, table: str) -> tuple[int, int]:
     """Copy one table. Returns (rows read, rows written)."""
     rows = source.execute(f"SELECT * FROM {table}").fetchall()
     if not rows:
         return 0, 0
-    columns = list(rows[0].keys())
+    columns, skipped = check_column_drift(source, destination, table)
+    if skipped:
+        print(
+            f"{table}: source-only column(s) {', '.join(skipped)} are all "
+            "NULL and not in the destination schema; skipping them."
+        )
     placeholders = ", ".join("?" for _ in columns)
     statement = (
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
@@ -142,7 +247,7 @@ def missing_primary_keys(source, destination, table: str) -> set:
     return source_keys - destination_keys
 
 
-def reset_sequences(destination) -> None:
+def reset_sequences(destination) -> list[str]:
     """Advance each identity sequence past the ids we inserted explicitly.
 
     setval's third argument controls whether the *next* nextval() repeats the
@@ -153,22 +258,43 @@ def reset_sequences(destination) -> None:
     for no reason. The fix is to make the flag track whether the table
     actually has rows: `is_called` should be true only when MAX(id) is a real
     value, and false when it falls back to the identity's start value.
+
+    setval(NULL, ...) returns NULL rather than raising, so if
+    pg_get_serial_sequence ever fails to resolve a table's owning sequence,
+    the naive version of this function would leave that sequence stuck at 1
+    — and every later application insert into that table would collide with
+    a migrated id — while reporting nothing wrong. Each result is checked
+    for that, and any failure is returned rather than swallowed, so main()
+    can fold it into the run's failure report and exit non-zero.
     """
+    failures = []
     for table in IDENTITY_TABLES:
-        destination.execute(
+        result = destination.execute(
             f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
-            f"COALESCE(m.max_id, 1), m.max_id IS NOT NULL) "
+            f"COALESCE(m.max_id, 1), m.max_id IS NOT NULL) AS new_value "
             f"FROM (SELECT MAX(id) AS max_id FROM {table}) AS m"
-        )
+        ).fetchone()
+        if result is None or result["new_value"] is None:
+            failures.append(
+                f"reset_sequences: setval for {table}.id returned NULL — "
+                "pg_get_serial_sequence could not resolve its sequence, so "
+                "it was NOT advanced. The next insert into this table risks "
+                "colliding with a migrated id."
+            )
     destination.commit()
+    return failures
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default="instance/travel_planner.sqlite3")
     parser.add_argument("--destination", required=True)
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Connect and report source counts without writing.")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Connect to source and destination and report source counts "
+             "plus any source-only-column schema drift, without writing "
+             "any rows.",
+    )
     parser.add_argument(
         "--allow-nonempty", action="store_true",
         help="Proceed even though the destination already has rows in some "
@@ -188,10 +314,31 @@ def main(argv: list[str] | None = None) -> int:
     source.row_factory = sqlite3.Row
 
     if arguments.dry_run:
-        for table in TABLES:
-            count = source.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
-            print(f"{count:6d}  {table}")
-        return 0
+        # Reads only: connects to the destination to compare columns but
+        # never writes a row. If the destination's schema does not exist
+        # yet (a brand-new database), there is nothing to compare against
+        # for that table and check_column_drift says so instead of raising.
+        destination = connect(arguments.destination)
+        try:
+            drifted = False
+            for table in TABLES:
+                count = source.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+                print(f"{count:6d}  {table}")
+                try:
+                    _columns, skipped = check_column_drift(source, destination, table)
+                except SchemaDriftError as error:
+                    drifted = True
+                    print(f"  SCHEMA DRIFT: {error}")
+                    continue
+                if skipped:
+                    print(
+                        f"  {table}: source-only column(s) {', '.join(skipped)} "
+                        "would be skipped (all NULL, not in the destination schema)."
+                    )
+        finally:
+            destination.close()
+            source.close()
+        return 1 if drifted else 0
 
     initialize(arguments.destination)
     destination = connect(arguments.destination)
@@ -212,7 +359,17 @@ def main(argv: list[str] | None = None) -> int:
         reset_error: Exception | None = None
         try:
             for table in TABLES:
-                read, written = copy_table(source, destination, table)
+                try:
+                    read, written = copy_table(source, destination, table)
+                except SchemaDriftError as error:
+                    # An anticipated, named failure mode (a source-only
+                    # column really does hold data) — report it through the
+                    # normal failures list and stop, rather than letting it
+                    # fall through to the same raw-traceback path an
+                    # unanticipated exception still takes below.
+                    failures.append(str(error))
+                    print(f"{table:24s} ABORTED: {error}")
+                    break
                 missing = missing_primary_keys(source, destination, table)
                 existing = destination.execute(
                     f"SELECT COUNT(*) AS n FROM {table}"
@@ -231,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             # reports alongside the copy failures instead of replacing —
             # and hiding — whatever exception the loop itself raised.
             try:
-                reset_sequences(destination)
+                failures.extend(reset_sequences(destination))
             except Exception as error:  # noqa: BLE001 - reported, never raised
                 reset_error = error
     finally:

@@ -1,15 +1,21 @@
 """The parts of the migration that are testable without a Postgres server."""
 
+import re
 import sqlite3
+
+import pytest
 
 from flaskapp.database import SCHEMA_SQLITE
 from scripts.migrate_sqlite_to_postgres import (
     IDENTITY_TABLES,
     TABLE_PRIMARY_KEYS,
     TABLES,
+    SchemaDriftError,
     blocking_tables,
+    check_column_drift,
     copy_table,
     missing_primary_keys,
+    reset_sequences,
 )
 
 
@@ -185,3 +191,136 @@ def test_missing_primary_keys_uses_request_id_for_travel_plans(tmp_path):
     # destination's travel_plans is left empty: request_id 'req-1' never lands.
 
     assert missing_primary_keys(source, destination, "travel_plans") == {"req-1"}
+
+
+# --- BLOCKING 1: source-only columns (e.g. travel_requests.origin_place, ---
+# --- left behind by a half-reverted feature SQLite cannot drop a column ---
+# --- for) must not silently drop data or crash the whole run. -------------
+
+_REQUEST_COLUMNS = (
+    "id, origin, destination, departure_date, return_date, travellers, "
+    "currency, risk_tolerance"
+)
+_REQUEST_VALUES = "'req-1', 'SG', 'JP', '2026-09-01', '2026-09-10', 2, 'SGD', 'low'"
+
+
+def test_copy_table_skips_a_source_only_column_that_is_always_null(tmp_path):
+    """A column the source has but the destination schema doesn't declare
+    must not blow up the migration when it never holds real data -- this is
+    exactly travel_requests.origin_place/destination_place against the real
+    instance database."""
+    source, destination = (
+        _fresh_sqlite(tmp_path / "a.sqlite3"), _fresh_sqlite(tmp_path / "b.sqlite3"),
+    )
+    source.execute("ALTER TABLE travel_requests ADD COLUMN origin_place TEXT")
+    source.execute(
+        f"INSERT INTO travel_requests ({_REQUEST_COLUMNS}, origin_place) "
+        f"VALUES ({_REQUEST_VALUES}, NULL)"
+    )
+    source.commit()
+
+    read, written = copy_table(source, destination, "travel_requests")
+
+    assert (read, written) == (1, 1)
+    row = destination.execute(
+        "SELECT * FROM travel_requests WHERE id = 'req-1'"
+    ).fetchone()
+    assert row is not None
+    assert "origin_place" not in row.keys(), "destination has no such column"
+
+
+def test_copy_table_aborts_when_a_source_only_column_holds_data(tmp_path):
+    """The same column with a real value must abort loudly instead of
+    dropping it -- silently losing data is worse than a loud refusal."""
+    source, destination = (
+        _fresh_sqlite(tmp_path / "a.sqlite3"), _fresh_sqlite(tmp_path / "b.sqlite3"),
+    )
+    source.execute("ALTER TABLE travel_requests ADD COLUMN origin_place TEXT")
+    source.execute(
+        f"INSERT INTO travel_requests ({_REQUEST_COLUMNS}, origin_place) "
+        f"VALUES ({_REQUEST_VALUES}, 'Singapore')"
+    )
+    source.commit()
+
+    with pytest.raises(SchemaDriftError, match="origin_place"):
+        copy_table(source, destination, "travel_requests")
+
+    # Refusing to copy means refusing entirely -- no partial row either.
+    assert destination.execute("SELECT COUNT(*) AS n FROM travel_requests").fetchone()["n"] == 0
+
+
+def test_check_column_drift_skips_the_check_when_the_destination_table_is_absent(tmp_path):
+    """A brand-new destination (no schema applied yet, the state --dry-run
+    hits on a first-ever run) has nothing to compare against. That must read
+    as "not checkable yet", not as every source column being drift."""
+    source = _fresh_sqlite(tmp_path / "a.sqlite3")
+    destination = sqlite3.connect(tmp_path / "empty.sqlite3")
+    destination.row_factory = sqlite3.Row
+
+    columns, skipped = check_column_drift(source, destination, "users")
+
+    assert skipped == []
+    assert "email" in columns
+
+
+# --- SHOULD FIX 4: reset_sequences must not let setval's NULL-on-failure ---
+# --- behavior pass as silent success. setval/pg_get_serial_sequence are ---
+# --- Postgres-only, so this is exercised with a minimal fake connection ---
+# --- rather than a real database -- the same "no live server" spirit as ---
+# --- every other test in this file, just without a SQLite stand-in since ---
+# --- SQLite has no equivalent to fake honestly. -----------------------------
+
+class _FakeCursor:
+    def __init__(self, value):
+        self._value = value
+
+    def fetchone(self):
+        return {"new_value": self._value}
+
+
+class _FakeSequenceConnection:
+    """Stands in for the Postgres destination reset_sequences talks to.
+    One table is rigged to report a NULL new_value, as
+    pg_get_serial_sequence(...) does when it cannot resolve a sequence and
+    setval(NULL, ...) then returns NULL rather than raising."""
+
+    def __init__(self, tables_returning_null=()):
+        self._null_tables = set(tables_returning_null)
+        self.committed = False
+
+    def execute(self, sql, parameters=()):
+        table = re.search(r"pg_get_serial_sequence\('(\w+)'", sql).group(1)
+        return _FakeCursor(None if table in self._null_tables else 42)
+
+    def commit(self):
+        self.committed = True
+
+
+def test_reset_sequences_reports_a_table_whose_sequence_could_not_be_resolved():
+    destination = _FakeSequenceConnection(tables_returning_null={"agent_findings"})
+
+    failures = reset_sequences(destination)
+
+    assert len(failures) == 1
+    assert "agent_findings" in failures[0]
+    assert "NULL" in failures[0]
+    assert destination.committed, "the other tables' sequences must still be advanced"
+
+
+def test_reset_sequences_reports_nothing_when_every_setval_succeeds():
+    destination = _FakeSequenceConnection()
+
+    assert reset_sequences(destination) == []
+    assert destination.committed
+
+
+def test_reset_sequences_reports_every_table_whose_sequence_could_not_be_resolved():
+    destination = _FakeSequenceConnection(
+        tables_returning_null={"agent_findings", "plan_feedback"}
+    )
+
+    failures = reset_sequences(destination)
+
+    assert len(failures) == 2
+    assert any("agent_findings" in failure for failure in failures)
+    assert any("plan_feedback" in failure for failure in failures)
