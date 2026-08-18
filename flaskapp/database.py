@@ -346,6 +346,26 @@ CREATE INDEX IF NOT EXISTS idx_feedback_created ON plan_feedback(created_at DESC
 POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 
 
+def to_postgres_sql(sql: str) -> str:
+    """Rewrite one dialect-neutral query into the Postgres it means.
+
+    Two token substitutions, and deliberately no more:
+
+    * `CURRENT_TIMESTAMP` -> the same `to_char(...)` expression SCHEMA_POSTGRES
+      defaults to. Postgres has no assignment cast from timestamptz to the TEXT
+      columns these values land in, so the bare keyword would raise; and its
+      native rendering (`2026-08-18 14:30:00.123456+00`) would break the
+      `SUBSTR(x, 1, 10)` slicing the dashboards do. Note the replacement
+      contains no `%`, so it cannot collide with parameter binding below.
+    * `?` -> `%s`, psycopg's placeholder.
+
+    Order between the two is irrelevant — neither substitution's output
+    contains the other's input — but CURRENT_TIMESTAMP goes first so the
+    placeholder rewrite is always the last thing that touches the string.
+    """
+    return sql.replace("CURRENT_TIMESTAMP", _NOW).replace("?", "%s")
+
+
 def is_postgres(target: Path | str) -> bool:
     """True when the target names a Postgres DSN rather than a SQLite file."""
     return isinstance(target, str) and target.startswith(POSTGRES_SCHEMES)
@@ -370,7 +390,7 @@ class _Connection:
     def execute(self, sql: str, parameters: tuple = ()):
         if self.dialect == "postgres":
             cursor = self._raw.cursor()
-            cursor.execute(sql.replace("?", "%s"), parameters)
+            cursor.execute(to_postgres_sql(sql), parameters)
             return cursor
         return self._raw.execute(sql, parameters)
 
@@ -463,7 +483,7 @@ def initialize(target: Path | str) -> None:
                 return {
                     row["column_name"] for row in connection.execute(
                         "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_name = ?", (table,)
+                        "WHERE table_schema = 'public' AND table_name = ?", (table,)
                     ).fetchall()
                 }
             return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
