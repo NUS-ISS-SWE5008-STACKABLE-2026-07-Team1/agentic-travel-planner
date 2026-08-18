@@ -15,7 +15,7 @@ _lock = threading.Lock()
 class AuditTracer:
     """Append agent lifecycle events with a hash chain for accountability."""
 
-    def __init__(self, trace_dir: Path, request_id: str, database_path: Path | None = None):
+    def __init__(self, trace_dir: Path, request_id: str, database_path: Path | str | None = None):
         self.path = trace_dir / f"{request_id}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.request_id = request_id
