@@ -290,6 +290,47 @@ birthday. Passwords must contain at least 12 characters with uppercase, lowercas
 a number, and a special character. Passwords are stored only as Werkzeug hashes;
 email addresses are case-insensitively unique.
 
+## Hosted database
+
+Set `DATABASE_URL` to a Postgres DSN and the application uses it instead of
+SQLite; leave it unset and local development is unchanged. Supabase users must
+use the **session pooler** connection string — its host contains
+`pooler.supabase.com` — not the direct connection, whose host resolves only to
+an IPv6 address that Render cannot reach. Percent-encode any `/`, `@`, `#` or
+`?` in the password before putting it in the DSN.
+
+Creating the `citext` extension the schema relies on for case-insensitive
+email uniqueness (`CREATE EXTENSION IF NOT EXISTS citext;`) requires a role
+with sufficient privilege; the default Supabase `postgres` role has it, but a
+restricted application role may not.
+
+Copy the existing local data across once:
+
+```powershell
+python scripts/migrate_sqlite_to_postgres.py --destination $env:DATABASE_URL --dry-run
+python scripts/migrate_sqlite_to_postgres.py --destination $env:DATABASE_URL
+```
+
+The script is idempotent and prints per-table counts, exiting non-zero if any
+table ends up short. It also refuses to run against a destination that
+already has rows in any of the migrated tables, to avoid silently dropping
+data under `ON CONFLICT DO NOTHING`; pass `--allow-nonempty` only for a
+deliberate resume of a partial migration.
+
+Moving state into Supabase does not make the deployment fully stateless.
+`flaskapp/travel_ai/tracing.py` still writes each request's tamper-evident
+audit trace as a JSONL file under `TRACE_DIR` (default
+`instance/traces`) on the instance's local filesystem, in addition to writing
+the same events to the `audit_events` table. On Render's free tier that
+directory sits on the ephemeral disk, so every deploy and every spin-down
+still wipes those trace files — the `GET /api/v1/traces/<request_id>`
+endpoint (the `trace_url` returned with every plan) reads only from the
+JSONL file, not from `audit_events`, so it will 404 for any request whose
+trace file was lost even though the same events are still durable in the
+database. Supabase resolves this for users, plans,
+and audit rows; it does not resolve it for trace-file retrieval unless
+`TRACE_DIR` is also moved onto persistent or external storage.
+
 ## Administrator monitoring
 
 Set `ADMIN_EMAILS` in `.env` to a comma-separated list of registered accounts that

@@ -39,19 +39,6 @@ services:
         sync: false
       - key: ADMIN_EMAILS
         sync: false
-      # Default is instance/travel_planner.sqlite3 on the instance's ephemeral
-      # disk: every deploy and every free-tier spin-down wipes users, plans and
-      # traces. To keep data, move to a paid instance and uncomment the disk
-      # block below along with this path.
-      # - key: DATABASE
-      #   value: /var/data/travel_planner.sqlite3
-      # - key: TRACE_DIR
-      #   value: /var/data/traces
-
-    # Persistent storage. Requires a paid instance type; free instances cannot
-    # mount a disk. A disk also pins the service to one instance, which this app
-    # already requires for the reason given above.
-    # disk:
-    #   name: travel-planner-data
-    #   mountPath: /var/data
-    #   sizeGB: 1
+      # Supabase session pooler DSN. Set by hand in the dashboard; never here.
+      - key: DATABASE_URL
+        sync: false
