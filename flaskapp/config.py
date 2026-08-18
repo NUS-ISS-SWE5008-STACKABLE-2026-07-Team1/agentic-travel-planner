@@ -64,7 +64,11 @@ class Config:
     DUFFEL_SUPPLIER_TIMEOUT_MS = int(os.getenv("DUFFEL_SUPPLIER_TIMEOUT_MS", "20000"))
     DUFFEL_MAX_OFFERS = int(os.getenv("DUFFEL_MAX_OFFERS", "50"))
     TRACE_DIR = Path(os.getenv("TRACE_DIR", "instance/traces"))
-    DATABASE = Path(os.getenv("DATABASE", "instance/travel_planner.sqlite3"))
+    # A DSN wins when present; otherwise the local SQLite file. Keeping both in
+    # one setting is what lets every database function take one target argument.
+    DATABASE = os.getenv("DATABASE_URL", "").strip() or Path(
+        os.getenv("DATABASE", "instance/travel_planner.sqlite3")
+    )
     MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "12000"))
     SECRET_KEY = os.getenv("SECRET_KEY", "development-only-change-me")
     LOGIN_EMAIL = os.getenv("LOGIN_EMAIL", "demo@example.com").lower()
