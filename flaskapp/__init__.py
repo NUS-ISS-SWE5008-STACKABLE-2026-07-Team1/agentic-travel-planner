@@ -25,6 +25,32 @@ def create_app(config_object: type[Config] = Config) -> Flask:
 
     app.register_blueprint(pages_bp)
     app.register_blueprint(travel_api_bp, url_prefix="/api/v1")
+
+    @app.after_request
+    def set_security_headers(response):
+        """Response headers the DAST scan found missing on every page.
+
+        Both were reported at Medium risk by the first authenticated ZAP run
+        (backlog item 13). Nothing set response headers anywhere in this app
+        before now, so this is the one place they belong.
+
+        setdefault rather than assignment: a view that deliberately needs
+        different framing or content-type behaviour can still say so, and this
+        will not silently overwrite it.
+
+        Content-Security-Policy is the third finding from that scan and is NOT
+        here on purpose. It needs a policy listing every allowed script and
+        style source, and getting it wrong blanks a page rather than failing
+        loudly. It is tracked separately so it can land with its own scan run.
+        """
+        # Stop the browser second-guessing a declared Content-Type. Without it
+        # a file we serve as text can be sniffed and executed as script.
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        # Refuse to be rendered inside a frame anywhere. DENY rather than
+        # SAMEORIGIN because nothing in this app frames itself.
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        return response
+
     return app
 
 
