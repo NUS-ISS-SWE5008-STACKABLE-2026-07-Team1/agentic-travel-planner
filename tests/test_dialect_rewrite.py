@@ -20,14 +20,19 @@ class FakeCursor:
 
 
 class FakeConnection:
-    """The two methods _Connection.execute touches on a psycopg connection."""
+    """The methods the shim touches on a psycopg connection."""
 
     def __init__(self):
         self.cursors = []
+        self.scripts = []
 
     def cursor(self):
         self.cursors.append(FakeCursor())
         return self.cursors[-1]
+
+    def execute(self, sql):
+        # psycopg's connection-level execute, used only by executescript.
+        self.scripts.append(sql)
 
 
 def test_current_timestamp_becomes_the_schema_default_expression():
@@ -118,3 +123,69 @@ def test_sqlite_connection_executes_the_query_verbatim():
     sql = "UPDATE planning_jobs SET completed_at = CURRENT_TIMESTAMP WHERE request_id = ?"
     _Connection(RawSqlite(), "sqlite").execute(sql, ("abc",))
     assert recorded == [(sql, ("abc",))]
+
+
+def test_json_extract_becomes_the_json_arrow_operator():
+    """Postgres has no json_extract; ->> is the equivalent that returns text."""
+    rewritten = to_postgres_sql(
+        "SELECT json_extract(j.request_json, '$.origin') AS origin FROM planning_jobs j"
+    )
+    assert "json_extract" not in rewritten.lower()
+    assert "(j.request_json)::json->>'origin'" in rewritten
+
+
+def test_every_json_extract_in_one_query_is_rewritten():
+    """get_recent_feedback calls it four times in a single SELECT."""
+    sql = """SELECT json_extract(j.request_json, '$.origin') AS origin,
+                    json_extract(j.request_json, '$.destination') AS destination,
+                    json_extract(j.request_json, '$.origin_city') AS origin_city,
+                    json_extract(j.request_json, '$.destination_city') AS destination_city
+             FROM planning_jobs j LIMIT ?"""
+    rewritten = to_postgres_sql(sql)
+    assert "json_extract" not in rewritten.lower()
+    assert rewritten.count("::json->>") == 4
+    assert rewritten.endswith("LIMIT %s")
+
+
+def test_json_extract_rewrite_introduces_no_binding_characters():
+    """A % or ? in the replacement would be read as a parameter placeholder."""
+    rewritten = to_postgres_sql(
+        "SELECT json_extract(j.request_json, '$.origin') FROM planning_jobs j"
+    )
+    assert "%" not in rewritten
+    assert "?" not in rewritten
+
+
+def test_json_extract_rewrite_survives_a_nested_expression():
+    """The capture stops at the '$. anchor, so a parenthesised argument works."""
+    rewritten = to_postgres_sql("SELECT json_extract(COALESCE(a, b), '$.origin')")
+    assert rewritten == "SELECT (COALESCE(a, b))::json->>'origin'"
+
+
+def test_postgres_executescript_is_never_rewritten():
+    """Schemas reach executescript already dialect-correct.
+
+    SCHEMA_POSTGRES's own to_char defaults and DEFAULT '{}' bodies must arrive
+    byte for byte: a second pass of to_postgres_sql over them would be a
+    double rewrite.
+    """
+    raw = FakeConnection()
+    script = (
+        "CREATE TABLE t (created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "note TEXT DEFAULT 'is it? yes');"
+    )
+    _Connection(raw, "postgres").executescript(script)
+    assert raw.scripts == [script]
+    assert raw.cursors == []  # never went through the execute() path
+
+
+def test_sqlite_executescript_is_never_rewritten():
+    recorded = []
+
+    class RawSqlite:
+        def executescript(self, script):
+            recorded.append(script)
+
+    script = "CREATE TABLE t (created_at TEXT DEFAULT CURRENT_TIMESTAMP);"
+    _Connection(RawSqlite(), "sqlite").executescript(script)
+    assert recorded == [script]

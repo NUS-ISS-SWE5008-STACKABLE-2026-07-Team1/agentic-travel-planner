@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -346,24 +347,34 @@ CREATE INDEX IF NOT EXISTS idx_feedback_created ON plan_feedback(created_at DESC
 POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 
 
+_JSON_EXTRACT = re.compile(r"json_extract\(\s*(.+?)\s*,\s*'\$\.(\w+)'\s*\)", re.IGNORECASE)
+
+
 def to_postgres_sql(sql: str) -> str:
     """Rewrite one dialect-neutral query into the Postgres it means.
 
-    Two token substitutions, and deliberately no more:
+    Three substitutions, and deliberately no more. Every one of them replaces a
+    construct SQLite accepts and Postgres does not; none of them introduces a
+    `%` or a `?`, so none can collide with parameter binding.
 
     * `CURRENT_TIMESTAMP` -> the same `to_char(...)` expression SCHEMA_POSTGRES
       defaults to. Postgres has no assignment cast from timestamptz to the TEXT
       columns these values land in, so the bare keyword would raise; and its
       native rendering (`2026-08-18 14:30:00.123456+00`) would break the
-      `SUBSTR(x, 1, 10)` slicing the dashboards do. Note the replacement
-      contains no `%`, so it cannot collide with parameter binding below.
+      `SUBSTR(x, 1, 10)` slicing the dashboards do.
+    * `json_extract(expr, '$.field')` -> `(expr)::json->>'field'`. Postgres has
+      no json_extract at all. `->>` returns text and yields NULL for a missing
+      key, which is what json_extract does for the four string fields
+      get_recent_feedback reads out of planning_jobs.request_json.
     * `?` -> `%s`, psycopg's placeholder.
 
-    Order between the two is irrelevant — neither substitution's output
-    contains the other's input — but CURRENT_TIMESTAMP goes first so the
-    placeholder rewrite is always the last thing that touches the string.
+    Order among the first two is irrelevant — neither one's output contains the
+    other's input — but the placeholder rewrite must stay last so that nothing
+    downstream can manufacture or consume a `%s`.
     """
-    return sql.replace("CURRENT_TIMESTAMP", _NOW).replace("?", "%s")
+    sql = sql.replace("CURRENT_TIMESTAMP", _NOW)
+    sql = _JSON_EXTRACT.sub(r"(\1)::json->>'\2'", sql)
+    return sql.replace("?", "%s")
 
 
 def is_postgres(target: Path | str) -> bool:
@@ -445,6 +456,18 @@ def connect(target: Path | str) -> _Connection:
 
         try:
             raw = psycopg.connect(target, row_factory=dict_row)
+            # AVG() and ROUND() return `numeric` on Postgres and `float` on
+            # SQLite. psycopg maps numeric to Decimal, and Flask's JSON
+            # provider renders Decimal as a *string*, so the admin charts
+            # would receive "92.3" instead of 92.3. No column in either schema
+            # is numeric — only aggregate results are — so loading numeric as
+            # float loses nothing and matches SQLite exactly.
+            try:  # pragma: no cover - needs psycopg installed
+                from psycopg.types.numeric import FloatLoader
+
+                raw.adapters.register_loader("numeric", FloatLoader)
+            except (ImportError, AttributeError):  # pragma: no cover
+                pass
         except psycopg.OperationalError as error:
             # The failure is almost always the pooler/direct distinction, and
             # the driver's own message ("could not translate host name") does
