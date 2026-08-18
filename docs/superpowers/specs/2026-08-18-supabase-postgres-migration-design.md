@@ -46,6 +46,8 @@ Out of scope, explicitly:
 | Production dialect coverage | A CI job against `postgres:16` | Trusting that the two dialects agree |
 | Existing data | Migrated, keys preserved | Fresh start |
 | Case-insensitive email | `CITEXT` | Plain `TEXT UNIQUE`, relying on callers lowercasing |
+| Dashboard date grouping | `SUBSTR` on the fixed timestamp format, one query text for both engines | Per-dialect copies of the four aggregation queries |
+| Import-time `app = create_app()` | Deleted | Kept, with tests forced to override `DATABASE` |
 
 ## Dialect differences that actually bite
 
@@ -95,6 +97,40 @@ findings, agent runs and audit events into a stray local file, while the web
 request path talked to Supabase correctly. Nothing would raise. The fix is to
 stop coercing: `database_path` is passed through as the string it already is,
 and `TravelPlanningService`'s annotation widens to `Path | str | None`.
+
+**9. SQLite-only date functions in the admin dashboard.** Found while planning;
+an earlier survey missed them by grepping only lowercase. `get_admin_token_summary`
+and `get_platform_dashboard` use `DATE(...)` (15 uses) and `STRFTIME('%Y-%m', ...)`
+(6 uses) — neither exists in Postgres with those semantics. The literal `%` is a
+second problem: psycopg reads `%` as the start of its own placeholder, so these
+queries would fail to bind even after `?` translation.
+
+Both are resolved without dialect-specific SQL. Because decision 1 fixes the
+stored format at `YYYY-MM-DD HH:MM:SS` in both engines, these are string slices:
+
+| SQLite-only | Both engines |
+| --- | --- |
+| `DATE(x)` | `SUBSTR(x, 1, 10)` |
+| `STRFTIME('%Y-%m', x)` | `SUBSTR(x, 1, 7)` |
+
+`SUBSTR` behaves identically in SQLite and Postgres, ISO-8601 strings sort
+lexicographically so `>=` and `ORDER BY` are unchanged, and no `%` remains in
+any query. This makes the two dashboard functions dialect-neutral rather than
+duplicated, and is why the shim needs only placeholder translation and not a
+SQL rewriter.
+
+**10. `flaskapp/__init__.py` builds an app at import time.** Line 32 is
+`app = create_app()`, and `create_app` calls `init_app`, which calls
+`initialize()`. Today that quietly creates a SQLite file. Once `DATABASE_URL`
+exists in `.env.secrets`, *importing the package at all* — which every one of
+the 308 tests does — would connect to Supabase and run schema DDL against the
+production database. The test suite would go from offline to hitting the
+network, and `initialize()` would run against live data on every test session.
+
+Nothing depends on that export: no module imports `from flaskapp import app`,
+its only mention is its own explanatory comment, and `render.yaml` starts
+gunicorn with `flaskapp:create_app()`. It is deleted, which must happen
+*before* `DATABASE_URL` is honoured.
 
 Also noted: `save_plan` inserts into `a2a_messages` positionally —
 `INSERT OR IGNORE INTO a2a_messages VALUES (?, ...)` with 11 unnamed values.
