@@ -1,6 +1,16 @@
+import tempfile
+from pathlib import Path
+
 from flaskapp import create_app
 from flaskapp.config import Config
 from flaskapp.database import connect, get_admin_activity, get_platform_dashboard
+
+# A dedicated SQLite file outside any developer's instance/ directory. Config.DATABASE
+# now honours DATABASE_URL when it is set in the environment (e.g. from a real
+# .env.secrets on a developer machine); without this override, TestConfig would
+# inherit that DSN and every test using it would write schema DDL and a demo-user
+# seed to the live Supabase database instead of a throwaway SQLite file.
+_TEST_DATABASE = Path(tempfile.mkdtemp(prefix="travel_planner_test_api_")) / "test.sqlite3"
 
 
 class TestConfig(Config):
@@ -14,6 +24,7 @@ class TestConfig(Config):
 
     TESTING = True
     WTF_CSRF_ENABLED = False
+    DATABASE = _TEST_DATABASE
     LOGIN_EMAIL = "demo@example.com"
     LOGIN_PASSWORD_HASH = (
         "scrypt:32768:8:1$99T3BfVwYO8CnqNC$"
