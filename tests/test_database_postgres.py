@@ -11,7 +11,8 @@ import uuid
 import pytest
 
 from flaskapp.database import (
-    connect, create_user, get_platform_dashboard, initialize, save_plan,
+    connect, create_planning_job, create_user, get_platform_dashboard,
+    initialize, save_plan_feedback, update_planning_job,
 )
 
 DSN = os.getenv("TEST_DATABASE_URL", "")
@@ -88,17 +89,48 @@ def test_default_timestamp_matches_the_sqlite_format(database):
 def test_dashboard_queries_run(database):
     """Proves the SUBSTR rewrite is valid Postgres, not just valid SQLite.
 
-    Asserted against the shape the admin page consumes, so a query that parses
-    but returns the wrong thing still fails here.
+    With no completed jobs, average_feedback and needs_improvement_rate are
+    legitimately None by design (see get_platform_dashboard's
+    `... if completed else None`). So this seeds one full request lifecycle —
+    a user, a completed planning job, and a piece of feedback on it, via the
+    real helper functions rather than hand-written INSERTs — and asserts on
+    the values that data implies. That proves the dashboard aggregates real
+    rows correctly on Postgres, not just that the queries parse.
     """
+    with connect(database) as db:
+        user_id = db.insert_returning_id(
+            "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+            ("Feedback Giver", f"{uuid.uuid4()}@example.com", "hash"),
+        )
+    request_id = str(uuid.uuid4())
+    create_planning_job(database, request_id, user_id, {"origin": "Singapore"})
+    update_planning_job(database, request_id, "completed")
+    feedback = save_plan_feedback(database, request_id, user_id, "up", "great trip")
+    assert feedback is not None, "seeding failed: feedback was not recorded"
+
     dashboard = get_platform_dashboard(database)
     assert isinstance(dashboard, dict)
     assert dashboard, "the dashboard returned nothing at all"
+
+    assert dashboard["registered_users"] == 1
+    assert dashboard["active_users"] == 1
+    assert dashboard["total_requests"] == 1
+    assert dashboard["completed_requests"] == 1
+    assert dashboard["failed_requests"] == 0
+    assert dashboard["completion_rate"] == 100.0
+    assert dashboard["adoption_rate"] == 100.0
+    assert dashboard["engagement_score"] == 20.0
+    assert dashboard["feedback_count"] == 1
+    assert dashboard["average_feedback"] == 100.0, "1 of 1 completed job got positive feedback"
+    assert dashboard["needs_improvement_rate"] == 0.0, "no negative feedback was recorded"
+
+    # With a completed job and feedback seeded, every aggregate is defined —
+    # the None case above no longer applies to any key.
     for key, value in dashboard.items():
         assert value is not None, f"{key} came back None"
 
 
-def test_create_user_rejects_a_duplicate_email(database, monkeypatch):
+def test_create_user_rejects_a_duplicate_email(database):
     """create_user's except clause must catch psycopg's error, not sqlite3's."""
     from flaskapp import create_app
     from flaskapp.config import Config
