@@ -1,0 +1,55 @@
+services:
+  - type: web
+    name: agentic-travel-planner
+    runtime: python
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    # ONE worker, deliberately. flaskapp/travel_ai/jobs.py keeps planning jobs in
+    # a module-level dict, so a second worker would answer
+    # GET /api/v1/travel-plans/<id>/status for a job it never ran and return 404
+    # while the plan is actually running in its sibling. Threads give the
+    # concurrency instead; the planning work itself is already on a
+    # ThreadPoolExecutor. Do not raise --workers without moving job state into
+    # the planning_jobs table first.
+    startCommand: >-
+      gunicorn "flaskapp:create_app()"
+      --workers 1 --threads 8 --timeout 120 --bind 0.0.0.0:$PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Rotated per deploy by Render. Sessions do not survive a restart, which
+      # is correct here — nothing depends on a stable key across deploys.
+      - key: SECRET_KEY
+        generateValue: true
+      - key: FLASK_DEBUG
+        value: "false"
+      # Render terminates TLS, so the session cookie can and must be HTTPS-only.
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: LLM_PROVIDER
+        value: openai
+      - key: LLM_MODEL
+        value: gpt-5
+      # sync: false = set by hand in the dashboard, never stored in this file.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      # Default is instance/travel_planner.sqlite3 on the instance's ephemeral
+      # disk: every deploy and every free-tier spin-down wipes users, plans and
+      # traces. To keep data, move to a paid instance and uncomment the disk
+      # block below along with this path.
+      # - key: DATABASE
+      #   value: /var/data/travel_planner.sqlite3
+      # - key: TRACE_DIR
+      #   value: /var/data/traces
+
+    # Persistent storage. Requires a paid instance type; free instances cannot
+    # mount a disk. A disk also pins the service to one instance, which this app
+    # already requires for the reason given above.
+    # disk:
+    #   name: travel-planner-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
