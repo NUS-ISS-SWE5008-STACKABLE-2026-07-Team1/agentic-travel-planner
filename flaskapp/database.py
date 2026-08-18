@@ -559,26 +559,26 @@ def get_admin_token_summary(path: Path | str) -> dict[str, Any]:
         ).fetchall()
         start = (date.today() - timedelta(days=30)).isoformat()
         agent_trend = [dict(row) for row in db.execute(
-            """SELECT DATE(j.submitted_at) AS date, r.agent,
+            """SELECT SUBSTR(j.submitted_at, 1, 10) AS date, r.agent,
                       SUM(r.input_tokens) AS input_tokens,
                       SUM(r.output_tokens) AS output_tokens,
                       SUM(r.total_tokens) AS total_tokens
                FROM agent_runs r JOIN planning_jobs j ON j.request_id = r.request_id
-               WHERE DATE(j.submitted_at) >= ?
-               GROUP BY DATE(j.submitted_at), r.agent ORDER BY date, r.agent""",
+               WHERE SUBSTR(j.submitted_at, 1, 10) >= ?
+               GROUP BY SUBSTR(j.submitted_at, 1, 10), r.agent ORDER BY date, r.agent""",
             (start,),
         ).fetchall()]
         month_start = date.today().replace(day=1)
         for _ in range(11):
             month_start = (month_start - timedelta(days=1)).replace(day=1)
         agent_trend_monthly = [dict(row) for row in db.execute(
-            """SELECT STRFTIME('%Y-%m', j.submitted_at) AS date, r.agent,
+            """SELECT SUBSTR(j.submitted_at, 1, 7) AS date, r.agent,
                       SUM(r.input_tokens) AS input_tokens,
                       SUM(r.output_tokens) AS output_tokens,
                       SUM(r.total_tokens) AS total_tokens
                FROM agent_runs r JOIN planning_jobs j ON j.request_id = r.request_id
-               WHERE DATE(j.submitted_at) >= ?
-               GROUP BY STRFTIME('%Y-%m', j.submitted_at), r.agent ORDER BY date, r.agent""",
+               WHERE SUBSTR(j.submitted_at, 1, 10) >= ?
+               GROUP BY SUBSTR(j.submitted_at, 1, 7), r.agent ORDER BY date, r.agent""",
             (month_start.isoformat(),),
         ).fetchall()]
         agent_performance = [dict(row) for row in db.execute(
@@ -626,33 +626,33 @@ def get_platform_dashboard(path: Path | str) -> dict[str, Any]:
         start = date.today() - timedelta(days=30)
         daily_jobs = {
             row["day"]: dict(row) for row in db.execute(
-                """SELECT DATE(submitted_at) AS day, COUNT(*) AS requests,
+                """SELECT SUBSTR(submitted_at, 1, 10) AS day, COUNT(*) AS requests,
                           COUNT(DISTINCT user_id) AS active_users,
                           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed
-                   FROM planning_jobs WHERE DATE(submitted_at) >= ? GROUP BY DATE(submitted_at)""",
+                   FROM planning_jobs WHERE SUBSTR(submitted_at, 1, 10) >= ? GROUP BY SUBSTR(submitted_at, 1, 10)""",
                 (start.isoformat(),),
             ).fetchall()
         }
         registrations = {
             row["day"]: row["count"] for row in db.execute(
-                """SELECT DATE(created_at) AS day, COUNT(*) AS count FROM users
-                   WHERE DATE(created_at) >= ? GROUP BY DATE(created_at)""",
+                """SELECT SUBSTR(created_at, 1, 10) AS day, COUNT(*) AS count FROM users
+                   WHERE SUBSTR(created_at, 1, 10) >= ? GROUP BY SUBSTR(created_at, 1, 10)""",
                 (start.isoformat(),),
             ).fetchall()
         }
         daily_feedback = {
             row["day"]: dict(row) for row in db.execute(
-                """SELECT DATE(j.submitted_at) AS day,
+                """SELECT SUBSTR(j.submitted_at, 1, 10) AS day,
                           SUM(CASE WHEN f.rating = 'up' THEN 1 ELSE 0 END) AS positive,
                           SUM(CASE WHEN f.rating = 'down' THEN 1 ELSE 0 END) AS negative
                    FROM planning_jobs j LEFT JOIN plan_feedback f ON f.request_id = j.request_id
-                   WHERE j.status = 'completed' AND DATE(j.submitted_at) >= ?
-                   GROUP BY DATE(j.submitted_at)""",
+                   WHERE j.status = 'completed' AND SUBSTR(j.submitted_at, 1, 10) >= ?
+                   GROUP BY SUBSTR(j.submitted_at, 1, 10)""",
                 (start.isoformat(),),
             ).fetchall()
         }
         registered_before = db.execute(
-            "SELECT COUNT(*) FROM users WHERE DATE(created_at) < ?", (start.isoformat(),)
+            "SELECT COUNT(*) FROM users WHERE SUBSTR(created_at, 1, 10) < ?", (start.isoformat(),)
         ).fetchone()[0]
         trend = []
         running_registered = registered_before
@@ -679,30 +679,30 @@ def get_platform_dashboard(path: Path | str) -> dict[str, Any]:
             month_start = (month_start - timedelta(days=1)).replace(day=1)
         monthly_rows = {
             row["month"]: dict(row) for row in db.execute(
-                """SELECT STRFTIME('%Y-%m', j.submitted_at) AS month,
+                """SELECT SUBSTR(j.submitted_at, 1, 7) AS month,
                           COUNT(*) AS requests, COUNT(DISTINCT j.user_id) AS active_users,
                           SUM(CASE WHEN j.status = 'completed' THEN 1 ELSE 0 END) AS completed,
                           SUM(CASE WHEN f.rating = 'up' THEN 1 ELSE 0 END) AS positive,
                           SUM(CASE WHEN f.rating = 'down' THEN 1 ELSE 0 END) AS negative
                    FROM planning_jobs j LEFT JOIN plan_feedback f ON f.request_id = j.request_id
-                   WHERE DATE(j.submitted_at) >= ? GROUP BY STRFTIME('%Y-%m', j.submitted_at)""",
+                   WHERE SUBSTR(j.submitted_at, 1, 10) >= ? GROUP BY SUBSTR(j.submitted_at, 1, 7)""",
                 (month_start.isoformat(),),
             ).fetchall()
         }
         monthly_registrations = {
             row["month"]: row["count"] for row in db.execute(
-                """SELECT STRFTIME('%Y-%m', created_at) AS month, COUNT(*) AS count FROM users
-                   WHERE DATE(created_at) >= ? GROUP BY STRFTIME('%Y-%m', created_at)""",
+                """SELECT SUBSTR(created_at, 1, 7) AS month, COUNT(*) AS count FROM users
+                   WHERE SUBSTR(created_at, 1, 10) >= ? GROUP BY SUBSTR(created_at, 1, 7)""",
                 (month_start.isoformat(),),
             ).fetchall()
         }
         monthly_registered = db.execute(
-            "SELECT COUNT(*) FROM users WHERE DATE(created_at) < ?", (month_start.isoformat(),)
+            "SELECT COUNT(*) FROM users WHERE SUBSTR(created_at, 1, 10) < ?", (month_start.isoformat(),)
         ).fetchone()[0]
         monthly_trend = []
         cursor = month_start
         for _ in range(12):
-            month = cursor.strftime("%Y-%m")
+            month = cursor.isoformat()[:7]
             monthly_registered += monthly_registrations.get(month, 0)
             item = monthly_rows.get(month, {})
             month_active = item.get("active_users", 0) or 0
