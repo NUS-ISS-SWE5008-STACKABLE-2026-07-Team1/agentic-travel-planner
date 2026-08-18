@@ -3,7 +3,9 @@ services:
     name: agentic-travel-planner
     runtime: python
     plan: free
-    branch: main
+    # The branch Render auto-deploys on every push. Nothing requires this to be
+    # main — point it at whichever branch is meant to be live.
+    branch: subbu-18Aug
     buildCommand: pip install -r requirements.txt
     # ONE worker, deliberately. flaskapp/travel_ai/jobs.py keeps planning jobs in
     # a module-level dict, so a second worker would answer
