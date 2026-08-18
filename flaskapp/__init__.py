@@ -26,7 +26,3 @@ def create_app(config_object: type[Config] = Config) -> Flask:
     app.register_blueprint(pages_bp)
     app.register_blueprint(travel_api_bp, url_prefix="/api/v1")
     return app
-
-
-# Backwards-compatible export for code importing ``from flaskapp import app``.
-app = create_app()
