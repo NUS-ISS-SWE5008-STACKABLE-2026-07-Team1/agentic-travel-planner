@@ -4,7 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from flaskapp.travel_ai.agents.orchestrator_agent.intake import (
-    compute_gaps, merge_answers, to_request_payload,
+    clarification_question, compute_gaps, merge_answers, merge_intents,
+    to_request_payload,
 )
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import ExtractedIntent
 from flaskapp.travel_ai.schemas import TravelRequest
@@ -62,6 +63,17 @@ def test_blank_accessibility_answer_means_none_and_closes_the_gap():
     merged = merge_answers(extracted, {"traveller_accessibility_needs.0": ""})
     assert merged.traveller_accessibility_needs == [[]]
     assert "traveller_accessibility_needs.0" not in keys(compute_gaps(merged))
+
+
+def test_unmentioned_accessibility_is_not_a_gap_and_defaults_to_none():
+    without_accessibility = ExtractedIntent.model_validate({
+        key: value for key, value in COMPLETE.items()
+        if key != "traveller_accessibility_needs"
+    })
+    assert compute_gaps(without_accessibility) == []
+    payload = to_request_payload(without_accessibility)
+    assert payload["traveller_accessibility_needs"] == [[], []]
+    assert TravelRequest.model_validate(payload).travellers == 2
 
 
 def test_accessibility_answer_splits_on_commas():
@@ -137,3 +149,19 @@ def test_same_day_return_is_accepted():
         **COMPLETE, "departure_date": "2026-10-10", "return_date": "2026-10-10",
     })
     assert compute_gaps(extracted) == []
+
+
+def test_chat_turns_merge_and_latest_explicit_fact_can_correct_an_answer():
+    current = ExtractedIntent(origin="Singapore", destination="Tokyo", travellers=2)
+    update = ExtractedIntent(destination="Osaka", budget=5000)
+    merged = merge_intents(current, update)
+    assert merged.origin == "Singapore"
+    assert merged.destination == "Osaka"
+    assert merged.budget == 5000
+    assert len(merged.traveller_ages) == 2
+
+
+def test_clarification_question_names_the_deterministic_gaps():
+    question = clarification_question(compute_gaps(ExtractedIntent(destination="Tokyo")))
+    assert "flying from" in question.lower()
+    assert "departure date" in question.lower()

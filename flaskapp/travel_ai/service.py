@@ -18,7 +18,7 @@ class TravelPlanningService:
                  temperature: float | None, timeout: float, trace_dir: Path,
                  endpoint: str | None = None, api_version: str | None = None,
                  base_url: str | None = None,
-                 database_path: Path | None = None, user_id: int | None = None,
+                 database_path: Path | str | None = None, user_id: int | None = None,
                  cancel_event=None):
         self.api_key = api_key
         self.provider = provider
