@@ -34,3 +34,11 @@ def test_verify_hash_chain_false_when_reordered(tmp_path):
     tracer.path.write_text(reordered, encoding="utf-8")
 
     assert verify_hash_chain(tracer.path) is False
+
+
+def test_a_new_tracer_continues_an_existing_request_hash_chain(tmp_path):
+    AuditTracer(tmp_path, "req-multi-turn").record("user_request_submitted", "system")
+    AuditTracer(tmp_path, "req-multi-turn").record(
+        "orchestrator_validation_completed", "orchestrator_agent"
+    )
+    assert verify_hash_chain(tmp_path / "req-multi-turn.jsonl") is True

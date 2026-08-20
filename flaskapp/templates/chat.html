@@ -13,22 +13,69 @@
     <div class="container py-2">
       <span class="navbar-brand brand"><span class="brand-mark">✦</span><span>Atlas AI Travel</span></span>
       <div class="d-flex align-items-center gap-3">
+        {% if is_admin %}<a class="btn btn-outline-primary btn-sm" href="{{ url_for('pages.admin') }}" target="_blank" rel="noopener noreferrer">Admin</a>{% endif %}
         <span class="small text-body-secondary d-none d-sm-inline">{{ user_name }}</span>
+        {% if intake_mode %}
+        <a id="intake-home" class="btn btn-outline-primary btn-sm" href="{{ url_for('pages.main') }}">Home</a>
+        {% else %}
         <button id="cancel-and-home" class="btn btn-outline-primary btn-sm" type="button"
                 data-cancel-url="{{ url_for('travel_api.cancel_travel_plan', request_id=request_id) }}"
                 data-home-url="{{ url_for('pages.main') }}">Home</button>
+        {% endif %}
       </div>
     </div>
   </nav>
   <main class="container py-5">
+    {% if intake_mode %}
+    <div id="chat-intake">
+      <div class="row g-4">
+        <section class="d-none" aria-labelledby="activity-heading">
+          <div class="card border-0 shadow-sm sticky-lg-top agent-activity-card">
+            <div class="card-body p-4">
+              <div class="d-flex align-items-start gap-3 mb-3">
+                <div class="agent-thinking" aria-hidden="true">✦</div>
+                <div><h1 id="activity-heading" class="h5 mb-1">Preparing your request</h1><p class="small text-body-secondary mb-0">The orchestrator is checking that the specialist agents have everything they need.</p></div>
+              </div>
+              <ol class="agent-activity mb-0">
+                <li class="mb-3"><strong>Understand your trip</strong><div class="small text-body-secondary">Read the details you provided.</div></li>
+                <li class="mb-3"><strong>Complete required information</strong><div class="small text-body-secondary">Ask only for details that are still missing.</div></li>
+                <li><strong>Brief the specialist agents</strong><div class="small text-body-secondary">Start planning once your request is complete.</div></li>
+              </ol>
+            </div>
+          </div>
+        </section>
+        <section class="col-12 col-xl-9 mx-auto" aria-labelledby="result-heading">
+          <div class="card border-0 shadow-sm travel-assistant-card">
+            <div class="card-body p-4 travel-assistant-body">
+              <h2 id="result-heading" class="h5 mb-1">Travel assistant</h2>
+              <div id="intent-conversation" class="intent-conversation mt-3" aria-live="polite"></div>
+              <form id="intent-form" class="chat-composer mt-3 pt-3 border-top"
+                    data-auto-start="true"
+                    data-intent-endpoint="{{ url_for('travel_api.create_travel_intent') }}"
+                    data-resolve-endpoint="{{ url_for('travel_api.resolve_travel_intent') }}"
+                    data-plan-endpoint="{{ url_for('travel_api.create_travel_plan') }}"
+                    data-session-end-base="/api/v1/user-requests">
+                <label class="form-label" for="intent-prompt">Your reply</label>
+                <div class="d-flex gap-2">
+                  <textarea class="form-control" id="intent-prompt" name="prompt" rows="2" maxlength="2000" required placeholder="Add trip details or correct an earlier answer"></textarea>
+                  <button class="btn btn-primary align-self-end" type="submit"><span class="button-label">Send</span><span class="spinner-border spinner-border-sm ms-2 d-none" aria-hidden="true"></span></button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+    {% else %}
     <div id="agent-chat"
          data-status-url="{{ url_for('travel_api.get_travel_plan_status', request_id=request_id) }}"
          data-trace-url="{{ url_for('travel_api.get_trace', request_id=request_id) }}"
          data-feedback-url="{{ url_for('travel_api.submit_plan_feedback', request_id=request_id) }}"
-         data-submit-url="{{ url_for('travel_api.create_travel_plan') }}">
+         data-submit-url="{{ url_for('travel_api.create_travel_plan') }}"
+         data-session-end-url="{{ url_for('travel_api.end_user_request', request_id=request_id) }}">
       <div class="row g-4">
-        <section class="col-lg-5" aria-labelledby="activity-heading">
-          <div class="card border-0 shadow-sm sticky-lg-top agent-activity-card">
+        <section class="col-12" aria-labelledby="activity-heading">
+          <div class="card border-0 shadow-sm planning-status-card">
             <div class="card-body p-4">
               <div class="d-flex align-items-start gap-3 mb-3">
                 <div class="agent-thinking" aria-hidden="true">✦</div>
@@ -43,16 +90,22 @@
                 </div>
                 <div class="d-flex justify-content-between mt-2 small text-body-secondary"><span id="planning-progress-percent">5% complete</span><span id="planning-time-estimate">Estimating wait time…</span></div>
               </div>
-              <ol id="agent-activity" class="agent-activity mb-0" aria-live="polite"></ol>
             </div>
           </div>
         </section>
-        <section class="col-lg-7" aria-labelledby="result-heading">
+        <section class="col-12" aria-labelledby="result-heading">
           <div class="card border-0 shadow-sm travel-assistant-card">
             <div class="card-body p-4 travel-assistant-body">
               <h2 id="result-heading" class="h5 mb-1">Travel assistant</h2>
               <div id="chat-result" class="mt-3" aria-live="polite" tabindex="0" aria-label="Travel recommendation">
-                <p class="text-body-secondary">I’ll share your plan after every agent has completed its review.</p>
+                <div id="intake-conversation-history">
+                  {% for message in conversation %}
+                  <div class="intake-bubble {{ 'intake-bubble-user' if message.role == 'user' else 'intake-bubble-assistant' }}">{{ message.content }}</div>
+                  {% endfor %}
+                </div>
+                <div id="plan-content">
+                  <div class="intake-bubble intake-bubble-assistant">I have your complete trip brief. I’ll share the plan after every specialist has completed its review.</div>
+                </div>
               </div>
               <form id="chat-refinement-form" class="chat-composer mt-3 pt-3 border-top d-none">
                 <label class="form-label" for="chat-message">Refine this plan</label>
@@ -81,7 +134,9 @@
         </section>
       </div>
     </div>
+    {% endif %}
   </main>
+  {% if not intake_mode %}
   <dialog id="cancel-warning" class="cancel-warning-dialog" aria-labelledby="cancel-warning-title">
     <div class="p-4">
       <div class="warning-icon mb-3" aria-hidden="true">!</div>
@@ -93,6 +148,9 @@
       </div>
     </div>
   </dialog>
+  {% endif %}
+  {% if intake_mode %}<script type="application/json" id="country-options">{{ countries|tojson }}</script>{% endif %}
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  {% if intake_mode %}<script src="{{ url_for('static', filename='js/intake.js') }}"></script>{% endif %}
 </body>
 </html>

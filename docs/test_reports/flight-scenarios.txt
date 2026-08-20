@@ -180,6 +180,8 @@ ADAPTED TO FLIGHT CONTRACT:
   prefer_direct=False  avoid_red_eye=False
   needs cleaned  []
   routable=True  has_inventory=True
+  UNRESOLVED: No departure city was given for Singapore; assumed Singapore (SIN).
+  UNRESOLVED: No destination city was given for Japan; assumed Tokyo (NRT/HND).
 
 RESULT:
   OUTBOUND:
@@ -204,6 +206,8 @@ ADAPTED TO FLIGHT CONTRACT:
   prefer_direct=False  avoid_red_eye=False
   needs cleaned  ['wheelchair assistance']
   routable=True  has_inventory=True
+  UNRESOLVED: No departure city was given for Singapore; assumed Singapore (SIN).
+  UNRESOLVED: No destination city was given for Japan; assumed Tokyo (NRT/HND).
 
 RESULT:
   OUTBOUND:
@@ -228,6 +232,8 @@ ADAPTED TO FLIGHT CONTRACT:
   prefer_direct=False  avoid_red_eye=False
   needs cleaned  []
   routable=True  has_inventory=True
+  UNRESOLVED: No departure city was given for Singapore; assumed Singapore (SIN).
+  UNRESOLVED: No destination city was given for Japan; assumed Tokyo (NRT/HND).
 
 RESULT:
   OUTBOUND:
@@ -252,6 +258,8 @@ ADAPTED TO FLIGHT CONTRACT:
   prefer_direct=True  avoid_red_eye=False
   needs cleaned  []
   routable=True  has_inventory=True
+  UNRESOLVED: No departure city was given for Singapore; assumed Singapore (SIN).
+  UNRESOLVED: No destination city was given for Japan; assumed Tokyo (NRT/HND).
 
 RESULT:
   OUTBOUND:
@@ -271,12 +279,14 @@ INPUT (as posted by the form):
   accessibility_needs []
 
 ADAPTED TO FLIGHT CONTRACT:
-  airports       SIN -> None
+  airports       SIN -> GRU
   party derived  {'adults': 1, 'children': 0}
   prefer_direct=False  avoid_red_eye=False
   needs cleaned  []
-  routable=False  has_inventory=False
-  UNRESOLVED: No airport mapping for destination country 'Brazil'
+  routable=True  has_inventory=False
+  UNRESOLVED: No departure city was given for Singapore; assumed Singapore (SIN).
+  UNRESOLVED: No destination city was given for Brazil; assumed São Paulo (GRU/CGH).
+  UNRESOLVED: No flight inventory loaded for Singapore (SIN) to São Paulo (GRU/CGH)
 
 RESULT:
   RESULT: no candidates (no feasible option)
@@ -298,7 +308,8 @@ ADAPTED TO FLIGHT CONTRACT:
   prefer_direct=False  avoid_red_eye=False
   needs cleaned  []
   routable=False  has_inventory=False
-  UNRESOLVED: No airport mapping for destination country 'Chad'
+  UNRESOLVED: No departure city was given for Singapore; assumed Singapore (SIN).
+  UNRESOLVED: No airport mapping for destination 'Chad'.
 
 RESULT:
   RESULT: no candidates (no feasible option)
@@ -320,6 +331,8 @@ ADAPTED TO FLIGHT CONTRACT:
   prefer_direct=False  avoid_red_eye=False
   needs cleaned  []
   routable=True  has_inventory=True
+  UNRESOLVED: No departure city was given for Singapore; assumed Singapore (SIN).
+  UNRESOLVED: No destination city was given for Japan; assumed Tokyo (NRT/HND).
 
 RESULT:
   RESULT: no candidates (no feasible option)
