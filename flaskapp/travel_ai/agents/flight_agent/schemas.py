@@ -48,6 +48,18 @@ class FlightInventoryItem(BaseModel):
     `dep_ts` is origin-local ISO 8601 with UTC offset; `arr_ts` is
     destination-local ISO 8601 with UTC offset (check-in feasibility math
     depends on this distinction — db_schema.md rule 4).
+
+    On the two accessibility booleans being nullable: `None` means "this
+    supplier does not publish it", NOT "not available". The distinction is
+    load-bearing. Seed rows always state a real True/False because the dataset
+    was written to. A live GDS feed (Duffel, in `providers/duffel.py`) has no
+    such field at all, and defaulting an absent field to True would invent an
+    accessibility guarantee for the traveller least able to absorb the cost of
+    it being wrong, while defaulting to False would hide every live flight from
+    the same traveller. `domain.py` therefore treats `None` as a third case:
+    not excluded on the implicit filter, excluded under an explicit
+    `require_wheelchair_assist` constraint, and always surfaced to the
+    traveller as unverified rather than silently passed off as checked.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -64,8 +76,12 @@ class FlightInventoryItem(BaseModel):
     cabin_class: str
     seats_available: int = Field(ge=0)
     stops: int = Field(ge=0)
-    wheelchair_assist_available: bool
-    step_free_boarding: bool
+    # None = the source does not publish this. See the class docstring.
+    wheelchair_assist_available: bool | None
+    step_free_boarding: bool | None
+    # Which provider produced this row. Drives the traveller-facing assumption
+    # text (illustrative dataset vs. live, expiring fare) — see agent.py.
+    source: Literal["seed", "duffel"] = "seed"
     # None = seat selection not modelled for this flight (older rows / ad-hoc
     # test flights). All seat filters and fees are skipped when this is None,
     # which is what keeps the whole seat feature backward-compatible.
@@ -174,18 +190,29 @@ class TripContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # --- Route ---------------------------------------------------------------
-    # The form collects COUNTRIES (a <select> over countries.py), not cities or
-    # airport codes. `airports.py` resolves a country to its primary
-    # international airport; the country fields are retained alongside because
-    # the resolution is lossy (one airport per country) and Risk & Advisory
-    # reasons at country granularity. Airports are optional so a request for a
-    # country with no mapping still validates — domain.py simply finds no
-    # candidates for it, which is the honest result, not a crash.
+    # The form collects a COUNTRY and a CITY (a dependent <select> pair over
+    # countries.py and places.py). `airports.py` resolves that pair to every
+    # airport serving the city — a list, not a scalar, because a traveller who
+    # picks Tokyo means the city and should see Haneda fares alongside Narita.
+    #
+    # Country fields are retained alongside the city because Risk & Advisory
+    # reasons at country granularity (visas, advisories) and the stored request
+    # is keyed on them. Airports are optional so a request naming a city with
+    # no mapping still validates — domain.py simply finds no candidates, which
+    # is the honest result, not a crash.
+    #
+    # `origin_airport`/`dest_airport` are the PRIMARY gateway, kept as scalars
+    # for display and for callers that can only use one code. Route matching
+    # must use the `_airports` lists instead; using the scalar there would
+    # silently reintroduce the single-gateway limitation cities exist to fix.
     origin_country: str | None = None
     dest_country: str
+    origin_city: str | None = None
+    dest_city: str | None = None
     origin_airport: str | None = None
     dest_airport: str | None = None
-    dest_city: str | None = None
+    origin_airports: list[str] = Field(default_factory=list)
+    dest_airports: list[str] = Field(default_factory=list)
 
     depart_date: str
     return_date: str
@@ -221,6 +248,29 @@ class TripContext(BaseModel):
     refinement_notes: list[str] = Field(default_factory=list)
 
     flight_preferences: FlightPreferences = Field(default_factory=FlightPreferences)
+
+    @model_validator(mode="after")
+    def reconcile_airport_scalars_and_lists(self) -> "TripContext":
+        """Keep the scalar gateway and the airport list in agreement.
+
+        Callers supply one or the other. `adapter.py` sets the lists from a
+        resolved city; tests, golden scenarios and any pre-city caller set only
+        the scalar. Filling each from the other means neither kind of caller
+        has to know the other exists, which is what lets city support land
+        without touching a single golden-scenario fixture.
+
+        The scalar is always the FIRST list entry, never a separate choice, so
+        "primary gateway" means the same thing to both.
+        """
+        if not self.origin_airports and self.origin_airport:
+            self.origin_airports = [self.origin_airport]
+        if not self.dest_airports and self.dest_airport:
+            self.dest_airports = [self.dest_airport]
+        if self.origin_airports and not self.origin_airport:
+            self.origin_airport = self.origin_airports[0]
+        if self.dest_airports and not self.dest_airport:
+            self.dest_airport = self.dest_airports[0]
+        return self
 
     @model_validator(mode="after")
     def derive_party_from_ages(self) -> "TripContext":
@@ -295,8 +345,11 @@ class FlightCandidate(BaseModel):
     stops: int
     price: float
     seats: int
-    wheelchair_assist_available: bool
-    step_free_boarding: bool
+    # None = unverified, not unavailable — carried through from
+    # FlightInventoryItem so the traveller-facing Option can say which it is.
+    wheelchair_assist_available: bool | None
+    step_free_boarding: bool | None
+    source: Literal["seed", "duffel"] = "seed"
     # Estimated total seat-selection fee for the whole party given their seat
     # preferences (0 if they're not selecting seats). Exposed so the Budget
     # Validator sees the TRUE trip cost — this is what lets seat preferences
