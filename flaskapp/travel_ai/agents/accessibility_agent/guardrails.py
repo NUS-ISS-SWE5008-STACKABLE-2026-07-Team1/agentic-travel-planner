@@ -17,31 +17,24 @@ from flaskapp.travel_ai.agents.flight_agent.guardrails import (
     screen_output_text,
     screen_preferences,
 )
+from flaskapp.travel_ai.guardrails.fields import collect_free_text
 from flaskapp.travel_ai.schemas import AgentFinding, TravelGraphState
 
 RATING_PATTERN = re.compile(r"(?i)(accessibility rating:\s*)([1-5](?:\.\d+)?)(/5)")
 
 
 def screen_accessibility_input(state: TravelGraphState) -> dict[str, Any]:
-    """Screen every user-controlled string that can reach this specialist."""
-    request = state.get("request", {})
-    per_traveller = [
-        need
-        for needs in request.get("traveller_accessibility_needs", [])
-        for need in (needs or [])
-        if isinstance(need, str)
-    ]
-    places = [
-        value for value in (request.get("origin_place"), request.get("destination_place"))
-        if isinstance(value, str)
-    ]
-    return screen_free_text(
-        request.get("preferences"),
-        request.get("accessibility_needs", []),
-        request.get("refinement_notes", []),
-        per_traveller,
-        places,
-    )
+    """Screen every user-controlled string that can reach this specialist.
+
+    Field selection is delegated to `guardrails.fields.collect_free_text` rather
+    than repeated here. The hand-rolled version this replaces read
+    `origin_place`/`destination_place`, which are not fields on `TravelRequest`
+    — the request carries `origin_city`/`destination_city` (`schemas.py:30-31`).
+    Those two `.get()` calls therefore returned None on every real request and
+    the city names went unscreened, while the test covering them used the same
+    wrong keys and passed. One collector, one place to get it wrong.
+    """
+    return screen_free_text(collect_free_text(state.get("request", {})))
 
 
 def blocked_input_finding(state: TravelGraphState) -> AgentFinding | None:

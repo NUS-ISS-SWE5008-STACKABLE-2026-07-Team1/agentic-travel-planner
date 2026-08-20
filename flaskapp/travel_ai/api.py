@@ -11,7 +11,11 @@ from pydantic import ValidationError
 from werkzeug.security import generate_password_hash
 
 from flaskapp.travel_ai.safeguards import (
-    SafetyError, screen_answers, screen_prompt, validate_request,
+    GuardrailBlocked, SafetyError, screen_answers, screen_prompt, screen_request_l2,
+    validate_request,
+)
+from flaskapp.travel_ai.guardrails import (
+    GUARDRAIL_PROMPT_VERSION, Category, LlmGuardrail, build_guardrail, guardrail_settings,
 )
 from flaskapp.travel_ai.jobs import cancel_job, get_job, submit_plan
 from flaskapp.travel_ai.llm import build_llm
@@ -69,10 +73,22 @@ def create_travel_plan():
         ):
             return jsonify(error="Intake request not found"), 404
         travel_request = validate_request(payload, current_app.config["MAX_INPUT_CHARS"])
+        # L2 runs here rather than inside the background job so a rejected
+        # traveller gets an immediate 422 instead of a job that fails ~75s
+        # later. It costs the POST one small-model round trip; the plan it
+        # guards costs five large ones.
+        guard_settings = guardrail_settings(current_app.config)
+        input_verdict = screen_request_l2(
+            travel_request, LlmGuardrail.from_settings(guard_settings)
+        )
         settings = {
             **llm_settings,
             "trace_dir": str(current_app.config["TRACE_DIR"]),
             "database_path": str(current_app.config["DATABASE"]),
+            # Carried into the background thread so the orchestrator's output
+            # gate uses the same configuration the input gate just used.
+            "guardrail": guard_settings,
+            "input_guardrail": input_verdict.as_audit_details() if input_verdict else None,
         }
         job = (
             submit_plan(travel_request, settings, session.get("user_id"), intake_request_id)
@@ -84,6 +100,12 @@ def create_travel_plan():
             status=job.status,
             chat_url=f"/chat/{job.request_id}",
         ), 202
+    except GuardrailBlocked as exc:
+        # No AuditTracer exists yet — the request has no id and no job — so the
+        # application log is the only place this decision can be recorded.
+        # Enums and numbers only, never the traveller's text.
+        current_app.logger.warning("L2 input guardrail blocked: %s", exc.verdict.as_audit_details())
+        return jsonify(error="Invalid travel request", details=[{"msg": str(exc)}]), 422
     except (ValidationError, SafetyError) as exc:
         details = validation_details(exc) if isinstance(exc, ValidationError) else [{"msg": str(exc)}]
         return jsonify(error="Invalid travel request", details=details), 422
@@ -100,7 +122,10 @@ def create_travel_intent():
         return jsonify(error=configuration_error), 503
     payload = request.get_json(silent=True) or {}
     try:
-        prompt = screen_prompt(payload.get("prompt"), current_app.config["MAX_INPUT_CHARS"])
+        prompt = screen_prompt(
+            payload.get("prompt"), current_app.config["MAX_INPUT_CHARS"],
+            build_guardrail(current_app.config),
+        )
         current = ExtractedIntent.model_validate(payload.get("extracted") or {})
         is_first_turn = not payload.get("request_id")
         intake_request_id = str(payload.get("request_id") or uuid4())
@@ -114,6 +139,9 @@ def create_travel_intent():
         )
         extraction = extract_intent(build_llm(**llm_settings), prompt)
         intent = merge_intents(current, extraction.intent)
+    except GuardrailBlocked as exc:
+        current_app.logger.warning("L2 intake guardrail blocked: %s", exc.verdict.as_audit_details())
+        return jsonify(error=str(exc)), 422
     except SafetyError as exc:
         return jsonify(error=str(exc)), 422
     except ValidationError as exc:
@@ -248,6 +276,13 @@ def _prompt_catalog():
         {"agent": "Shared deterministic guardrails", "instruction":
          f"Reject oversized input, sensitive ranking fields ({', '.join(sorted(SENSITIVE_KEYS))}), "
          f"and prompt-injection patterns matching: {PROMPT_INJECTION.pattern}"},
+        {"agent": "LLM guardrail classifier (L2)", "instruction":
+         f"Prompt version {GUARDRAIL_PROMPT_VERSION}. Runs after the deterministic gates on "
+         f"traveller free text and on the synthesized plan. Blocks at confidence >= "
+         f"{current_app.config.get('GUARDRAIL_BLOCK_THRESHOLD', 0.7)}; a lower-confidence block is "
+         f"recorded as a flag without denying the request. Fail mode: "
+         f"{current_app.config.get('GUARDRAIL_FAIL_MODE', 'closed')}. Categories: "
+         + ", ".join(item.value for item in Category if item is not Category.NONE)},
     ]
 
 

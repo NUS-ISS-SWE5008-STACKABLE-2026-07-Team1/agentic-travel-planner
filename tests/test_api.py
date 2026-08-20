@@ -41,6 +41,12 @@ class TestConfig(Config):
     XAI_API_KEY = None
     META_API_KEY = None
     LLM_API_KEY = None
+    # The L2 classifier is off for the suite at large. UR-083 requires the tests
+    # to run with no access to a live provider, and a fail-closed guardrail left
+    # on would otherwise turn every unrelated API test into a 422 the moment it
+    # could not reach a model. The classifier has its own coverage in
+    # tests/adversarial/, where the model is stubbed explicitly.
+    GUARDRAIL_LLM_ENABLED = False
 
 
 class ConfiguredConfig(TestConfig):
@@ -336,7 +342,9 @@ def test_admin_page_and_activity_require_configured_admin(tmp_path):
     }
     assert dashboard["platform"]["total_requests"] == 0
     assert dashboard["logs"] == []
-    assert len(dashboard["prompts"]) == 6
+    # Five agents, the deterministic gates, and the L2 classifier.
+    assert len(dashboard["prompts"]) == 7
+    assert "LLM guardrail classifier (L2)" in {item["agent"] for item in dashboard["prompts"]}
 
     with client.session_transaction() as session:
         session["user_email"] = "SECOND-ADMIN@example.com"

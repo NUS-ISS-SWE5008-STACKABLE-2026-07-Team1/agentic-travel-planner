@@ -42,3 +42,23 @@ services:
       # Supabase session pooler DSN. Set by hand in the dashboard; never here.
       - key: DATABASE_URL
         sync: false
+
+      # --- L2 guardrails (the LLM classifier) ---------------------------------
+      # Declared here rather than left to the code default (which is "true"),
+      # because the default is also fail-closed: a classifier that cannot reach
+      # the provider refuses the traveller rather than waving them through.
+      # Deployed OFF until the live local test has been run once with a real
+      # key. Flip to "true" here, or override it in the Render dashboard — the
+      # deterministic L0/L1 gates are unaffected either way.
+      - key: GUARDRAIL_LLM_ENABLED
+        value: "false"
+      # Blank inherits LLM_MODEL (gpt-5). Point at the small/fast tier before
+      # switching the gate on: this runs twice per plan, on the critical path.
+      - key: GUARDRAIL_LLM_MODEL
+        value: gpt-5-mini
+      - key: GUARDRAIL_LLM_TIMEOUT_SECONDS
+        value: "8"
+      - key: GUARDRAIL_BLOCK_THRESHOLD
+        value: "0.7"
+      - key: GUARDRAIL_FAIL_MODE
+        value: closed

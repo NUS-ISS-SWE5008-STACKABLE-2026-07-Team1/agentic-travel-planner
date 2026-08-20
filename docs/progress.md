@@ -22,12 +22,301 @@ never actually being committed.
 - [`docs/places_contract.md`](places_contract.md) — shared city/airport dataset API
 - [`docs/flight_agent/inventory_sources.md`](flight_agent/inventory_sources.md) — seed vs Duffel
 - [`docs/security/cicd-improvement-plan.md`](security/cicd-improvement-plan.md) — CI/CD backlog, kept separate from this log
+- [`docs/security/firstCIMergeToRelease.md`](security/firstCIMergeToRelease.md) — record of the first CI/CD landing on `release` (PR #9)
+- [`docs/security/cicd-status.html`](security/cicd-status.html) — the 18-item backlog in plain English, for the team
 - [`docs/individual_reports/flight_agent.md`](individual_reports/flight_agent.md) — earlier report draft, predates integration
 
 ---
 ---
 
 # Part A — Session log
+
+## 2026-08-20 — L2 guardrails rebased onto `release`; deployed off by default
+
+**Goal:** get the LLM guardrail layer built on 2026-08-16 onto the branch the
+team actually works from. It had been parked on a local-only backup branch
+(`backup/mark-wip-2026-08-17`, commit `b173482`) for three days while `release`
+absorbed the Supabase/Postgres migration.
+
+### What moved
+
+Cherry-picked `b173482` onto `release` as `feat/llm-guardrails-flight`. Three
+conflicts, all resolved by keeping both sides:
+
+| File | Conflict | Resolution |
+|---|---|---|
+| `travel_ai/api.py` | `release` added the intake-request persistence inside the same `try`; the guardrail branch changed the `screen_prompt` call and added an `except` | Guardrail passed to `screen_prompt`, all of `release`'s persistence kept, `except GuardrailBlocked` added **before** `except SafetyError` |
+| `travel_ai/service.py` | `release` widened `database_path` to `Path \| str \| None`; the guardrail branch added two keyword arguments | Widened type kept, both arguments added |
+| `instance/travel_planner.sqlite3` | binary | `release`'s copy kept; the snapshot's was three days stale |
+
+The block order in `api.py` matters and is not incidental: `screen_prompt` runs
+before any database write, so a prompt the classifier rejects is never persisted
+as an intake message.
+
+Dropped from the snapshot rather than landed: `temp_llmguard.md` (its own header
+calls it a scratch file), and the two stale copies under
+`docs/security/drafts/` — the real pipeline is `.github/workflows/`, and
+re-applying the drafts would have reinstated a branch list the team has since
+replaced. `designOfFlightAgent.md` moved from the repo root to
+`docs/flight_agent/design.md`. `docs/security/firstCIMergeToRelease.md` was
+added because `release`'s own log has been linking to it since 2026-08-15 with
+no file at the other end.
+
+### Deployed off, deliberately
+
+`Config.GUARDRAIL_LLM_ENABLED` defaults to `true` and `GUARDRAIL_FAIL_MODE` to
+`closed`. Together those mean a classifier that cannot reach the provider
+**refuses the traveller** rather than waving them through. That is the right
+default for the code and the wrong thing to discover on a live deploy, so
+`render.yaml` now declares all five guardrail variables explicitly with
+`GUARDRAIL_LLM_ENABLED=false`. It is one value to flip once the gate has been
+exercised against a real key.
+
+Two things worth noticing while that file is open: `render.yaml` still deploys
+from `branch: subbu-18Aug`, not `release`; and `GUARDRAIL_LLM_MODEL` is set to
+the small tier rather than inheriting `gpt-5`, because the classifier runs twice
+per plan on the critical path.
+
+### Test state
+
+497 passed, 8 skipped (Postgres — `TEST_DATABASE_URL` unset locally), 5
+deselected (`-m "not live"`). No failures, and none of `release`'s existing
+tests changed behaviour: the suite runs with `GUARDRAIL_LLM_ENABLED = False`,
+so the classifier is exercised only by `tests/adversarial/`, where the model is
+stubbed.
+
+`pytest.ini` landing also closes a quieter gap. Until now the `live` marker was
+unregistered, so `.github/workflows/ci-fast.yml`'s `-m "not live"` filter was
+selecting everything and working only by coincidence — an unknown marker filter
+is not an error to pytest. The live evaluation is gated twice over (the marker
+**and** `GUARDRAIL_LIVE_EVAL=1`), so no CI run has ever been able to bill a
+model call, but the filter itself was decorative until this commit.
+
+### Still open
+
+- The live run against a real key has not happened yet. Until it has, the
+  measured latency figures in the 2026-08-16 entry are from a stub.
+- Three L1 false positives the corpus measured and deliberately left unfixed:
+  a bare `"act as"` matching in `safeguards.PROMPT_INJECTION` (corpus case
+  `ben-001`), and two toxicity keywords firing on ordinary complaints
+  (`ben-012`, `ben-019`). Each is a behaviour change deserving its own commit.
+- `release`'s copy of this log is missing the 2026-08-17 / 18 entries, which are
+  still only on `mark`.
+
+## 2026-08-16 — LLM guardrail layer (L2), and the adversarial corpus (UR-075)
+
+**Goal:** be able to demonstrate *built and evaluated* LLM guardrails, not just
+deterministic ones — and close the gap this log has been carrying since
+2026-08-11 ("the input and output gates exist and are enforced, but nothing
+proves they still catch attacks after someone edits a pattern").
+
+### The design decision, and why it is not "replace the regex with a model"
+
+The classifier is **L2**: it runs after the pydantic schemas (L0) and the
+regex/keyword detectors (L1), and only on text those already cleared. L0 and L1
+keep independent authority to block. That ordering is the whole argument —
+cheap certain rejections never pay for an API call, the deterministic
+guarantees stay intact and separately defensible, and L2's false-negative rate
+is bounded below by the pattern layer rather than replacing it.
+
+Two calls per plan, not eight: one at the HTTP boundary covering all traveller
+free text at once, one on the orchestrator's synthesized plan. Against the five
+agent calls a plan already makes, and a UI calibrated to ~75 seconds
+(`static/js/app.js:349`), the measured p50 of ~0.9s each is roughly **2% added
+latency**. Worth stating explicitly given `cicd-owner-notes.md` flags the total
+absence of non-functional requirements as a visible hole for this module.
+
+### The classifier is itself an injection target
+
+It is an LLM being handed attacker-controlled text containing instructions
+aimed at it. Four structural defences, all in `flaskapp/travel_ai/guardrails/`:
+
+- untrusted text is wrapped in `<<<UNTRUSTED_{nonce}>>>` markers with a fresh
+  `secrets.token_hex(4)` per call, so a closing marker cannot be guessed and
+  written into the input;
+- it goes in a `HumanMessage`, never the system role — the Semgrep rule
+  `llm-untrusted-data-in-system-message` (ERROR, blocking) enforces this;
+- output is constrained by `with_structured_output(GuardrailVerdict,
+  method="json_schema")`; anything unparseable is a failure, not an allow;
+- the verdict is consumed as an enum, and the model's `rationale` is kept off
+  the audit trail entirely — the trace is served by `GET /api/v1/traces/<id>`
+  and rendered in the admin dashboard, so echoing model text derived from
+  attacker input into it would reintroduce the very thing being stopped.
+
+Fail-closed on any error or timeout. `GUARDRAIL_FAIL_MODE=open` exists and is a
+deliberate, visible choice.
+
+### Measured, not asserted — this is the part that answers UR-075
+
+`tests/adversarial/corpus/` holds 45 input and 16 output cases, each labelled
+with what the deterministic layer alone should do. The split the owner notes
+prescribe is now real:
+
+- **deterministic tier, blocking, offline.** Runs on every PR with the model
+  stubbed, no credential, inside the existing ~4-second pytest job — which is
+  what UR-083 asks for. It pins the L1 boundary case by case, so editing a
+  pattern changes a specific named test rather than nothing.
+- **model tier, scheduled, never blocking.** `scripts/guardrail_eval.py`,
+  wired into `docs/security/drafts/ci-evals.yml`.
+
+First live run (`openai`/`gpt-4o`, prompt `l2-2026-08-16b`), full report in
+[`docs/security/guardrail-eval-report.md`](security/guardrail-eval-report.md):
+
+| | input gate | output gate |
+|---|---|---|
+| recall | **1.00** | 0.875 |
+| precision | 0.893 | 0.875 |
+| attacks caught by L1 | 7 (28%) | 1 (12%) |
+| **attacks added by L2** | **18 (72%)** | **6 (75%)** |
+| missed by both | 0 | 1 |
+| L2 latency p50 / p95 | 902 / 1856 ms | 943 / 1124 ms |
+
+Every false positive on the input gate is **L1's**, not the classifier's. The
+classifier introduced none. The remaining output miss (`out-104`) is indirect
+injection arriving through retrieved evidence — that path has a separate
+control in `accessibility_agent.sanitize_evidence`, and tuning the prompt
+against a single 16-case corpus entry would be overfitting, so it is recorded
+rather than chased.
+
+The first run also caught the classifier blocking the system's **own**
+provenance disclosure ("Options from hotel_transport_agent are unverified model
+estimates..."). Fixed by naming the safety text as explicitly allowed in the
+output prompt, and the prompt version bumped so the old verdicts are not reused
+from cache. That failure is the argument for the corpus in miniature: nothing
+else in the suite would have found it.
+
+### Three real bugs the corpus work surfaced
+
+1. **`accessibility_agent` was screening nothing extra.** It read
+   `origin_place`/`destination_place`; the fields are `origin_city`/
+   `destination_city` (`schemas.py:30-31`). The test covering it used the same
+   wrong keys, so it passed. Field selection now lives in one place,
+   `guardrails/fields.py`, used by every caller.
+2. **Toxicity matching was substring, not word.** `"kill"` fired on
+   *Kilimanjaro*, `"die"` on *diet* and *Dieppe*. Word-bounded now, in both the
+   flight and hotel copies.
+3. **`risk_advisory_agent` had no guardrails at all** — prompt-only, and the
+   `preflight`/`postprocess` hooks in `make_specialist_node` were never passed.
+   Now wired via generic helpers in `guardrails/specialist.py`.
+
+### Still open
+
+- **A live L1 false positive at the HTTP boundary.** `safeguards.PROMPT_INJECTION`
+  still matches a bare `"act as"`, so *"please act as my travel agent"* is
+  rejected with a 422. Flight Agent tightened its own pattern and has a
+  regression test for that exact string — but it tests a different regex, which
+  is why nobody noticed. Recorded as corpus case `ben-001`. Not fixed here
+  because changing the shared pattern is a behaviour change with its own test
+  implications; it should be its own commit.
+- Two further L1 false positives from the toxicity keyword list, on ordinary
+  customer feedback (`ben-012` "we hate long layovers", `ben-019` "the last
+  hotel was useless"). Word-bounding does not help — the words are used
+  legitimately. The keyword list, not the matching, is the problem.
+- The flight/hotel guardrail modules are still near-identical copies; the
+  toxicity fix had to be applied twice.
+- Rate limiting still not built, and L2 makes each request cost more.
+
+## 2026-08-15 — CI/CD landed on `release`; pipeline split in two
+
+**Goal:** get the pipeline onto `release` *before* the team merges their feature
+branches in a few days, so those merges arrive gated rather than ungated.
+
+Opened as [PR #9](https://github.com/NUS-ISS-SWE5008-STACKABLE-2026-07-Team1/agentic-travel-planner/pull/9)
+(`ci/pipeline-release` → `release`, commit `8a68a09`). Open and green at time of
+writing. Full record: [`docs/security/firstCIMergeToRelease.md`](security/firstCIMergeToRelease.md).
+
+### Why `release` first, and why it mattered more than expected
+
+`release` had **no CI at all** — its `security.yml` only triggered on push to
+`main`, and carried no test job and no secret scan. The ordering matters because
+`pull_request` events read the workflow from the *merged* result: once the
+trigger is on `release`, every future PR into it is checked automatically,
+wherever it came from. Landing it afterwards means several people's work merges
+untested and the red build belongs to nobody.
+
+### What changed
+
+| File | Action |
+|---|---|
+| `ci-fast.yml` | added — secrets + tests + SAST, ~1 min, on each member's own branch and on PRs into `main`/`release` |
+| `ci-dast.yml` | added — the slow website scan, `main`/`release` only |
+| `security.yml` | **deleted** — superseded; keeping it would run every scan twice |
+| `.semgrep/llm-agent.yml` | added — `ci-fast.yml` gates on these rules and they existed only on `mark` |
+| `scripts/ci_stub_provider.py` | added — fake AI provider, so DAST exercises the app with **no real API key** |
+| `requires.txt` | **deleted** (item 5) |
+
+`instance/travel_planner.sqlite3` deliberately left tracked, pending a teammate.
+
+### Team decisions taken
+
+| Item | Decision |
+|---|---|
+| 5 | Delete `requires.txt` — nobody uses it |
+| 6 | PR checks on `main` + `release` only for now |
+| 7 | Time limits: 10 min secrets, 10 tests, 15 SAST, 20 DAST (default was **6 hours**) |
+| 9 | Bandit `-ll` → `-l`, so low-severity findings stop being hidden |
+| 17 | Quick tier on all seven active branches, named explicitly rather than a wildcard |
+
+Item 8 — which advisory checks should start blocking — is still open.
+
+### Results on the PR
+
+Both workflows ran on the `pull_request` event, so the PR tested the very
+trigger it was adding. Fast checks 52s, DAST 1m42s.
+
+Secret scan **`no leaks found`** — green for the first time, because the Azure
+key was rotated and `.env.secrets` untracked beforehand. `168 passed` (release's
+older suite; `mark` is at 261). Custom LLM/agent rules 0 findings across 44
+files. pip-audit clean. DAST login check confirmed an authenticated session;
+ZAP reached `10 URLs`, `FAIL-NEW: 0`.
+
+Two unknowns resolved well: the hand-written Semgrep rules were authored against
+`mark`'s code and could not be pre-tested on release's older `flaskapp` — they
+report 0 there too; and release's 20 test files, which had never run in CI, all
+pass.
+
+### Trial run first, and the bug it found
+
+The workflows were trial-run on a throwaway branch (`ci-pipeline-test`) before
+being proposed, rather than merged on faith. That run **found a real bug**: the
+advisory git-history secret scan was being silently *skipped*, because a step
+following a failed step does not run unless it says `if: always()`. The blocking
+tree scan failed on every run at the time, so the advisory scan had never once
+executed. Fixed, and the fix is in PR #9.
+
+**The same bug is still in `main`'s `security.yml`.**
+
+### Two errors in the CI working notes, corrected
+
+1. The notes claimed DAST would need a database seeding step once the sqlite
+   file is untracked. It does not — `database.init_app()` calls `initialize()`
+   then `seed_login_user()` on every app start, so the demo account exists
+   against an empty database. One less prerequisite on the most expensive item.
+2. The notes' CSRF-token extraction command could never have worked:
+   `form.hidden_tag()` renders `type="hidden"` between the `name` and `value`
+   attributes, so a pattern expecting `value=` immediately after `name=` matches
+   nothing. Corrected, and proven by the now-passing login check.
+
+### Still open
+
+- **Merge PR #9**, then update the status line in `firstCIMergeToRelease.md`.
+- **Delete the trial branch** `ci-pipeline-test` from the remote.
+- **`instance/travel_planner.sqlite3`** — still tracked on `release` and `mark`.
+- **Item 8** — which advisory checks should block. Needs the team.
+- **The advisory scanners hide their failures.** A `continue-on-error` step shows
+  green even when it found something. Of the 8 findings only visible in the
+  uploaded reports, 6 are false positives; **2 are genuine** — `admin.html` loads
+  bootstrap-icons and chart.js from `cdn.jsdelivr.net` with no `integrity=`
+  attribute, so a compromised CDN would execute its code on the admin page.
+- **Flight Agent guardrails need an adversarial regression corpus** (backlog
+  item 11 / UR-075). The input and output gates exist and are enforced — see
+  Part B §3.3 — but nothing proves they still catch attacks after someone edits
+  a pattern. Static analysis cannot cover this; see the note below.
+- Carried over: Duffel multi-airport fan-out still unexercised against the real API.
+- **Resolved since 08-11:** the Azure key has been rotated, and `.env.secrets` is
+  untracked on both `mark` and `release`.
+
+---
 
 ## 2026-08-11 — Shipped the city work; found a committed API key; CI on feature branches
 
@@ -360,6 +649,17 @@ cannot. Same fee, different meaning.
 | Trace tampering | Post-response | `verify_hash_chain()` |
 | Rate limiting | — | **Not built.** Relies on whatever the API gateway provides |
 | Inventory poisoning | — | **Not applicable yet.** Seed data is static and version-controlled |
+| Obfuscated injection (base64, leetspeak, homoglyph, whitespace-split, non-English) | Pre-model, L2 | Blocked by the LLM classifier; the regex layer cannot see any of these |
+| Role-play and hypothetical jailbreaks | Pre-model, L2 | Blocked by the LLM classifier |
+| Out-of-scope and harmful requests | Pre-model, L2 | Blocked by the LLM classifier |
+| Stereotyping phrased without a trigger word | Both, L2 | Blocked by the LLM classifier; the two-tier keyword rule misses these by construction |
+| System-prompt leakage in the final plan | Post-model, L2 | Orchestrator output screened before it reaches the traveller |
+| Fabricated booking or guarantee in the final plan | Post-model, L2 | Orchestrator output screened; retry once, then withhold |
+| Guardrail unavailable | — | **Fail closed.** A classifier error blocks the request; `GUARDRAIL_FAIL_MODE=open` is available but explicit |
+
+The L2 rows are the LLM classifier added on 2026-08-16 (Part A). Its measured
+contribution is in [`docs/security/guardrail-eval-report.md`](security/guardrail-eval-report.md),
+regenerated by `scripts/guardrail_eval.py` from the corpus in `tests/adversarial/`.
 
 ---
 
