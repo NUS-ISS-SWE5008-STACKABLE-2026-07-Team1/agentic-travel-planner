@@ -50,6 +50,27 @@ class Config:
     LLM_API_KEY = os.getenv("LLM_API_KEY")
     LLM_BASE_URL = os.getenv("LLM_BASE_URL")
     AI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "180"))
+    # L2 guardrails: the LLM classifier that screens traveller free text and
+    # generated plans for what the regex layer cannot see (obfuscated injection,
+    # role-play jailbreaks, out-of-scope requests). Set enabled=false to develop
+    # offline; the deterministic L0/L1 gates keep working either way.
+    GUARDRAIL_LLM_ENABLED = os.getenv("GUARDRAIL_LLM_ENABLED", "true").lower() == "true"
+    # Defaults to the planning model. Point this at the provider's small/fast
+    # tier: the classifier runs on the critical path twice per plan, and a
+    # cheaper model is usually better at this narrow task per unit of latency.
+    GUARDRAIL_LLM_MODEL = os.getenv("GUARDRAIL_LLM_MODEL")
+    # Deliberately NOT AI_REQUEST_TIMEOUT_SECONDS. A 180-second guardrail is not
+    # a guardrail: under fail-closed it converts a slow provider into a
+    # three-minute hang before the traveller is told no.
+    GUARDRAIL_LLM_TIMEOUT_SECONDS = float(os.getenv("GUARDRAIL_LLM_TIMEOUT_SECONDS", "8"))
+    # A "block" below this confidence is downgraded to a flag: audited, but the
+    # traveller is not denied. Set it from the eval curve in
+    # docs/security/guardrail-eval-report.md rather than by intuition.
+    GUARDRAIL_BLOCK_THRESHOLD = float(os.getenv("GUARDRAIL_BLOCK_THRESHOLD", "0.7"))
+    # "closed" (default): a classifier error blocks the request. "open": it
+    # flags and proceeds, relying on L0/L1 alone. Fail-open is a deliberate,
+    # visible choice, never a silent fallback.
+    GUARDRAIL_FAIL_MODE = os.getenv("GUARDRAIL_FAIL_MODE", "closed").strip().lower()
     # Where Flight Agent's inventory comes from: "seed" (the project's static
     # dataset, the default and what every golden scenario is pinned to) or
     # "duffel" (live supplier search). Selecting duffel without a token falls
