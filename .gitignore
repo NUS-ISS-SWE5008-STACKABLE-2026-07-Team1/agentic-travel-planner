@@ -10,3 +10,8 @@ __pycache__/
 instance/traces/
 instance/*.sqlite3
 instance/*.sqlite3-*
+
+# CI/CD pipeline working documents (owner-maintained, not part of the deliverable)
+docs/security/cicd-owner-notes.md
+docs/security/cicd-summary-for-team.md
+docs/security/cicd-status.html

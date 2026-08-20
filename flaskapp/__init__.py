@@ -52,7 +52,3 @@ def create_app(config_object: type[Config] = Config) -> Flask:
         return response
 
     return app
-
-
-# Backwards-compatible export for code importing ``from flaskapp import app``.
-app = create_app()

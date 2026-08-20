@@ -28,7 +28,7 @@ in `prompt.py`, reducing merge conflicts between team members.
 | Flight Agent | `agents/flight_agent/` | Flight search and reasoning under arrival-time, schedule, connection, baggage, and budget constraints. |
 | Hotel & Transport Agent | `agents/hotel_transport_agent/` | Accommodation and local transit selection compatible with flights and traveller requirements. |
 | Accessibility Agent | `agents/accessibility_agent/` | End-to-end accessibility validation, explicit veto warnings, and future bias-audit tooling. |
-| Risk & Advisory Agent | `agents/risk_advisory_agent/` | Visa, seasonal, disruption, event, health, and safety risks with high-severity escalation. |
+| Risk & Advisory Agent | `agents/risk_advisory_a1gent/` | Visa, seasonal, disruption, event, health, and safety risks with high-severity escalation. |
 | Orchestrator Agent | `agents/orchestrator_agent/` | Coordination, governance, conflict/escalation handling, and final itinerary synthesis. |
 
 The resulting layout is:
@@ -42,12 +42,16 @@ flaskapp/travel_ai/
 |   |   |-- agent.py               # LangGraph node (what the graph runs today)
 |   |   |-- prompt.py
 |   |   |-- adapter.py             # TravelRequest <-> Flight Agent contracts
-|   |   |-- airports.py            # country -> primary airport resolution
+|   |   |-- airports.py            # country + city -> airport resolution
 |   |   |-- schemas.py             # flight-specific contracts
 |   |   |-- domain.py              # deterministic search/filter/rank
 |   |   |-- guardrails.py          # input/output screening and grounding
 |   |   |-- reasoning.py           # LLM layer over the deterministic tool
-|   |   `-- seed_data.py           # static inventory (+ seed_data_extended.csv)
+|   |   |-- seed_data.py           # static inventory (+ seed_data_extended.csv)
+|   |   `-- providers/             # where inventory comes from
+|   |       |-- base.py            # InventoryProvider protocol + InventoryResult
+|   |       |-- seed.py            # the static dataset (default)
+|   |       `-- duffel.py          # live Duffel supplier search (opt-in)
 |   |-- hotel_transport_agent/
 |   |   |-- agent.py
 |   |   `-- prompt.py
@@ -96,11 +100,25 @@ node, so runtime behaviour is unchanged. Connecting them is one change to
 `reasoning.run_flight_agent` needs), deliberately left as its own reviewed step
 because it changes what every downstream agent receives.
 
-Two limits to know before wiring it in. Inventory is 104 static rows covering
-SIN <-> NRT/LHR/SYD/BKK/HKG between 2026-08-25 and 2026-10-08, so anything else
-correctly returns no candidates. And the intake form collects countries, not
-cities or airports, so `airports.py` reduces each country to one gateway —
-collecting a city or airport at intake is the real fix.
+One limit to know before wiring it in: by default inventory is 284 static rows,
+SIN-origin hub-and-spoke across 18 airports between 2026-08-24 and 2026-10-08,
+so anything else correctly returns no candidates.
+
+The intake form collects a country **and a city**, and a city resolves to every
+airport serving it — picking Tokyo ranks Haneda and Narita together rather than
+silently meaning Narita. The dataset (`flaskapp/places.py`, 253 cities across 61
+countries) is shared with the other agents, so hotel and transport inventory can
+be keyed on the same cities; see
+[docs/places_contract.md](docs/places_contract.md).
+
+`domain.py` takes inventory as a plain argument and never fetches it, so the
+source is swappable. `providers/` holds that seam: `seed` is the default (and
+what the golden scenarios are pinned to), and `FLIGHT_INVENTORY_SOURCE=duffel`
+with a `DUFFEL_API_TOKEN` swaps in a live Duffel supplier search. Duffel
+publishes no accessibility or seat-availability data, which is handled as an
+explicit "unverified" third state rather than guessed either way — see
+[docs/flight_agent/inventory_sources.md](docs/flight_agent/inventory_sources.md)
+for the full trade-off table and setup steps.
 
 Two demo scripts exercise it against a live model:
 
@@ -271,6 +289,47 @@ Users can create an account at `/register` with their name, email, country, and
 birthday. Passwords must contain at least 12 characters with uppercase, lowercase,
 a number, and a special character. Passwords are stored only as Werkzeug hashes;
 email addresses are case-insensitively unique.
+
+## Hosted database
+
+Set `DATABASE_URL` to a Postgres DSN and the application uses it instead of
+SQLite; leave it unset and local development is unchanged. Supabase users must
+use the **session pooler** connection string — its host contains
+`pooler.supabase.com` — not the direct connection, whose host resolves only to
+an IPv6 address that Render cannot reach. Percent-encode any `/`, `@`, `#` or
+`?` in the password before putting it in the DSN.
+
+Creating the `citext` extension the schema relies on for case-insensitive
+email uniqueness (`CREATE EXTENSION IF NOT EXISTS citext;`) requires a role
+with sufficient privilege; the default Supabase `postgres` role has it, but a
+restricted application role may not.
+
+Copy the existing local data across once:
+
+```powershell
+python scripts/migrate_sqlite_to_postgres.py --destination $env:DATABASE_URL --dry-run
+python scripts/migrate_sqlite_to_postgres.py --destination $env:DATABASE_URL
+```
+
+The script is idempotent and prints per-table counts, exiting non-zero if any
+table ends up short. It also refuses to run against a destination that
+already has rows in any of the migrated tables, to avoid silently dropping
+data under `ON CONFLICT DO NOTHING`; pass `--allow-nonempty` only for a
+deliberate resume of a partial migration.
+
+Moving state into Supabase does not make the deployment fully stateless.
+`flaskapp/travel_ai/tracing.py` still writes each request's tamper-evident
+audit trace as a JSONL file under `TRACE_DIR` (default
+`instance/traces`) on the instance's local filesystem, in addition to writing
+the same events to the `audit_events` table. On Render's free tier that
+directory sits on the ephemeral disk, so every deploy and every spin-down
+still wipes those trace files — the `GET /api/v1/traces/<request_id>`
+endpoint (the `trace_url` returned with every plan) reads only from the
+JSONL file, not from `audit_events`, so it will 404 for any request whose
+trace file was lost even though the same events are still durable in the
+database. Supabase resolves this for users, plans,
+and audit rows; it does not resolve it for trace-file retrieval unless
+`TRACE_DIR` is also moved onto persistent or external storage.
 
 ## Administrator monitoring
 

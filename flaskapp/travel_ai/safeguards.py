@@ -31,6 +31,33 @@ class SafetyError(ValueError):
     """Raised when a request violates an enforceable safety boundary."""
 
 
+def screen_prompt(text: Any, max_chars: int) -> str:
+    """Screen free-text intake before it reaches the model.
+
+    `validate_request` only sees preferences, accessibility needs and refinement
+    notes, none of which exist yet when a traveller types their trip in prose.
+    That makes the intake prompt a separate injection surface, so it is screened
+    on its own and before any model call rather than after one.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise SafetyError("A travel request message is required")
+    if len(text) > max_chars:
+        raise SafetyError("Request is too large")
+    if PROMPT_INJECTION.search(text):
+        raise SafetyError("Instruction-like text was detected in the message")
+    return text.strip()
+
+
+def screen_answers(answers: Any) -> dict[str, Any]:
+    """Reject sensitive ranking traits supplied through the clarification card."""
+    if not isinstance(answers, dict):
+        raise SafetyError("Answers must be a JSON object")
+    forbidden = SENSITIVE_KEYS.intersection(answers)
+    if forbidden:
+        raise SafetyError(f"Unsupported sensitive fields: {', '.join(sorted(forbidden))}")
+    return answers
+
+
 def validate_request(payload: dict[str, Any], max_chars: int) -> TravelRequest:
     """Reject oversized, injected, or explicitly sensitive ranking inputs."""
     if len(str(payload)) > max_chars:
