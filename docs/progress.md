@@ -92,6 +92,74 @@ is not an error to pytest. The live evaluation is gated twice over (the marker
 **and** `GUARDRAIL_LIVE_EVAL=1`), so no CI run has ever been able to bill a
 model call, but the filter itself was decorative until this commit.
 
+### The two gates now take separate models
+
+Follow-up the same day, from a design question worth recording: is a smaller
+model smarter for guardrail work than the planning model?
+
+Mostly yes, but the usual argument (cost) is the weakest one. Guardrails are 2
+of 7 calls per plan, so ~29% of spend on a task that never writes a sentence a
+traveller reads — real, but ordinary. The argument that actually decides it is
+**availability**. Under `GUARDRAIL_FAIL_MODE=closed`, a timeout is not a slow
+response, it is a refused traveller: `_failure_verdict()` maps every exception
+to `BLOCK`. A large model that occasionally takes 12 seconds against an 8-second
+budget does not cost latency, it costs the request. The task itself is
+narrow — `with_structured_output` constrains the answer to one of three
+decisions and one of nine enum categories — and fixed-label classification is
+where small models close most of the gap.
+
+Where a small model does hurt is **precision**, not recall. Missing an attack is
+invisible; blocking "please act as my travel agent" is a support ticket, and
+three such false positives already exist in L1 (`ben-001`, `ben-012`,
+`ben-019`). It also hurts on exactly what L2 was built for — injection encoded
+in base64, leetspeak, split whitespace, translated, wrapped in role-play — and
+on structured-output reliability, where a schema failure is another block.
+
+So the gates were split rather than one model chosen for both:
+
+| | Input gate | Output gate |
+|---|---|---|
+| When | before planning, traveller waiting | after ~75s of planning |
+| Reads | attacker-controlled text | our own model's prose |
+| A timeout means | a refused request | a discarded plan |
+| Wants | small, fast, hard to talk round | nuance; latency is noise |
+
+`GUARDRAIL_INPUT_LLM_MODEL` and `GUARDRAIL_OUTPUT_LLM_MODEL` each fall back to
+`GUARDRAIL_LLM_MODEL`, which falls back to `LLM_MODEL` — a deployment that sets
+none of them behaves exactly as before. `GUARDRAIL_OUTPUT_LLM_TIMEOUT_SECONDS`
+(20s) is deliberately **independent** of the input budget rather than derived
+from it; a shared timeout would force the output gate back into the constraint
+the split exists to remove.
+
+Two things fell out of this that are not cosmetic. The verdict cache is now
+keyed on the model as well as the prompt version — without that, comparing two
+models over one corpus in a single process scores the second on the first one's
+answers, which is precisely the comparison `scripts/guardrail_eval.py` exists to
+make. And the eval report named a single model while describing both gates; it
+now names each, in the section heading as well as the summary table.
+
+`tests/adversarial/test_gate_models.py` — 12 tests, because the split is
+invisible at runtime: a guardrail calling one model twice behaves identically to
+one calling two until somebody reads the bill. Verified by breaking it
+deliberately (both gates forced onto one client, and the model dropped from the
+cache key): exactly two tests went red, and only those two.
+
+**The models currently in `render.yaml` are candidates, not measurements.**
+Nothing has been evaluated against a real key yet.
+
+### Render now deploys from `release`
+
+`render.yaml` said `branch: subbu-18Aug` — one developer's feature branch,
+live because it happened to be the one wired up. Changed to `release`, the
+branch the team merges into and the only one CI runs on.
+
+Worth knowing: **this file alone does not move the deploy.** Render reads
+`render.yaml` from the branch it is already watching, so a service created by
+hand keeps its dashboard setting and never sees this change. The branch has to
+be changed in the Render dashboard too, or the blueprint resynced. Until both
+agree the line is an intention, not a fact — noted in the file itself so the
+next reader does not assume otherwise.
+
 ### Still open
 
 - The live run against a real key has not happened yet. Until it has, the
