@@ -39,7 +39,8 @@ document.addEventListener("submit", (event) => {
   const form = event.target;
   const asynchronousForms = new Set([
     "travel-plan-form", "refinement-form", "chat-refinement-form",
-    "negative-feedback-form", "admin-registration-form"
+    "negative-feedback-form", "admin-registration-form",
+    "intent-form", "intake-card-form"
   ]);
   if (!asynchronousForms.has(form.id) && form.checkValidity()) {
     showPageLoader();
@@ -59,8 +60,17 @@ document.querySelectorAll("[data-password-toggle]").forEach((button) => {
   });
 });
 
+// Route label for a stored request: city when one was chosen, country
+// otherwise. Requests predating city intake have no city fields at all, so the
+// fallback is the normal path for them, not an error case.
+const routeEnd = (place, city) => (city ? `${city}, ${place}` : place || "-");
+const routeLabel = (request) =>
+  `${routeEnd(request.origin, request.origin_city)} → ${routeEnd(request.destination, request.destination_city)}`;
+
 const planner = document.querySelector("#travel-plan-form");
 if (planner) {
+  const originCountry = planner.querySelector("#origin");
+  const destinationCountry = planner.querySelector("#destination");
   const travelersInput = planner.querySelector("#travellers");
   const travelerDetails = planner.querySelector("#traveler-details");
   const addTravelerButton = planner.querySelector("#add-traveler");
@@ -72,6 +82,51 @@ if (planner) {
   const departureDate = planner.querySelector("#departure_date");
   const returnDate = planner.querySelector("#return_date");
   let latestPayload = null;
+  // Cities are embedded in the page as a JSON data block, so changing country
+  // repopulates instantly with no request to fail or wait on.
+  const cityOptionsNode = document.querySelector("#city-options");
+  const cityOptions = cityOptionsNode ? JSON.parse(cityOptionsNode.textContent) : {};
+
+  const populateCities = (countrySelect, citySelect) => {
+    const previous = citySelect.value;
+    const cities = cityOptions[countrySelect.value] || [];
+    citySelect.replaceChildren();
+
+    if (!countrySelect.value) {
+      citySelect.append(new Option("Select a country first", "", true, true));
+      citySelect.disabled = true;
+    } else if (cities.length === 0) {
+      // A country we have no mapped cities for. Say so rather than offering an
+      // empty dropdown, and leave the field non-blocking so the trip can still
+      // be submitted at country granularity.
+      citySelect.append(new Option("No cities available for this country", "", true, true));
+      citySelect.disabled = true;
+    } else {
+      citySelect.append(new Option("Select a city", "", true, true));
+      for (const city of cities) {
+        // `label` carries the airport codes ("Tokyo (NRT/HND)"); the posted
+        // value is the plain name, which is what the resolver looks up.
+        citySelect.append(new Option(city.label, city.name));
+      }
+      citySelect.disabled = false;
+      // Keep the choice if the same city exists under the new country, so a
+      // stray re-selection of the same country is not punished.
+      if (previous && cities.some((city) => city.name === previous)) {
+        citySelect.value = previous;
+      }
+    }
+    // `required` only when there is something to choose, or the browser blocks
+    // submission on a field the traveller cannot fill.
+    citySelect.required = !citySelect.disabled;
+  };
+
+  const cityPairs = [...planner.querySelectorAll("[data-country-for]")].map((citySelect) => {
+    const countrySelect = planner.querySelector(`#${citySelect.dataset.countryFor}`);
+    countrySelect.addEventListener("change", () => populateCities(countrySelect, citySelect));
+    return [countrySelect, citySelect];
+  });
+  // Run once at load: the departure country may be prefilled from the profile.
+  cityPairs.forEach(([countrySelect, citySelect]) => populateCities(countrySelect, citySelect));
 
   departureDate.addEventListener("change", () => {
     if (!departureDate.value) return;
@@ -85,7 +140,7 @@ if (planner) {
   const renderTravelerFields = () => {
     const previousAges = [...travelerDetails.querySelectorAll("[name='traveller_age']")].map((field) => field.value);
     const previousGenders = [...travelerDetails.querySelectorAll("[name='traveller_gender']")].map((field) => field.value);
-    const previousAccessibility = [...travelerDetails.querySelectorAll("[name='traveller_accessibility']")].map((field) => field.value);
+    const previousPreferences = [...travelerDetails.querySelectorAll("[name='traveller_preference']")].map((field) => field.value);
     const count = Math.min(20, Math.max(1, Number(travelersInput.value) || 1));
     travelerDetails.replaceChildren();
     for (let index = 0; index < count; index += 1) {
@@ -111,15 +166,15 @@ if (planner) {
               </select>
             </div>
             <div class="col-12 mt-3">
-              <label class="form-label" for="traveller-accessibility-${index}">Accessibility needs <span class="text-body-secondary fw-normal">(optional)</span></label>
-              <input class="form-control" id="traveller-accessibility-${index}" name="traveller_accessibility" placeholder="Step-free access, low walking distance">
-              <div class="form-text">Separate needs with commas. These are treated as hard constraints.</div>
+              <label class="form-label" for="traveller-preference-${index}">Preferences and accessibility needs <span class="text-body-secondary fw-normal">(optional)</span></label>
+              <textarea class="form-control" id="traveller-preference-${index}" name="traveller_preference" rows="3" maxlength="500" placeholder="Window seat, vegetarian meals, quiet room, step-free access"></textarea>
+              <div class="form-text">Add any preferences or accessibility requirements specific to this traveler.</div>
             </div>
           </div>
         </div>`;
       wrapper.querySelector("[name='traveller_age']").value = previousAges[index] || "";
       wrapper.querySelector("[name='traveller_gender']").value = previousGenders[index] || "";
-      wrapper.querySelector("[name='traveller_accessibility']").value = previousAccessibility[index] || "";
+      wrapper.querySelector("[name='traveller_preference']").value = previousPreferences[index] || "";
       travelerDetails.append(wrapper);
     }
     addTravelerButton.disabled = count >= 20;
@@ -128,21 +183,28 @@ if (planner) {
   const buildPayload = () => {
     const data = new FormData(planner);
     const commaList = (name) => String(data.get(name) || "").split(",").map((item) => item.trim()).filter(Boolean);
-    const perTravelerAccessibility = data.getAll("traveller_accessibility").map((value) =>
-      String(value).split(",").map((item) => item.trim()).filter(Boolean)
-    );
-    const combinedAccessibility = perTravelerAccessibility.flatMap((needs, index) =>
-      needs.map((need) => `Traveler ${index + 1}: ${need}`)
-    );
+    const travelerPreferences = data.getAll("traveller_preference")
+      .map((value) => String(value).trim());
+    const preferences = [
+      ...commaList("preferences"),
+      ...travelerPreferences.flatMap((preference, index) =>
+        preference ? [`Traveler ${index + 1}: ${preference}`] : []
+      )
+    ];
     return {
       origin: data.get("origin"), destination: data.get("destination"),
+      // Omitted rather than sent empty when a country has no mapped cities —
+      // the API rejects a blank string but accepts an absent city, which the
+      // flight adapter then resolves to the country's main gateway.
+      ...(data.get("origin_city") ? {origin_city: data.get("origin_city")} : {}),
+      ...(data.get("destination_city") ? {destination_city: data.get("destination_city")} : {}),
       departure_date: data.get("departure_date"), return_date: data.get("return_date"),
       travellers: Number(data.get("travellers")), currency: "SGD",
       traveller_ages: data.getAll("traveller_age").map(Number),
       traveller_genders: data.getAll("traveller_gender"),
-      traveller_accessibility_needs: perTravelerAccessibility,
+      traveller_accessibility_needs: travelerPreferences.map(() => []),
       budget: Number(data.get("budget")),
-      preferences: commaList("preferences"), accessibility_needs: combinedAccessibility,
+      preferences, accessibility_needs: [],
       refinement_notes: [...refinementNotes]
     };
   };
@@ -191,10 +253,10 @@ if (planner) {
     const index = Number(removeButton.dataset.index);
     const ageFields = [...travelerDetails.querySelectorAll("[name='traveller_age']")];
     const genderFields = [...travelerDetails.querySelectorAll("[name='traveller_gender']")];
-    const accessibilityFields = [...travelerDetails.querySelectorAll("[name='traveller_accessibility']")];
+    const preferenceFields = [...travelerDetails.querySelectorAll("[name='traveller_preference']")];
     ageFields[index].removeAttribute("name");
     genderFields[index].removeAttribute("name");
-    accessibilityFields[index].removeAttribute("name");
+    preferenceFields[index].removeAttribute("name");
     removeButton.closest(".col-md-6").remove();
     travelersInput.value = String(Math.max(1, Number(travelersInput.value) - 1));
     renderTravelerFields();
@@ -236,7 +298,7 @@ const agentChat = document.querySelector("#agent-chat");
 if (agentChat) {
   const activityList = document.querySelector("#agent-activity");
   const statusLabel = document.querySelector("#job-status");
-  const result = document.querySelector("#chat-result");
+  const result = document.querySelector("#plan-content");
   const refinementForm = document.querySelector("#chat-refinement-form");
   const feedbackSection = document.querySelector("#plan-feedback");
   const negativeFeedbackForm = document.querySelector("#negative-feedback-form");
@@ -257,6 +319,11 @@ if (agentChat) {
   const completedMilestones = new Set();
   const activeAgents = new Set();
   const travelIcon = document.querySelector("#planning-travel-icon");
+  const endRequestSession = () => fetch(agentChat.dataset.sessionEndUrl, {
+    method: "POST",
+    headers: {"X-CSRFToken": document.querySelector("meta[name='csrf-token']").content},
+    keepalive: true
+  }).catch(() => {});
 
   const agentNames = {
     system: "Planning system", flight_agent: "Flight agent",
@@ -320,7 +387,7 @@ if (agentChat) {
     const item = document.createElement("li");
     const time = new Date(event.timestamp).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
     item.textContent = `${time} · ${agentNames[event.agent] || event.agent} ${eventLabels[event.event] || event.event}`;
-    activityList.append(item);
+    if (activityList) activityList.append(item);
   };
 
   const renderPlan = (response) => {
@@ -509,10 +576,13 @@ if (agentChat) {
       });
     } finally {
       stopped = true;
+      await endRequestSession();
       showPageLoader();
       window.location.assign(homeButton.dataset.homeUrl);
     }
   });
+
+  window.addEventListener("pagehide", endRequestSession);
 
   poll();
 }
@@ -525,6 +595,12 @@ if (adminMonitor) {
   const liveStatus = document.querySelector("#admin-live-status");
   const tokenTotals = document.querySelector("#admin-token-totals");
   const userConsumption = document.querySelector("#admin-user-consumption");
+  const liveRequestLabel = document.querySelector("#live-request-label");
+  const liveRequestStatus = document.querySelector("#live-request-status");
+  const liveRequestConversation = document.querySelector("#live-request-conversation");
+  const liveAgentStages = document.querySelector("#live-agent-stages");
+  const liveProcessingLog = document.querySelector("#live-processing-log");
+  const processingTimelineDialog = document.querySelector("#processing-timeline-dialog");
   let selectedRequestId = null;
   let requests = [];
   let consumption = {totals: {}, users: []};
@@ -554,14 +630,82 @@ if (adminMonitor) {
   };
   const statusClass = (status) => ({
     completed: "text-bg-success", processing: "text-bg-primary",
-    queued: "text-bg-secondary", failed: "text-bg-danger", cancelled: "text-bg-warning"
+    intake: "text-bg-info", queued: "text-bg-secondary",
+    failed: "text-bg-danger", cancelled: "text-bg-warning"
   }[status] || "text-bg-secondary");
+
+  const renderLiveProcessing = () => {
+    const selected = requests.find((item) => item.request_id === selectedRequestId);
+    liveAgentStages.replaceChildren();
+    liveProcessingLog.replaceChildren();
+    liveRequestConversation.replaceChildren();
+    if (!selected) {
+      liveRequestLabel.textContent = "Select a request above to inspect its processing stages.";
+      liveRequestStatus.className = "badge text-bg-secondary";
+      liveRequestStatus.textContent = "Waiting";
+      return;
+    }
+    const liveRoute = selected.request.origin && selected.request.destination
+      ? `${selected.request.origin} → ${selected.request.destination}` : "Trip details being collected";
+    liveRequestLabel.textContent = `${liveRoute} · ${selected.request_id}`;
+    liveRequestStatus.className = `badge ${statusClass(selected.status)}`;
+    liveRequestStatus.textContent = selected.status;
+    (selected.conversation || []).forEach((entry) => {
+      const message = document.createElement("div");
+      message.className = `admin-conversation-message ${entry.role}`;
+      const speaker = entry.role === "user" ? "Traveller" : "Orchestrator";
+      const label = document.createElement("div");
+      label.className = "small fw-semibold mb-1";
+      label.textContent = `${speaker} · ${new Date(entry.created_at + "Z").toLocaleTimeString()}`;
+      const content = document.createElement("div");
+      content.textContent = entry.content;
+      message.append(label, content); liveRequestConversation.append(message);
+    });
+    if (!(selected.conversation || []).length) {
+      liveRequestConversation.textContent = "No orchestrator conversation was recorded for this request.";
+    }
+    selected.agents.forEach((agent) => {
+      const column = document.createElement("div");
+      column.className = "col-sm-6 col-xl-4";
+      const stage = document.createElement("div");
+      stage.className = "live-agent-stage";
+      const top = document.createElement("div");
+      top.className = "d-flex justify-content-between gap-2";
+      const name = document.createElement("strong");
+      name.textContent = agentNames[agent.agent] || agent.agent;
+      const badge = document.createElement("span");
+      badge.className = `badge ${statusClass(agent.status)}`;
+      badge.textContent = agent.status;
+      top.append(name, badge);
+      const timing = document.createElement("div");
+      timing.className = "small text-body-secondary mt-2";
+      timing.textContent = agent.completed_at
+        ? `Completed ${new Date(agent.completed_at + "Z").toLocaleTimeString()}`
+        : agent.started_at ? `Started ${new Date(agent.started_at + "Z").toLocaleTimeString()}` : "Queued";
+      stage.append(top, timing); column.append(stage); liveAgentStages.append(column);
+    });
+    if (!selected.agents.length) liveAgentStages.textContent = selected.status === "intake"
+      ? "Orchestrator intake is collecting and validating the required trip details."
+      : "Waiting for the first agent stage to start…";
+
+    const requestLogs = logs.filter((entry) => entry.request_id === selected.request_id).reverse();
+    requestLogs.forEach((entry) => {
+      const item = document.createElement("li");
+      const time = document.createElement("span");
+      time.className = "small text-body-secondary me-2";
+      time.textContent = new Date(entry.timestamp).toLocaleTimeString();
+      const message = document.createElement("span");
+      message.textContent = `${agentNames[entry.agent] || entry.agent}: ${entry.event.replaceAll("_", " ")}`;
+      item.append(time, message); liveProcessingLog.append(item);
+    });
+    if (!requestLogs.length) liveProcessingLog.textContent = "No processing events recorded yet.";
+  };
 
   const renderDetails = () => {
     const request = requests.find((item) => item.request_id === selectedRequestId);
     if (!request) return;
     const completedAgents = request.agents.filter((agent) => agent.status === "completed");
-    selectedLabel.textContent = `${request.request.origin} → ${request.request.destination} · ${request.request_id}`;
+    selectedLabel.textContent = `${routeLabel(request.request)} · ${request.request_id}`;
     const labels = completedAgents.map((agent) => agentNames[agent.agent] || agent.agent);
     const chartData = {
       labels,
@@ -632,7 +776,7 @@ if (adminMonitor) {
       const top = document.createElement("div");
       top.className = "d-flex justify-content-between gap-2";
       const route = document.createElement("strong");
-      route.textContent = `${request.request.origin} → ${request.request.destination}`;
+      route.textContent = routeLabel(request.request);
       const badge = document.createElement("span");
       badge.className = `badge ${statusClass(request.status)}`;
       badge.textContent = request.status;
@@ -766,13 +910,17 @@ if (adminMonitor) {
       row.className = item.request_id === selectedRequestId ? "table-primary admin-request" : "admin-request";
       row.tabIndex = 0;
       const values = [new Date(item.submitted_at + "Z").toLocaleString(), item.name || item.email || "Unknown user",
-        `${item.request.origin} → ${item.request.destination}`, item.status,
+        routeLabel(item.request), item.display_status,
         item.feedback_rating === "up" ? "👍 Good Plan" : item.feedback_rating === "down" ? "👎 Needs Improvement" : "Not Rated",
         item.usage?.input_tokens || 0,
         item.usage?.output_tokens || 0, item.usage?.total_tokens || 0];
+      values[2] = item.request.origin && item.request.destination ? values[2] : "Details pending";
+      const sessionState = item.session_status === "ended" ? "Ended" : "Active";
+      values.splice(4, 0, sessionState);
       values.forEach((value, index) => {
         const cell = document.createElement("td");
-        cell.textContent = index >= 5 ? value.toLocaleString() : value;
+        cell.textContent = index >= 6 ? value.toLocaleString() : value;
+        if (index === 4) cell.className = sessionState === "Active" ? "text-success fw-semibold" : "text-body-secondary";
         row.append(cell);
       });
       const selectRequest = () => {
@@ -780,19 +928,25 @@ if (adminMonitor) {
         lastCompletionSignature = null;
         renderRequestTable();
         renderDetails();
+        renderLiveProcessing();
         lastCompletionSignature = completionSignature();
+        if (!processingTimelineDialog.open) processingTimelineDialog.showModal();
       };
       row.addEventListener("click", selectRequest);
       row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") selectRequest(); });
       requestList.append(row);
     });
-    if (!requests.length) requestList.innerHTML = '<tr><td colspan="8" class="text-body-secondary">No planning requests recorded yet.</td></tr>';
+    if (!requests.length) requestList.innerHTML = '<tr><td colspan="9" class="text-body-secondary">No user requests recorded yet.</td></tr>';
     document.querySelector("#request-page-status").textContent = `Page ${requestPage} of ${pageCount} · ${requests.length} requests`;
     document.querySelector("#request-page-previous").disabled = requestPage === 1;
     document.querySelector("#request-page-next").disabled = requestPage === pageCount;
   };
   document.querySelector("#request-page-previous").addEventListener("click", () => { requestPage -= 1; renderRequestTable(); });
   document.querySelector("#request-page-next").addEventListener("click", () => { requestPage += 1; renderRequestTable(); });
+  document.querySelector("#close-processing-timeline").addEventListener("click", () => processingTimelineDialog.close());
+  processingTimelineDialog.addEventListener("click", (event) => {
+    if (event.target === processingTimelineDialog) processingTimelineDialog.close();
+  });
 
   const renderPlatform = () => {
     const kpis = document.querySelector("#platform-kpis");
@@ -849,7 +1003,7 @@ if (adminMonitor) {
     feedbackEntries.forEach((entry) => {
       const row = document.createElement("tr");
       const values = [new Date(entry.updated_at + "Z").toLocaleString(), entry.name || entry.email,
-        `${entry.origin || "-"} → ${entry.destination || "-"}`, entry.rating === "up" ? "👍 Good" : "👎 Needs Improvement",
+        routeLabel(entry), entry.rating === "up" ? "👍 Good" : "👎 Needs Improvement",
         entry.comment || "No written comment"];
       values.forEach((value, index) => {
         const cell = document.createElement("td");
@@ -1022,6 +1176,7 @@ if (adminMonitor) {
       renderPrompts();
       renderAdministrators();
       renderFeedback();
+      renderLiveProcessing();
       const nextSignature = completionSignature();
       if (nextSignature !== lastCompletionSignature) {
         renderDetails();

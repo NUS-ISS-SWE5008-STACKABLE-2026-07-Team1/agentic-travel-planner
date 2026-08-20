@@ -145,3 +145,30 @@ GOLDEN_SCENARIO_FLIGHTS: list[FlightInventoryItem] = [
 ]
 
 SEED_FLIGHT_INVENTORY: list[FlightInventoryItem] = GOLDEN_SCENARIO_FLIGHTS + _load_extended_csv()
+
+# What this dataset can actually answer, derived from the rows themselves.
+#
+# Coverage used to be a hand-maintained country list (`SEED_BACKED_COUNTRIES`),
+# which had to be edited in lockstep with the CSV and silently went stale when
+# it wasn't. Deriving it means regenerating the CSV updates coverage for free,
+# and it answers at the granularity route matching actually uses — an airport
+# pair, not a country.
+SEED_AIRPORTS: frozenset[str] = frozenset(
+    code
+    for item in SEED_FLIGHT_INVENTORY
+    for code in (item.origin_airport, item.dest_airport)
+)
+
+SEED_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    (item.origin_airport, item.dest_airport) for item in SEED_FLIGHT_INVENTORY
+)
+
+
+def covers_route(origins: list[str] | tuple[str, ...], dests: list[str] | tuple[str, ...]) -> bool:
+    """Whether any origin/destination airport pair has rows in this dataset.
+
+    Any pair, not every pair: a traveller flying London -> Tokyo picks a city
+    served by four airports, and the trip is answerable if even one of the
+    resulting pairs is stocked.
+    """
+    return any((origin, dest) in SEED_ROUTES for origin in origins for dest in dests)
