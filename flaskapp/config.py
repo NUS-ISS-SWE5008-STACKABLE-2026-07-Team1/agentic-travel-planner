@@ -55,14 +55,41 @@ class Config:
     # role-play jailbreaks, out-of-scope requests). Set enabled=false to develop
     # offline; the deterministic L0/L1 gates keep working either way.
     GUARDRAIL_LLM_ENABLED = os.getenv("GUARDRAIL_LLM_ENABLED", "true").lower() == "true"
-    # Defaults to the planning model. Point this at the provider's small/fast
-    # tier: the classifier runs on the critical path twice per plan, and a
-    # cheaper model is usually better at this narrow task per unit of latency.
+    # Shared default for both gates; blank inherits LLM_MODEL. Point this at the
+    # provider's small/fast tier: the classifier runs on the critical path twice
+    # per plan, and a cheaper model is usually better at this narrow task per
+    # unit of latency.
     GUARDRAIL_LLM_MODEL = os.getenv("GUARDRAIL_LLM_MODEL")
+    # The two gates have opposite requirements, so each can override the shared
+    # default. Blank inherits GUARDRAIL_LLM_MODEL.
+    #
+    # INPUT runs before anything else, with the traveller waiting on a blank
+    # screen, and reads adversarial text. It wants fast and hard to talk out of
+    # its instructions — a small model, and under fail-closed its p95 latency is
+    # an availability number, not a comfort one.
+    #
+    # OUTPUT runs after roughly 75 seconds of planning, so two extra seconds is
+    # noise, and it judges our own model's prose for ungrounded claims and bias
+    # rather than fending off an attacker. It can afford nuance.
+    #
+    # Which model belongs in which slot is a measurement, not a principle:
+    # `scripts/guardrail_eval.py` reports per-gate recall, false positives on
+    # the benign half, and latency. Set these from that report.
+    GUARDRAIL_INPUT_LLM_MODEL = os.getenv("GUARDRAIL_INPUT_LLM_MODEL")
+    GUARDRAIL_OUTPUT_LLM_MODEL = os.getenv("GUARDRAIL_OUTPUT_LLM_MODEL")
     # Deliberately NOT AI_REQUEST_TIMEOUT_SECONDS. A 180-second guardrail is not
     # a guardrail: under fail-closed it converts a slow provider into a
-    # three-minute hang before the traveller is told no.
+    # three-minute hang before the traveller is told no. This one governs the
+    # INPUT gate.
     GUARDRAIL_LLM_TIMEOUT_SECONDS = float(os.getenv("GUARDRAIL_LLM_TIMEOUT_SECONDS", "8"))
+    # The output gate's own budget, INDEPENDENT of the value above: raising the
+    # input timeout does not raise this one, and vice versa. Larger because the
+    # traveller has already waited through planning by the time it runs, and
+    # because a timeout here throws away a plan that five agent calls just paid
+    # for. Still bounded — under fail-closed an unbounded gate is an outage.
+    GUARDRAIL_OUTPUT_LLM_TIMEOUT_SECONDS = float(
+        os.getenv("GUARDRAIL_OUTPUT_LLM_TIMEOUT_SECONDS", "20")
+    )
     # A "block" below this confidence is downgraded to a flag: audited, but the
     # traveller is not denied. Set it from the eval curve in
     # docs/security/guardrail-eval-report.md rather than by intuition.

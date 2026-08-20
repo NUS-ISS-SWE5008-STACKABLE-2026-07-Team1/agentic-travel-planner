@@ -47,29 +47,48 @@ class LlmGuardrail:
     def __init__(
         self, llm_settings: Mapping[str, Any] | None, *, enabled: bool = True,
         threshold: float = 0.7, fail_mode: str = "closed", llm: Any = None,
+        output_llm_settings: Mapping[str, Any] | None = None,
     ):
-        self._llm_settings = dict(llm_settings or {})
+        # One settings dict per gate. `output_llm_settings=None` means "same as
+        # input", which keeps the single-model deployment a one-liner and keeps
+        # every existing caller working.
+        output_source = llm_settings if output_llm_settings is None else output_llm_settings
+        self._gate_settings = {
+            "input": dict(llm_settings or {}),
+            "output": dict(output_source or {}),
+        }
         self._enabled = enabled
         self._threshold = threshold
         self._fail_mode = fail_mode
         self._llm = llm
-        self._structured = None
+        self._structured: dict[str, Any] = {}
 
     # -- wiring -----------------------------------------------------------
 
-    def _client(self):
-        """Build the structured client once, lazily.
+    def _client(self, gate: str):
+        """Build the structured client for one gate once, lazily.
 
         Lazily because a disabled guardrail, or one whose every verdict is a
         cache hit, should not construct a provider client at all — and because
         tests inject `llm=` directly and must never touch the network.
+
+        Per gate because input and output may run different models. An injected
+        `llm=` overrides both: a test stub stands in for the whole layer, and
+        splitting it in two would silently halve what a stub-based test covers.
         """
-        if self._structured is None:
-            client = self._llm if self._llm is not None else build_llm(**self._llm_settings)
-            self._structured = client.with_structured_output(
+        if gate not in self._structured:
+            client = (
+                self._llm if self._llm is not None
+                else build_llm(**self._gate_settings[gate])
+            )
+            self._structured[gate] = client.with_structured_output(
                 GuardrailVerdict, method="json_schema"
             )
-        return self._structured
+        return self._structured[gate]
+
+    def model_for(self, gate: str) -> str | None:
+        """Which model this gate will call. Read by the eval report and traces."""
+        return self._gate_settings.get(gate, {}).get("model")
 
     # -- public API -------------------------------------------------------
 
@@ -92,7 +111,12 @@ class LlmGuardrail:
         if not self._enabled:
             return ALLOWED
         text = text[:MAX_SCREENED_CHARS]
-        key = cache.cache_key(kind, GUARDRAIL_PROMPT_VERSION, text)
+        # The model is part of the key. Two gates now run potentially different
+        # models over the same text, and swapping a model must not serve back a
+        # verdict the previous one reached — a cached ALLOW from a stronger
+        # model would make a weaker replacement look better than it is, which
+        # is exactly the comparison the eval harness exists to make.
+        key = cache.cache_key(kind, GUARDRAIL_PROMPT_VERSION, self.model_for(kind), text)
         cached = cache.get(key)
         if cached is not None:
             return Verdict(
@@ -106,7 +130,7 @@ class LlmGuardrail:
             # Untrusted text goes in the HumanMessage, never the SystemMessage.
             # Enforced in CI by .semgrep/llm-agent.yml's
             # llm-untrusted-data-in-system-message rule.
-            raw = self._client().invoke([
+            raw = self._client(kind).invoke([
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=wrap_untrusted(text)),
             ])
@@ -176,6 +200,7 @@ class LlmGuardrail:
             threshold=float(settings.get("threshold", 0.7)),
             fail_mode=str(settings.get("fail_mode", "closed")),
             llm=llm,
+            output_llm_settings=settings.get("llm_output"),
         )
 
 
@@ -186,6 +211,11 @@ def guardrail_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     the background planning thread the same way every other setting does — via
     the `settings` dict in `jobs.submit_plan` — and because it makes the
     guardrail's whole configuration one inspectable value in tests.
+
+    Produces one settings dict per gate under `llm` (input) and `llm_output`.
+    They differ only in model and timeout; provider, credential and endpoint are
+    necessarily shared, because a second provider would mean a second credential
+    to rotate for no security benefit.
 
     Note on temperature: the guardrail deliberately does NOT force
     `temperature=0`. Several of the configured default models (the Azure
@@ -205,15 +235,27 @@ def guardrail_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     # actually see. In practice the request never gets here with a broken
     # provider — `api.py:55` already returns 503.
     llm_settings, _error = get_llm_settings(config)
+    input_settings = output_settings = None
     if llm_settings is not None:
-        llm_settings = {
-            **llm_settings,
-            "model": config.get("GUARDRAIL_LLM_MODEL") or llm_settings.get("model"),
+        # Three-step fallback per gate: the gate's own model, then the shared
+        # guardrail model, then whatever the planner uses. A deployment that
+        # sets nothing behaves exactly as it did before the split.
+        shared_model = config.get("GUARDRAIL_LLM_MODEL") or llm_settings.get("model")
+        base = {**llm_settings}
+        base.pop("temperature", None)
+        input_settings = {
+            **base,
+            "model": config.get("GUARDRAIL_INPUT_LLM_MODEL") or shared_model,
             "timeout": float(config.get("GUARDRAIL_LLM_TIMEOUT_SECONDS", 8)),
         }
-        llm_settings.pop("temperature", None)
+        output_settings = {
+            **base,
+            "model": config.get("GUARDRAIL_OUTPUT_LLM_MODEL") or shared_model,
+            "timeout": float(config.get("GUARDRAIL_OUTPUT_LLM_TIMEOUT_SECONDS", 20)),
+        }
     return {
-        "llm": llm_settings,
+        "llm": input_settings,
+        "llm_output": output_settings,
         "enabled": bool(config.get("GUARDRAIL_LLM_ENABLED", True)),
         "threshold": float(config.get("GUARDRAIL_BLOCK_THRESHOLD", 0.7)),
         "fail_mode": str(config.get("GUARDRAIL_FAIL_MODE", "closed")).lower(),

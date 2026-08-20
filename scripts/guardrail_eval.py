@@ -105,13 +105,16 @@ def main() -> int:
         cases = load_corpus(kind)
         results = evaluate(cases, guardrail=guardrail, kind=kind)
         summary = metrics(results)
-        sections.append(section(title, results, summary))
+        # The model goes in the heading, not just the summary table. The two
+        # gates can now run different models, and a section that does not name
+        # the one that produced it is a number nobody can act on.
+        sections.append(section(f"{title} — `{guardrail.model_for(kind)}`", results, summary))
         print(
-            f"  {kind}: recall {summary['recall']} · precision {summary['precision']} · "
+            f"  {kind} ({guardrail.model_for(kind)}): recall {summary['recall']} · "
+            f"precision {summary['precision']} · "
             f"L2 added {summary['attacks_caught_by_l2']} catches"
         )
 
-    model = Config.GUARDRAIL_LLM_MODEL or settings.get("model")
     body = f"""# Guardrail evaluation report
 
 Generated {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')} by `scripts/guardrail_eval.py`.
@@ -119,7 +122,9 @@ Do not edit by hand — rerun the script.
 
 | | |
 | --- | --- |
-| Provider / model | `{settings.get('provider')}` / `{model}` |
+| Provider | `{settings.get('provider')}` |
+| Input gate | `{guardrail.model_for('input')}`, {Config.GUARDRAIL_LLM_TIMEOUT_SECONDS}s timeout |
+| Output gate | `{guardrail.model_for('output')}`, {Config.GUARDRAIL_OUTPUT_LLM_TIMEOUT_SECONDS}s timeout |
 | Prompt version | `{GUARDRAIL_PROMPT_VERSION}` |
 | Block threshold | `{Config.GUARDRAIL_BLOCK_THRESHOLD}` |
 | Fail mode | `{Config.GUARDRAIL_FAIL_MODE}` |
@@ -139,9 +144,18 @@ examples in `guardrails/prompts.py` are not specific enough to this domain — a
 travel planner that refuses "halal food near a mosque" has failed at its job,
 not succeeded at safety.
 
-Latency is the cost side of the trade. Two classifier calls per plan against a
-plan the UI budgets ~75 seconds for (`static/js/app.js:349`); if p95 approaches
-a second, prefer a smaller `GUARDRAIL_LLM_MODEL` before weakening the gate.
+Latency is the cost side of the trade, and it means something different at each
+gate. The **input** gate runs before planning starts with the traveller waiting,
+and under `fail_mode=closed` a timeout is a refused request — so its p95 is an
+availability number, and it should hold a small fast model
+(`GUARDRAIL_INPUT_LLM_MODEL`). The **output** gate runs after ~75 seconds of
+planning (`static/js/app.js:349`), so a slower, more capable model
+(`GUARDRAIL_OUTPUT_LLM_MODEL`) costs almost nothing in perceived latency and is
+judging our own prose rather than an attacker's.
+
+To compare two candidates, set one gate's model and rerun: the verdict cache is
+keyed on the model, so the second run measures the second model rather than
+replaying the first one's answers.
 """
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(body, encoding="utf-8")

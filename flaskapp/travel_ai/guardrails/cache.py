@@ -23,15 +23,20 @@ _lock = threading.Lock()
 _entries: OrderedDict[str, Verdict] = OrderedDict()
 
 
-def cache_key(kind: str, prompt_version: str, text: str) -> str:
-    """Digest the judged text together with what judged it.
+def cache_key(kind: str, prompt_version: str, model: str | None, text: str) -> str:
+    """Digest the judged text together with everything that judged it.
 
     `prompt_version` is part of the key so editing the classifier instructions
     invalidates old verdicts rather than silently serving judgements made under
     different rules.
+
+    `model` is part of it for the same reason, and one more: the input and
+    output gates may run different models, and the eval harness compares models
+    over an identical corpus in a single process. Without the model in the key,
+    the second model measured would score whatever the first one decided.
     """
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return f"{kind}:{prompt_version}:{digest}"
+    return f"{kind}:{prompt_version}:{model or 'default'}:{digest}"
 
 
 def get(key: str) -> Verdict | None:
