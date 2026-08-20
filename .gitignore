@@ -15,4 +15,3 @@ instance/*.sqlite3-*
 docs/security/cicd-owner-notes.md
 docs/security/cicd-summary-for-team.md
 docs/security/cicd-status.html
-

@@ -4,14 +4,14 @@ from werkzeug.security import generate_password_hash
 
 from flaskapp import create_app
 from flaskapp.config import Config
-from flaskapp.database import SCHEMA
+from flaskapp.database import SCHEMA_SQLITE
 from flaskapp.database import initialize, save_plan
 from flaskapp.travel_ai.schemas import PlanResponse, TravelPlan, TravelRequest
 
 
 def test_schema_creates_all_application_tables():
     connection = sqlite3.connect(":memory:")
-    connection.executescript(SCHEMA)
+    connection.executescript(SCHEMA_SQLITE)
     tables = {
         row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -115,7 +115,7 @@ def test_initialize_is_idempotent_and_adds_city_columns_to_an_old_database(tmp_p
     """The upgrade path for the committed database: add columns, keep rows."""
     database = tmp_path / "legacy.sqlite3"
     with sqlite3.connect(database) as connection:
-        connection.executescript(SCHEMA)
+        connection.executescript(SCHEMA_SQLITE)
         # Simulate a pre-city database by dropping the columns back out.
         connection.execute("ALTER TABLE travel_requests DROP COLUMN origin_city")
         connection.execute("ALTER TABLE travel_requests DROP COLUMN destination_city")

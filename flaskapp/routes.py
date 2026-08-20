@@ -9,7 +9,7 @@ from uuid import UUID
 from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, session, url_for
 from werkzeug.security import generate_password_hash
 
-from flaskapp.database import authenticate_user, create_user
+from flaskapp.database import authenticate_user, create_user, get_intake_conversation
 from flaskapp.countries import COUNTRIES
 from flaskapp.places import city_options
 from flaskapp.forms import LoginForm, RegistrationForm
@@ -108,9 +108,12 @@ def main():
 @pages_bp.get("/chat/<uuid:request_id>")
 @login_required
 def chat(request_id: UUID):
+    conversation = get_intake_conversation(
+        current_app.config["DATABASE"], str(request_id), session.get("user_id")
+    )
     return render_template(
         "chat.html", user_name=session.get("user_name", "Traveller"), request_id=request_id,
-        intake_mode=False,
+        intake_mode=False, conversation=conversation,
         is_admin=is_admin_email(current_app.config, session.get("user_email")),
     )
 
