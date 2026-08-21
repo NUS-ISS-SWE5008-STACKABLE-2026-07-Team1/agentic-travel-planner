@@ -66,6 +66,8 @@ def _run_plan(request_id: str, request: TravelRequest, settings: dict,
             database_path=settings["database_path"],
             user_id=user_id,
             cancel_event=_cancel_events[request_id],
+            guardrail_settings=settings.get("guardrail"),
+            input_guardrail=settings.get("input_guardrail"),
         )
         response = service.create_plan(request, request_id=request_id)
         with _lock:
