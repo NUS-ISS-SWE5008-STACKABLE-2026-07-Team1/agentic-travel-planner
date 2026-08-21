@@ -5,7 +5,18 @@ services:
     plan: free
     # The branch Render auto-deploys on every push. Nothing requires this to be
     # main — point it at whichever branch is meant to be live.
-    branch: subbu-18Aug
+    #
+    # Changed from subbu-18Aug to release on 2026-08-20. release is the branch
+    # the team merges into and the one CI runs on, so it is the only branch we
+    # can say anything about the safety of; subbu-18Aug was one developer's
+    # feature branch that happened to be live.
+    #
+    # THIS FILE ALONE DOES NOT MOVE THE DEPLOY. Render reads render.yaml from
+    # the branch it is already watching, so a service created by hand (or still
+    # pointed at subbu-18Aug) keeps its dashboard setting. Change the branch in
+    # the Render dashboard too, or resync the blueprint. Until both agree, this
+    # line describes an intention rather than a fact.
+    branch: release
     buildCommand: pip install -r requirements.txt
     # ONE worker, deliberately. flaskapp/travel_ai/jobs.py keeps planning jobs in
     # a module-level dict, so a second worker would answer
@@ -42,3 +53,36 @@ services:
       # Supabase session pooler DSN. Set by hand in the dashboard; never here.
       - key: DATABASE_URL
         sync: false
+
+      # --- L2 guardrails (the LLM classifier) ---------------------------------
+      # Declared here rather than left to the code default (which is "true"),
+      # because the default is also fail-closed: a classifier that cannot reach
+      # the provider refuses the traveller rather than waving them through.
+      # Deployed OFF until the live local test has been run once with a real
+      # key. Flip to "true" here, or override it in the Render dashboard — the
+      # deterministic L0/L1 gates are unaffected either way.
+      - key: GUARDRAIL_LLM_ENABLED
+        value: "false"
+      # Per-gate models. These two values are CANDIDATES, not measurements —
+      # nothing has been evaluated against a real key yet. Run
+      # scripts/guardrail_eval.py and set them from the per-gate sections of
+      # docs/security/guardrail-eval-report.md.
+      #
+      # Input: small and fast. It runs before planning with the traveller
+      # waiting, and under fail-closed a timeout here is a refused request.
+      - key: GUARDRAIL_INPUT_LLM_MODEL
+        value: gpt-5-mini
+      # Output: judges our own generated prose for ungrounded claims and bias,
+      # after ~75s of planning has already elapsed. Can afford the better model.
+      - key: GUARDRAIL_OUTPUT_LLM_MODEL
+        value: gpt-5
+      # Input gate budget.
+      - key: GUARDRAIL_LLM_TIMEOUT_SECONDS
+        value: "8"
+      # Output gate budget, independent of the one above.
+      - key: GUARDRAIL_OUTPUT_LLM_TIMEOUT_SECONDS
+        value: "20"
+      - key: GUARDRAIL_BLOCK_THRESHOLD
+        value: "0.7"
+      - key: GUARDRAIL_FAIL_MODE
+        value: closed
