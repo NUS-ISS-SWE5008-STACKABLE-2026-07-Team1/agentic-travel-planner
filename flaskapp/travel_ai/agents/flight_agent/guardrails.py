@@ -118,9 +118,23 @@ TOXICITY_TERMS: dict[str, list[str]] = {
 }
 
 
+# Word-bounded, not substring. The notebook's `keyword_fallback` used a bare
+# `term in text`, which in travel content is a live false-positive source rather
+# than a theoretical one: "kill" fires on Kilimanjaro, "die" on diet and on
+# Dieppe, "hate" on whatever contains it. Every term is matched as a whole word
+# instead. Multi-word terms ("destroy them", "all women") are unaffected —
+# \b anchors the ends of the phrase, not each word inside it.
+_TOXICITY_PATTERNS: dict[str, list[re.Pattern]] = {
+    label: [re.compile(rf"\b{re.escape(term)}\b", re.IGNORECASE) for term in terms]
+    for label, terms in TOXICITY_TERMS.items()
+}
+
+
 def detect_toxicity(text: str) -> dict[str, Any]:
-    lower = text.lower()
-    flagged_labels = sorted(label for label, terms in TOXICITY_TERMS.items() if any(term in lower for term in terms))
+    flagged_labels = sorted(
+        label for label, patterns in _TOXICITY_PATTERNS.items()
+        if any(pattern.search(text) for pattern in patterns)
+    )
     return {"flagged": bool(flagged_labels), "labels": flagged_labels}
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from flaskapp.travel_ai.graph import SPECIALISTS, build_travel_graph
+from flaskapp.travel_ai.guardrails import LlmGuardrail
 from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.a2a import request_message
 from flaskapp.travel_ai.safeguards import assess_plan
@@ -19,7 +20,8 @@ class TravelPlanningService:
                  endpoint: str | None = None, api_version: str | None = None,
                  base_url: str | None = None,
                  database_path: Path | str | None = None, user_id: int | None = None,
-                 cancel_event=None):
+                 cancel_event=None, guardrail_settings: dict | None = None,
+                 input_guardrail: dict | None = None):
         self.api_key = api_key
         self.provider = provider
         self.endpoint = endpoint
@@ -32,6 +34,12 @@ class TravelPlanningService:
         self.database_path = database_path
         self.user_id = user_id
         self.cancel_event = cancel_event
+        # The input gate already ran at the HTTP boundary; its verdict is
+        # carried here only so the trace shows it. The output gate is
+        # constructed from the same settings so both ends of the request agree
+        # about which model and threshold are in force.
+        self.guardrail_settings = guardrail_settings
+        self.input_guardrail = input_guardrail
 
     def create_plan(self, request: TravelRequest, request_id: str | None = None) -> PlanResponse:
         correlation_id = uuid4() if request_id is None else UUID(request_id)
@@ -43,12 +51,20 @@ class TravelPlanningService:
             "has_accessibility_needs": bool(request.accessibility_needs),
             "preference_count": len(request.preferences),
         })
+        if self.input_guardrail:
+            tracer.record("guardrail_llm_verdict", "system", {
+                "gate": "input", **self.input_guardrail,
+            })
         llm = build_llm(
             provider=self.provider, api_key=self.api_key, model=self.model,
             temperature=self.temperature, timeout=self.timeout, endpoint=self.endpoint,
             api_version=self.api_version, base_url=self.base_url,
         )
-        graph = build_travel_graph(llm, tracer, self.cancel_event)
+        guardrail = (
+            LlmGuardrail.from_settings(self.guardrail_settings)
+            if self.guardrail_settings else None
+        )
+        graph = build_travel_graph(llm, tracer, self.cancel_event, guardrail)
         messages = [
             request_message(
                 correlation_id=correlation_id,
