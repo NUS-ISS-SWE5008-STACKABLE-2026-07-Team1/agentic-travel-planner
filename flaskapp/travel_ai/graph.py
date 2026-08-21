@@ -13,8 +13,13 @@ from flaskapp.travel_ai.cancellation import PlanningCancelled
 SPECIALISTS = tuple(SPECIALIST_NODE_FACTORIES)
 
 
-def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None):
-    """Compile a fan-out/fan-in graph: four specialists feed one orchestrator."""
+def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None, guardrail=None):
+    """Compile a fan-out/fan-in graph: four specialists feed one orchestrator.
+
+    `guardrail` is the L2 classifier, passed to the orchestrator so the final
+    plan is screened before it reaches the traveller. None disables that gate;
+    the deterministic checks in `assess_plan` run either way.
+    """
     # CUSTOMIZE THE LANGGRAPH WORKFLOW HERE.
     # Current design: START -> all four specialists in parallel -> orchestrator -> END.
     # Add conditional edges here if an agent should run only for certain requests.
@@ -30,7 +35,7 @@ def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None):
             return result
         workflow.add_node(name, cancellable_specialist)
         workflow.add_edge(START, name)
-    orchestrator = create_orchestrator_node(llm, tracer)
+    orchestrator = create_orchestrator_node(llm, tracer, guardrail)
     def cancellable_orchestrator(state):
         if cancel_event and cancel_event.is_set():
             raise PlanningCancelled("Planning was cancelled")

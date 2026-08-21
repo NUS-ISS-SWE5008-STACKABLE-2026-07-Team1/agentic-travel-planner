@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from flaskapp.travel_ai.guardrails.fields import collect_free_text
+from flaskapp.travel_ai.guardrails.types import Decision, Verdict
 from flaskapp.travel_ai.schemas import AgentFinding, SafetyAssessment, TravelPlan, TravelRequest
 
 PROMPT_INJECTION = re.compile(
@@ -31,13 +33,53 @@ class SafetyError(ValueError):
     """Raised when a request violates an enforceable safety boundary."""
 
 
-def screen_prompt(text: Any, max_chars: int) -> str:
+class GuardrailBlocked(SafetyError):
+    """Raised when the L2 classifier blocks. Carries the verdict for auditing.
+
+    A subclass rather than a new exception type so every existing
+    `except SafetyError` — the 422 handlers in `api.py:73,91,110` among them —
+    keeps working unchanged and the traveller sees the same response shape.
+    """
+
+    def __init__(self, message: str, verdict: Verdict):
+        super().__init__(message)
+        self.verdict = verdict
+
+
+# Deliberately vague, and the same sentence for every category. A classifier
+# that explains which rule it tripped is a free oracle for tuning an attack
+# against it; the specific reason goes to the audit trail instead, where the
+# operator can see it and the attacker cannot.
+_BLOCKED_MESSAGE = "This request could not be processed. Please rephrase your travel details."
+
+
+def _apply_l2(texts: list[str], guardrail: Any) -> Verdict | None:
+    """Run the L2 classifier over already L0/L1-clean text.
+
+    Returns the verdict (ALLOW or FLAG) so the caller can record it, and raises
+    on BLOCK. A FLAG is deliberately not an error: it is a low-confidence
+    suspicion that belongs in the trace, not a denial served to a traveller.
+    """
+    if guardrail is None:
+        return None
+    verdict = guardrail.screen_input(texts)
+    if verdict.decision is Decision.BLOCK:
+        raise GuardrailBlocked(_BLOCKED_MESSAGE, verdict)
+    return verdict
+
+
+def screen_prompt(text: Any, max_chars: int, guardrail: Any = None) -> str:
     """Screen free-text intake before it reaches the model.
 
     `validate_request` only sees preferences, accessibility needs and refinement
     notes, none of which exist yet when a traveller types their trip in prose.
     That makes the intake prompt a separate injection surface, so it is screened
     on its own and before any model call rather than after one.
+
+    L2 runs last and only on text the deterministic checks already cleared, so
+    an oversized or obviously-injected prompt is still rejected without an API
+    call. This surface needs L2 most: it is unconstrained prose, where the
+    four literal patterns in `PROMPT_INJECTION` have the least purchase.
     """
     if not isinstance(text, str) or not text.strip():
         raise SafetyError("A travel request message is required")
@@ -45,6 +87,7 @@ def screen_prompt(text: Any, max_chars: int) -> str:
         raise SafetyError("Request is too large")
     if PROMPT_INJECTION.search(text):
         raise SafetyError("Instruction-like text was detected in the message")
+    _apply_l2([text], guardrail)
     return text.strip()
 
 
@@ -59,17 +102,41 @@ def screen_answers(answers: Any) -> dict[str, Any]:
 
 
 def validate_request(payload: dict[str, Any], max_chars: int) -> TravelRequest:
-    """Reject oversized, injected, or explicitly sensitive ranking inputs."""
+    """Reject oversized, injected, or explicitly sensitive ranking inputs.
+
+    L0 and L1 only. The L2 classifier is a separate call — `screen_request_l2`
+    — so that this function stays what it has always been: the deterministic
+    gate, testable and reviewable without a model anywhere near it.
+    """
     if len(str(payload)) > max_chars:
         raise SafetyError("Request is too large")
     forbidden = SENSITIVE_KEYS.intersection(payload)
     if forbidden:
         raise SafetyError(f"Unsupported sensitive fields: {', '.join(sorted(forbidden))}")
     request = TravelRequest.model_validate(payload)
-    text_fields = request.preferences + request.accessibility_needs + request.refinement_notes
-    if any(PROMPT_INJECTION.search(value) for value in text_fields):
+    # `collect_free_text` covers the city names and per-traveller accessibility
+    # needs too, which the old inline concatenation missed — see the note in
+    # `guardrails/fields.py`.
+    if any(PROMPT_INJECTION.search(value) for value in collect_free_text(
+        request.model_dump(mode="json")
+    )):
         raise SafetyError("Instruction-like text was detected in request fields")
     return request
+
+
+def screen_request_l2(request: TravelRequest, guardrail: Any = None) -> Verdict | None:
+    """Semantic screening of an already L0/L1-clean request.
+
+    Returns None when no classifier was supplied, otherwise an ALLOW or FLAG
+    verdict; a BLOCK raises `GuardrailBlocked`. The verdict is returned rather
+    than discarded so the caller can record it — a trace showing the classifier
+    ran and allowed is as much evidence as one showing it blocked.
+
+    Kept separate from `validate_request` on purpose. The deterministic gate
+    runs first and can reject on its own, so this only ever costs an API call
+    for input that is already structurally sound and syntactically clean.
+    """
+    return _apply_l2(collect_free_text(request.model_dump(mode="json")), guardrail)
 
 
 def ungrounded_agents(findings: list[AgentFinding]) -> list[str]:
