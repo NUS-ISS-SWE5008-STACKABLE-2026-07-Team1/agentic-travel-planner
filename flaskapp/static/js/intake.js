@@ -258,11 +258,9 @@ if (intentForm) {
       promptInput.focus();
     }
   }
-  document.querySelector("#intake-home")?.addEventListener("click", async (event) => {
-    event.preventDefault();
-    await endSession();
-    window.location.assign(event.currentTarget.href);
-  });
+  // Keep Home as a normal link. The pagehide handler below sends the session
+  // cleanup request with `keepalive`, so navigation must not wait for that
+  // request to finish (or a slow response can leave the user stuck here).
   window.addEventListener("pagehide", () => {
     if (!sessionHandoff) endSession();
   });
