@@ -31,6 +31,179 @@ never actually being committed.
 
 # Part A — Session log
 
+## 2026-08-23 — Agentic Flight Agent refactor: Path 2 fabrication fix, plus Phases A and B
+
+**Goal:** start the agentic Flight Agent refactor — make the *process* agentic
+(the model chooses what to search, how to rank, when to relax) while keeping the
+guarantee that every flight traces back to a real tool call. Delivered the
+fabrication fix, then Phases A and B. The loop itself (Phase C) is not started.
+
+### Two premises that turned out to be wrong
+
+Worth recording because both changed the plan:
+
+1. **Relaxation was already an explicit, verified model decision.** `reasoning.py:231`
+   — the LLM proposes, `domain.relaxation_is_valid()` re-checks against real gaps,
+   only then is a second search run. There was no silent code decision to make
+   explicit. A `relax_constraint` tool is re-plumbing, not new capability.
+
+2. **On seed, an agentic loop reclaims *zero* Path 2, because dates never cause
+   Path 2.** `covers_route()` is route-only and date-blind and `fetch()` returns
+   all 284 rows regardless, so an unstocked *date* on a stocked route yields
+   Path 1 with an empty candidate list — honest, and with nothing fabricated.
+   Path 2 fires only for an unstocked *airport pair*, i.e. (since every seed row
+   has SIN at one end) any trip not touching Singapore. `design.md` §2 claimed
+   otherwise and has been corrected.
+
+   Consequence: the loop's real seed-side win is **empty → populated**, not
+   fabricated → grounded, and the fabrication problem needed its own fix. Hence
+   this session.
+
+### What changed
+
+`design.md` §3's option 3, adopted and enforced in code. `agent.py` now passes the
+`preflight`/`postprocess` hooks that `make_specialist_node` has always accepted and
+this call site had never used — which closes two gaps at once:
+
+| Gap | Before | Now |
+|---|---|---|
+| Input screening on Path 2 | none | `make_preflight(NAME)` — blocked text never reaches the model |
+| Output screening on Path 2 | none | `make_postprocess(NAME)` — flagged prose replaced wholesale |
+| Concrete invented flights | reached the traveller in `options` | `_forbid_concrete_options` empties `options`, appends `NO_CONCRETE_OPTIONS_WARNING` |
+| Prompt | `INSTRUCTION` (asks for options) | `PATH2_INSTRUCTION` (asks for route-level guidance, forbids specifics) |
+
+`ESTIMATE_WARNING` was deliberately left byte-identical: it carries the substring
+`safeguards.UNVERIFIED_OPTIONS_MARKER` matches on, and `enforce_provenance_disclosure`
+depends on it. Stripping options *and* that warning would have silently disabled the
+plan-level disclosure — the subtlest trap in this change, and now held shut by a test.
+
+Applied to **`hotel_transport_agent` in the same change**. The two modules are
+near-duplicates and this log already records a guardrail fix that had to be applied
+twice because one was missed.
+
+### Tests
+
+- `tests/test_flight_path2_screening.py` (7) — the regression suite §8 asked for.
+- `tests/test_agent_parity.py` (5 × 2 agents) — fails if either agent regains the gap alone.
+
+Both were **verified to fail against the un-wired node** before being kept: 5 of 7
+and 1 of 10 respectively. A regression test that passes without the fix is not one.
+
+510 → 527 passing, 8 skipped. Semgrep `--error` clean (0 findings, 7 rules), so
+`.semgrep/llm-agent.yml`'s "every rule reports zero findings" promise still holds.
+
+### Also fixed
+
+- `pytest.ini` had a stray `/` before `[pytest]` in the working tree, which made
+  the entire suite un-runnable. Reverted to match `HEAD`.
+- `flight_agent/__init__.py` and `flight_agent/prompt.py` both still claimed
+  `agent.py` "does not call the deterministic layer yet" — false since `agent.py:240`,
+  and badly misleading about the architecture.
+- `design.md` §2 (the Path 2 trigger claim), §3 (decision recorded), §6 (coverage
+  table), §8 (open items closed).
+
+### Phase A — the three tools, extracted behind the existing single-shot call
+
+No loop yet, no langchain, no behaviour change. The point of this phase is that
+the pieces become individually callable while `propose_flights` keeps producing
+byte-identical output.
+
+- **`domain.py`**: the hand-written 6-tuple in `_rank_key` is now assembled from
+  named `RANK_COMPONENTS` in a caller-supplied order, and `rank_leg()` is public.
+  `normalise_priority()` enforces three rules so a model-supplied order cannot do
+  damage: unknown names are dropped rather than raised on, omitted components are
+  **appended** (the key stays a total order, so ranking can never become
+  nondeterministic), and `cost` is always terminal because it is the only
+  always-defined continuous tiebreaker.
+- **`agents/loop.py`** (new, agent-neutral, zero flight imports): `LoopBudget` and
+  `InventoryCache`. Written flight-free from the start so Hotel can adopt it as a
+  dependency rather than a copy — the divergence this log already records once.
+- **`flight_agent/tools.py`** (new, langchain-free): `search_flights`,
+  `rank_flights`, `relax_constraint`, the argument envelope, `TOOL_SPECS`,
+  `dispatch`.
+- **`is_static`** added to the provider protocol. Seed returns its whole dataset
+  regardless of the request, so the cache collapses every key to one and repeated
+  searching is provably free — previously true, but only as folklore.
+
+**One planned step deliberately skipped.** The plan had `reasoning.py` route its
+relaxation through `tools.relax_constraint`. On reading the code the rationale
+does not hold: both already delegate to the same three `domain.py` functions, so
+there is no duplicated logic to drift. `reasoning.py` takes a plain inventory list
+and has no provider, so routing it through a `ToolContext` would mean inventing a
+fake static provider purely to satisfy a shape — indirection with no behavioural
+gain, against the tests that are this phase's gate.
+
+### Phase B — provenance ledger and budgets, still single-shot
+
+Wired and enforced *before* the loop exists to stress them, so the exhaustion
+branches are live and tested rather than written alongside their first caller.
+
+- **`validate_grounded_ids(mentioned, known_ids)`** added;
+  `validate_grounded_explanation` is now a wrapper over it with unchanged
+  behaviour and no call-site changes. The split exists because a multi-step agent
+  needs a wider notion of "real" than one proposal: a flight found in the first
+  search and ranked out of the final list *is* grounded, and checking against the
+  proposal alone would reject a true statement.
+- **`InventoryCache.seen_ids`** is that wider set. It is populated inside
+  `rows_for` and nowhere else — if tools could register ids, the guarantee would
+  depend on every tool remembering to, and the one that forgot would be the hole.
+  Tested directly (`test_tools_cannot_widen_the_ledger`).
+- **`FLIGHT_AGENT_*` config**: mode, LLM turns, tool calls, provider calls, loop
+  deadline, date-shift width. Defaults reproduce today's behaviour exactly, and a
+  test asserts that.
+- **`LoopBudget.fresh()`**: limits resolve once at node construction, spend is per
+  request. Without it one traveller spends the next traveller's searches — the
+  regression `test_node_budget_does_not_leak_between_requests` was verified to
+  catch.
+- **`agent_budget_exhausted`** traced with counts only. The cache reports it
+  through a callback, so `loop.py` stays free of any notion of a tracer or an
+  agent.
+
+Note for whoever sizes these later: `max_provider_calls` bounds calls to
+`fetch`, **not** supplier searches. `duffel.fetch` fans out over airport pairs and
+can issue up to four billed POSTs per call, so 2 can mean 8 billed searches. Left
+named for what the cache can actually observe, and documented at the setting.
+
+### Tests
+
+510 → 618 passing, 8 skipped. Semgrep `--error` clean throughout (0 findings,
+7 rules).
+
+| File | Cases | Guards |
+|---|---|---|
+| `test_flight_path2_screening.py` | 7 | the fabrication regression §8 asked for |
+| `test_agent_parity.py` | 10 | flight and hotel cannot diverge again |
+| `test_flight_rank_priority.py` | 29 | default order is byte-identical; permutations stay total orders |
+| `test_flight_tools.py` | 25 | tool/pipeline equivalence, the envelope, caching, single-fetch |
+| `test_flight_provenance.py` | 14 | what counts as a real id, and who may widen the set |
+| `test_flight_loop_budget.py` | 15 | every limit degrades, none raises |
+| `test_flight_imports.py` | 8 | the grounding layer stays langchain-free |
+
+`test_flight_imports.py` is worth a note: the obvious runtime version of that
+check (import in a subprocess, look for langchain in `sys.modules`) **does not
+work**, because importing any submodule of `agents` first runs its `__init__.py`,
+which imports every specialist factory and therefore `langchain_openai`. Even
+stdlib-only `loop.py` "failed" it. Rewritten as a static AST check of each
+module's own imports, which is the property actually intended, with two tests
+proving the detector can fail.
+
+### Still open
+
+- **Phase C — the loop itself**, in a new `flight_agent/agentic.py`: the only
+  module in the package that may import langgraph. A subgraph inside the flight
+  node, not `tools_condition` on the top-level graph, which is a fan-out/fan-in
+  with a barrier edge and no conditional edges. Terminating in a structured turn
+  so the output contract stays a validated Pydantic object.
+- Seed expansion to ~500 rows / two hubs, so non-Singapore trips can be grounded
+  at all. Only *new* routes may be added: an extra row on an existing SIN route
+  would reorder a golden scenario.
+- `design.md` §3 option 1's presentational half — estimated output is still
+  distinguished only by a warning list, not visually.
+- `agent_relaxation_applied` still records `relaxation.reason`, model-generated free
+  text in an audit trail that is supposed to hold counts, not content.
+
+---
+
 ## 2026-08-20 — L2 guardrails rebased onto `release`; deployed off by default
 
 **Goal:** get the LLM guardrail layer built on 2026-08-16 onto the branch the
