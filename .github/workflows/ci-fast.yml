@@ -124,6 +124,34 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    # ---- The deployed dialect --------------------------------------------
+    # Ported from the retired security.yml, where Subbu added it alongside the
+    # Supabase/Postgres migration. Keeping it matters more than it looks:
+    # tests/test_database_postgres.py skips itself unless TEST_DATABASE_URL is
+    # set, so without this service those tests SKIP rather than fail. The run
+    # stays green, the count quietly drops, and the database we actually deploy
+    # to goes untested — the same silent-pass shape as the gitleaks step that
+    # never ran and the ZAP scan that was never logged in.
+    #
+    # Local runs stay SQLite-only by design. This job is the only place the
+    # Postgres code paths execute before production.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: travel_planner_test
+        ports:
+          - 5432:5432
+        # Without the health check the steps race the container and fail
+        # intermittently on a cold runner.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -147,11 +175,40 @@ jobs:
       # BLOCKING. These are the deterministic controls around a probabilistic
       # model (safeguards, guardrails, bias audit, golden scenarios).
       #
-      # `-m "not live"` depends on the marker registered by backlog item 10
-      # (tests/conftest.py + pytest.ini). Harmless before item 10 lands —
-      # pytest treats an unknown marker filter as "select everything".
+      # `-m "not live"` deselects tests/adversarial/test_live_eval.py, the only
+      # tests that call a real provider. The marker is registered in pytest.ini
+      # (item 10, landed 2026-08-20); before that file existed the filter
+      # worked only by accident, because pytest treats an unknown marker filter
+      # as "select everything". The live evaluation is also gated a second time
+      # on GUARDRAIL_LIVE_EVAL=1, so losing this flag cannot start billing CI.
+      # TEST_DATABASE_URL is the switch that turns the Postgres suite on.
+      # Unset locally, so a developer's run stays offline and SQLite-only; set
+      # here, so the dialect that ships is never untested. psycopg is already
+      # in requirements.txt.
       - name: Run pytest
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/travel_planner_test
         run: python -m pytest -q -m "not live" --junitxml=pytest-report.xml
+
+      # Guards the port itself. Drop the service or the env var and the
+      # Postgres tests go back to skipping in silence; this turns that into a
+      # failure. Checks for a NON-ZERO count of executed Postgres tests, not
+      # merely for the absence of skips — "no such tests" and "tests skipped"
+      # are the same failure from our point of view.
+      #
+      # One line on purpose: a shell heredoc nested inside a YAML block scalar
+      # is exactly the kind of thing that silently mangles itself.
+      - name: Confirm the Postgres suite actually ran
+        if: always()
+        run: >-
+          python -c "import xml.etree.ElementTree as ET, sys;
+          r = ET.parse('pytest-report.xml').getroot();
+          s = r if r.tag == 'testsuite' else r[0];
+          pg = [c for c in s.iter('testcase') if 'postgres' in (c.get('classname') or '')];
+          sk = [c for c in pg if c.find('skipped') is not None];
+          print('postgres tests found: %d, skipped: %d' % (len(pg), len(sk)));
+          sys.exit(0) if pg and not sk else
+          (print('::error::Postgres suite did not run. TEST_DATABASE_URL or the service container is missing, so the database we deploy to went untested.') or sys.exit(1))"
 
       - name: Upload test report
         if: always()

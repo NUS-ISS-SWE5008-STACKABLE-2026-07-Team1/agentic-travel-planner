@@ -44,21 +44,66 @@
     <section class="container planner-wrap pb-5">
       <div class="card planner-card border-0 shadow-lg">
         <div class="card-body p-4 p-lg-5">
+          <form id="intent-form"
+                data-chat-url="{{ url_for('pages.intake_chat') }}">
+            <label class="form-label h5" for="intent-prompt">Tell me about your trip</label>
+            <textarea class="form-control form-control-lg" id="intent-prompt" name="prompt" rows="3"
+                      maxlength="2000" required
+                      placeholder="For example: Two of us want to fly from Singapore to Tokyo from 10–17 October with a SGD 4,000 budget."></textarea>
+            <div class="d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-3 mt-3">
+              <p class="small text-body-secondary mb-0">The orchestrator checks your brief and asks follow-up questions before planning begins.</p>
+              <button class="btn btn-primary btn-lg px-5" type="submit"><span class="button-label">Start planning</span><span class="spinner-border spinner-border-sm ms-2 d-none" aria-hidden="true"></span></button>
+            </div>
+          </form>
+          <div id="intent-conversation" class="intent-conversation mt-4" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <details id="manual-planner" class="manual-planner mt-4">
+        <summary class="h6 mb-0">Prefer to fill in a form instead?</summary>
+        <div class="card border-0 shadow-sm mt-3">
+        <div class="card-body p-4 p-lg-5">
           <form id="travel-plan-form" data-endpoint="{{ url_for('travel_api.create_travel_plan') }}">
             <div class="row g-4">
               <div class="col-md-6">
-                <label class="form-label" for="origin">Flying from</label>
-                <select class="form-select form-select-lg placeholder-select" id="origin" name="origin" required>
-                  <option value="" {% if not user_country %}selected{% endif %} disabled>Select departure country</option>
-                  {% for country in countries %}<option value="{{ country }}" {% if country == user_country %}selected{% endif %}>{{ country }}</option>{% endfor %}
-                </select>
+                <fieldset>
+                  <legend class="form-label mb-2">Flying from</legend>
+                  <div class="row g-2">
+                    <div class="col-12">
+                      <label class="visually-hidden" for="origin">Departure country</label>
+                      <select class="form-select form-select-lg placeholder-select" id="origin" name="origin" required>
+                        <option value="" {% if not user_country %}selected{% endif %} disabled>Select departure country</option>
+                        {% for country in countries %}<option value="{{ country }}" {% if country == user_country %}selected{% endif %}>{{ country }}</option>{% endfor %}
+                      </select>
+                    </div>
+                    <div class="col-12">
+                      <label class="visually-hidden" for="origin_city">Departure city</label>
+                      <select class="form-select placeholder-select" id="origin_city" name="origin_city" data-country-for="origin" required disabled>
+                        <option value="" selected disabled>Select a country first</option>
+                      </select>
+                    </div>
+                  </div>
+                </fieldset>
               </div>
               <div class="col-md-6">
-                <label class="form-label" for="destination">Destination</label>
-                <select class="form-select form-select-lg placeholder-select" id="destination" name="destination" required>
-                  <option value="" selected disabled>Select destination country</option>
-                  {% for country in countries %}<option value="{{ country }}">{{ country }}</option>{% endfor %}
-                </select>
+                <fieldset>
+                  <legend class="form-label mb-2">Destination</legend>
+                  <div class="row g-2">
+                    <div class="col-12">
+                      <label class="visually-hidden" for="destination">Destination country</label>
+                      <select class="form-select form-select-lg placeholder-select" id="destination" name="destination" required>
+                        <option value="" selected disabled>Select destination country</option>
+                        {% for country in countries %}<option value="{{ country }}">{{ country }}</option>{% endfor %}
+                      </select>
+                    </div>
+                    <div class="col-12">
+                      <label class="visually-hidden" for="destination_city">Destination city</label>
+                      <select class="form-select placeholder-select" id="destination_city" name="destination_city" data-country-for="destination" required disabled>
+                        <option value="" selected disabled>Select a country first</option>
+                      </select>
+                    </div>
+                  </div>
+                </fieldset>
               </div>
               <div class="col-md-3"><label class="form-label" for="departure_date">Depart</label><input class="form-control" type="date" id="departure_date" name="departure_date" required></div>
               <div class="col-md-3"><label class="form-label" for="return_date">Return</label><input class="form-control" type="date" id="return_date" name="return_date" required></div>
@@ -71,7 +116,7 @@
                     <span class="small text-body-secondary">Add up to 20 travelers.</span>
                     <button class="btn btn-outline-primary btn-sm" id="add-traveler" type="button">+ Add traveler</button>
                   </div>
-                  <p class="small text-body-secondary">Age and gender selection are required for each traveler.</p>
+                  <p class="small text-body-secondary">Age and gender are required. Each traveler can also add preferences and accessibility needs in one free-text field.</p>
                   <div id="traveler-details" class="row g-3" aria-live="polite"></div>
                 </fieldset>
               </div>
@@ -83,7 +128,8 @@
             </div>
           </form>
         </div>
-      </div>
+        </div>
+      </details>
       <div id="plan-result" class="mt-4" aria-live="polite"></div>
       <section id="refinement-panel" class="card border-0 shadow-sm mt-4 d-none" aria-labelledby="refinement-heading">
         <div class="card-body p-4">
@@ -99,7 +145,13 @@
       </section>
     </section>
   </main>
+  <!-- Country -> cities for the dependent selects. A data block, not a script:
+       it is never executed, so it needs no CSP allowance and cannot be a
+       script-injection vector. app.js reads it by id. -->
+  <script type="application/json" id="country-options">{{ countries | tojson }}</script>
+  <script type="application/json" id="city-options">{{ city_options | tojson }}</script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/intake.js') }}"></script>
 </body>
 </html>

@@ -15,8 +15,20 @@ class TravelRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    # `origin`/`destination` are COUNTRIES and remain the fields of record:
+    # they are NOT NULL in `travel_requests`, the admin dashboard queries them,
+    # and Risk & Advisory reasons at country granularity (visas, advisories).
+    # The city fields are additive so every request predating city intake —
+    # stored rows, golden scenarios, the bias audit — stays valid unchanged.
     origin: str = Field(min_length=2, max_length=100)
     destination: str = Field(min_length=2, max_length=100)
+    # City names as displayed in `flaskapp/places.py`, which the form posts
+    # alongside the country. Left unvalidated against that dataset on purpose:
+    # an unknown city is reported as unroutable by the flight adapter, in
+    # keeping with "no route" being an answer the orchestrator can negotiate
+    # around rather than an exception it has to catch.
+    origin_city: str | None = Field(default=None, min_length=2, max_length=100)
+    destination_city: str | None = Field(default=None, min_length=2, max_length=100)
     departure_date: date
     return_date: date
     travellers: int = Field(default=1, ge=1, le=20)

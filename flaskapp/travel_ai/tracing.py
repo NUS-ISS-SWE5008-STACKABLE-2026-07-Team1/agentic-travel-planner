@@ -15,12 +15,16 @@ _lock = threading.Lock()
 class AuditTracer:
     """Append agent lifecycle events with a hash chain for accountability."""
 
-    def __init__(self, trace_dir: Path, request_id: str, database_path: Path | None = None):
+    def __init__(self, trace_dir: Path, request_id: str, database_path: Path | str | None = None):
         self.path = trace_dir / f"{request_id}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.request_id = request_id
         self._previous_hash = "GENESIS"
         self.database_path = database_path
+        if self.path.is_file():
+            lines = [line for line in self.path.read_text(encoding="utf-8").splitlines() if line]
+            if lines:
+                self._previous_hash = json.loads(lines[-1]).get("hash", "GENESIS")
 
     def record(self, event: str, agent: str, details: dict[str, Any] | None = None) -> None:
         # Do not record prompts, API keys, or raw personal data in production traces.
