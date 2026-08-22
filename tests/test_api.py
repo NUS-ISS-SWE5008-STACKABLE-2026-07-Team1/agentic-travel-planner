@@ -220,6 +220,18 @@ def test_intake_chat_requires_login_and_hosts_orchestrator_clarification():
     assert b"/api/v1/travel-intents/resolve" in response.data
 
 
+def test_main_page_provides_country_options_required_by_intake_script():
+    client = create_app(TestConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_name"] = "Alicia"
+
+    response = client.get("/main")
+
+    assert response.status_code == 200
+    assert b'id="country-options"' in response.data
+
+
 def test_admin_button_is_available_on_both_chat_modes():
     client = create_app(TestConfig).test_client()
     with client.session_transaction() as session:
