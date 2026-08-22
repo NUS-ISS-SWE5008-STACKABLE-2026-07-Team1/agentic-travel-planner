@@ -1,8 +1,9 @@
 # Flight Agent — design notes
 
-Written 2026-08-16. Describes the agent **as it is today**; the guardrail
-refactor sketched in §7 is proposed, not built. No code was changed to produce
-this document.
+Written 2026-08-16. Updated 2026-08-23: §2's account of when Path 2 fires was
+wrong, and §3's fabricated-options problem has since been fixed — both are
+corrected below and the changes are marked. The guardrail refactor sketched in
+§7 is still proposed, not built.
 
 Sources: `flaskapp/travel_ai/agents/flight_agent/` (agent.py, reasoning.py,
 domain.py, guardrails.py), `flaskapp/travel_ai/agents/base.py`,
@@ -77,10 +78,19 @@ untrusted-data labelling in `base.py:61-73`, and the pydantic schema.
 
 Whenever `provider.covers()` is false or the fetch returns nothing:
 
-- an origin the inventory doesn't stock,
-- dates outside the dataset's window,
+- an airport pair the inventory doesn't stock,
 - an unroutable country or city,
 - a live Duffel search that failed, timed out, or came back empty.
+
+**Correction (2026-08-23): dates do NOT send a request down Path 2 on the seed
+provider.** `SeedInventoryProvider.covers()` delegates to `seed_data.covers_route()`,
+which tests `(origin, dest) in SEED_ROUTES` and never looks at a date; `fetch()`
+then returns all 284 rows unconditionally, and date filtering happens later in
+`domain._screen_item`. So a stocked route with an unstocked date takes **Path 1
+with an empty candidate list**, which `_coverage_warnings` labels honestly — not
+Path 2, and with nothing fabricated. Path 2 on seed fires if and only if the
+airport pair is unstocked, which (since every seed row has SIN at one end) means
+any trip that does not touch Singapore.
 
 Per `docs/progress.md` §6 the seed dataset is **284 rows, SIN-origin only, dates
 2026-08-24 → 2026-10-08**. On the default `FLIGHT_INVENTORY_SOURCE=seed`, any
@@ -158,6 +168,47 @@ the first thing a reader will press on. Three defensible positions:
 Option 3 is the one worth considering: nearly all the value of Path 2 is in the
 guidance, and nearly all the risk is in the fabricated specifics.
 
+### Decision (2026-08-23): option 3, adopted and enforced
+
+`agent.py` now builds its fallback node with both hooks
+`make_specialist_node` has always accepted and this call site never used:
+
+```python
+prompt_only_node = make_specialist_node(
+    NAME, PATH2_INSTRUCTION, llm, tracer,
+    preflight=make_preflight(NAME),
+    postprocess=_forbid_concrete_options(NAME, tracer),
+)
+```
+
+That single change closes both gaps at once — §6's empty "Path 2" column and this
+section's fabricated options:
+
+- **Input screening** now runs before the model is called, so blocked text never
+  reaches it.
+- **Output screening** runs on the generated prose, replacing a flagged finding
+  wholesale.
+- **`_forbid_concrete_options`** then empties `options` and appends
+  `NO_CONCRETE_OPTIONS_WARNING`. `PATH2_INSTRUCTION` asks the model for
+  route-level guidance and forbids specifics, but the prompt is only the intent
+  — the postprocess is the guarantee.
+
+`ESTIMATE_WARNING` is deliberately left untouched: it carries the substring
+`safeguards.UNVERIFIED_OPTIONS_MARKER` matches on, and
+`enforce_provenance_disclosure` depends on it. Stripping the options *and* the
+warning would silently disable the plan-level disclosure — a trap
+`tests/test_flight_path2_screening.py::test_path2_disclosure_survives_the_option_strip`
+now holds shut.
+
+Applied to `hotel_transport_agent` in the same change: the two modules are
+near-duplicates, and `docs/progress.md` records that the last guardrail fix had
+to be applied twice because one was missed. `tests/test_agent_parity.py` now
+fails if either agent regains the gap alone.
+
+Still open from the options above: option 1's presentational half — making
+estimated output visually distinct in the UI, rather than distinguished only by
+a warning list.
+
 ---
 
 ## 4. The relaxation fence ("option B")
@@ -199,11 +250,13 @@ Trace details are **counts, not content** — `injection_count`, `high_bias_coun
 
 ## 6. Guardrail coverage today — summary
 
+Updated 2026-08-23 — the Path 2 column was the gap; it is now closed.
+
 | | Path 1 (grounded) | Path 2 (prompt-only) |
 | --- | --- | --- |
-| Input injection / bias / toxicity | ✅ pre-model | ❌ none |
-| Output bias / toxicity | ✅ | ❌ none |
-| Grounding (invented flight IDs) | ✅ | ❌ inapplicable |
+| Input injection / bias / toxicity | ✅ pre-model | ✅ pre-model (`make_preflight`) |
+| Output bias / toxicity | ✅ | ✅ (`make_postprocess`) |
+| Grounding (invented flight IDs) | ✅ | ✅ n/a — concrete options are stripped |
 | Structured output schema | ✅ | ✅ |
 | `SYSTEM_POLICY` + untrusted-data labelling | ✅ | ✅ |
 | Unverified-data disclosure | n/a | ✅ forced |
@@ -241,10 +294,22 @@ plausibly option 3 above, enforced in the schema rather than in a prompt.
 
 ## 8. Open items
 
-- **Path 2 is unguarded** (§6) — the same gap `risk_advisory_agent` had, inside
-  the agent with otherwise the best guardrails in the codebase.
-- **Fabricated flight specifics on Path 2** (§3) — needs a recorded decision.
-- No test asserts anything about Path 2's screening, which is why the gap
-  survived. A regression test here is worth more than the fix.
+Closed on 2026-08-23:
+
+- ~~**Path 2 is unguarded**~~ — both hooks are now wired (§3's decision block).
+- ~~**Fabricated flight specifics on Path 2**~~ — option 3 adopted and enforced in
+  `_forbid_concrete_options`.
+- ~~**No test asserts anything about Path 2's screening**~~ —
+  `tests/test_flight_path2_screening.py` (7 cases) and `tests/test_agent_parity.py`
+  (5 × 2 agents). Both were verified to fail against the un-wired node before
+  being kept, so they are regression tests rather than tests that happen to pass.
+
+Still open:
+
+- **Option 1's presentational half** (§3) — estimated output is still
+  distinguished only by a warning list, not visually.
 - `docs/progress.md` §3.3's guardrail table describes Path 1 only. A reader would
   reasonably conclude the agent is guarded in all cases.
+- **`agent_relaxation_applied` records `relaxation.reason`** — model-generated free
+  text in the audit trail, contradicting §5's "counts, not content". Pre-existing;
+  worth narrowing to a reason code.

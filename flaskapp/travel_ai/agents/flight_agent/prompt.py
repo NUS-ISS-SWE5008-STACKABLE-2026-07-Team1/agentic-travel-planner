@@ -1,14 +1,22 @@
 """Prompts owned by the Flight Agent developer.
 
-Two prompts live here because the agent has two execution paths:
+Three prompts live here because the agent has two execution paths and one
+registry entry:
 
-- `INSTRUCTION` — used by `agent.py`'s LangGraph specialist node, which asks the
-  model directly for an `AgentFinding` with no inventory behind it. This is the
-  path the compiled graph runs today.
-- `FLIGHT_AGENT_SYSTEM_PROMPT` — used by `reasoning.py`, the grounded path, where
-  `domain.py` has already searched, filtered and ranked real inventory before the
-  model is called. The model never searches there; it only explains what the
+- `FLIGHT_AGENT_SYSTEM_PROMPT` — used by `reasoning.py`, the GROUNDED path, and
+  the one the compiled graph runs whenever inventory covers the trip.
+  `domain.py` has already searched, filtered and ranked real inventory before
+  the model is called. The model never searches there; it only explains what the
   deterministic tool already decided.
+- `PATH2_INSTRUCTION` — used by `agent.py`'s prompt-only FALLBACK node, reached
+  only when no inventory covers the route. There is nothing to ground against,
+  so this prompt asks for route-level guidance and explicitly forbids concrete
+  flights. That prohibition is enforced in code as well (`_forbid_concrete_options`
+  strips any `Option` the model returns anyway) — the prompt states the intent,
+  the postprocess is the guarantee.
+- `INSTRUCTION` — the agent's entry in `agents.SPECIALIST_INSTRUCTIONS`, a
+  one-line description of the agent's remit surfaced by `api.py`. Not the text
+  any node runs.
 
 Keep them consistent in tone and policy, but do not merge them: the grounded
 prompt makes promises ("you were given a proposal") that are false on the
@@ -21,6 +29,32 @@ arrival-time, date, connection, baggage, and budget constraints. Prefer verified
 provider data when supplied. Explain schedule and connection risks, distinguish
 estimates from verified facts, and never invent a flight number, fare, or availability.
 Return viable alternatives and identify constraints that no option satisfies."""
+
+
+# Reached only when `provider.covers()` is false or the fetch came back empty,
+# i.e. the route is outside loaded inventory entirely. `docs/flight_agent/design.md`
+# §3 is about this path: with nothing to ground against, a model asked for flight
+# options invents flight numbers, times and fares that look bookable, and the one
+# guardrail aimed at fabricated flights (`validate_grounded_explanation`) cannot
+# run because the candidate set it checks membership against does not exist.
+#
+# The answer adopted is design.md §3's option 3: keep the genuinely useful part of
+# this path (route-level guidance) and remove the dangerous part (concrete
+# specifics). Stated here so the model does not waste a turn producing options
+# that `_forbid_concrete_options` will strip, but never relied on — prompt wording
+# is not a correctness guarantee, which is why the stripper exists.
+PATH2_INSTRUCTION = """No verified flight inventory is available for this route, so you
+must NOT name specific flights. Do not output a flight number, a carrier's exact
+departure or arrival time, a specific fare, or a seat availability count — you have no
+data for any of them and inventing them would give the traveller something that looks
+bookable but does not exist.
+
+Give route-level guidance instead, and say plainly that it is general knowledge rather
+than live availability: which airlines commonly serve this route, whether it is usually
+direct or connecting, typical journey time, the rough price range and season to expect,
+and any booking advice that does not depend on today's inventory. Name the constraints
+you cannot check and tell the traveller to confirm specifics with a carrier or booking
+site."""
 
 
 # Prompt pattern: structured-output, not ReAct, per localfolder/llmops_plan.md

@@ -8,8 +8,9 @@ lands on for either, this module should not need to change.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime
+from typing import Any
 
 from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightCandidate,
@@ -169,6 +170,137 @@ def _effective_cost(item: FlightInventoryItem, prefs: FlightPreferences, party_s
     return item.price * party_size + seat_fee_estimate(item, prefs, party_size)
 
 
+# --- Ranking components -------------------------------------------------------
+#
+# The rank key is lexicographic, not a blended score — each position is
+# individually nameable, so ranking stays explainable instead of an opaque
+# weighted number nobody can justify. `agent.py:_candidate_to_option` restates
+# these as `selection_factors`, which is only honest because this key is what
+# actually produced the order.
+#
+# They are split into named components so the ORDER can be a parameter without
+# the components themselves ever becoming one. A caller (including the
+# tool-calling loop, via `tools.rank_flights`) may permute precedence; nobody can
+# invent a component, drop a tiebreaker, or change what any component measures.
+
+
+def _component_accessibility_verified(item, prefs, direction, party_size, needs_assist) -> int:
+    """Unverified accessibility sorts last for the traveller who stated the need.
+
+    Leads the default order because it outranks every other consideration for
+    the traveller it applies to: a wheelchair user given a flight whose
+    assistance is confirmed beats a cheaper or better-timed flight whose
+    assistance is merely unknown. Inert for everyone else, and inert for seed
+    inventory (every seed row states a real True/False).
+    """
+    return 1 if (needs_assist and item.wheelchair_assist_available is None) else 0
+
+
+def _component_avoid_red_eye(item, prefs, direction, party_size, needs_assist) -> int:
+    return 1 if (prefs.avoid_red_eye and _is_red_eye(item)) else 0
+
+
+def _component_prefer_direct(item, prefs, direction, party_size, needs_assist) -> int:
+    return 1 if (prefs.prefer_direct and item.stops > 0) else 0
+
+
+def _component_seat_config(item, prefs, direction, party_size, needs_assist) -> int:
+    return 1 if _seat_config_unsatisfiable(item, prefs) else 0
+
+
+def _component_arrival_time(item, prefs, direction, party_size, needs_assist):
+    """Arrival time, but only when a soft arrival preference exists — otherwise a
+    constant, so this position cannot reorder anything for travellers who never
+    expressed one."""
+    soft_pref = _soft_arrival_preference(prefs, direction)
+    return _parse_ts(item.arr_ts) if soft_pref is not None else datetime.min
+
+
+def _component_cost(item, prefs, direction, party_size, needs_assist) -> float:
+    return _effective_cost(item, prefs, party_size)
+
+
+RANK_COMPONENTS: dict[str, Callable[..., Any]] = {
+    "accessibility_verified": _component_accessibility_verified,
+    "avoid_red_eye": _component_avoid_red_eye,
+    "prefer_direct": _component_prefer_direct,
+    "seat_config": _component_seat_config,
+    "arrival_time": _component_arrival_time,
+    "cost": _component_cost,
+}
+
+# Exactly the order the hand-written tuple used before this was parameterised.
+# `propose_flights` never passes `priority`, so its key is byte-identical and the
+# golden scenarios keep asserting the same ordered id lists.
+DEFAULT_RANK_PRIORITY: tuple[str, ...] = (
+    "accessibility_verified",
+    "avoid_red_eye",
+    "prefer_direct",
+    "seat_config",
+    "arrival_time",
+    "cost",
+)
+
+# `cost` is the only always-defined continuous component, so it is the only one
+# that reliably breaks a tie. Forcing it terminal guarantees a total order under
+# any permutation — without it, a caller asking for cost first would make every
+# later component dead weight and could leave genuine ties resolved by list
+# order, which is not stable across inventory refreshes.
+_TERMINAL_COMPONENT = "cost"
+
+
+def normalise_priority(
+    priority: Sequence[str] | None,
+) -> tuple[tuple[str, ...], list[str]]:
+    """A caller-supplied ranking order, made safe.
+
+    Returns the effective order and human-readable notes about anything that was
+    adjusted, so a caller can be told what actually happened rather than silently
+    getting something other than it asked for.
+
+    Three rules, all enforced here rather than trusted to the caller:
+
+    1. **Unknown names are dropped, not raised on.** This is reachable from a
+       model-supplied argument, and a bad name should cost ranking precision, not
+       crash the request.
+    2. **Omitted components are appended in default order, never dropped.** The
+       key is always a total order over every component, so a permutation can
+       reorder results but can never make ranking nondeterministic.
+    3. **`cost` is always terminal**, wherever the caller put it.
+    """
+    if priority is None:
+        return DEFAULT_RANK_PRIORITY, []
+
+    notes: list[str] = []
+    effective: list[str] = []
+    for name in priority:
+        if name not in RANK_COMPONENTS:
+            notes.append(f"Ignored unknown ranking component {name!r}.")
+            continue
+        if name in effective or name == _TERMINAL_COMPONENT:
+            continue
+        effective.append(name)
+
+    if _TERMINAL_COMPONENT in priority and list(priority)[-1] != _TERMINAL_COMPONENT:
+        notes.append(
+            f"Moved {_TERMINAL_COMPONENT!r} to last: it is the tiebreaker that "
+            "guarantees a stable total order."
+        )
+
+    omitted = [
+        name for name in DEFAULT_RANK_PRIORITY
+        if name not in effective and name != _TERMINAL_COMPONENT
+    ]
+    if omitted:
+        notes.append(
+            "Appended omitted components in default order so ranking stays a "
+            f"total order: {', '.join(omitted)}."
+        )
+    effective.extend(omitted)
+    effective.append(_TERMINAL_COMPONENT)
+    return tuple(effective), notes
+
+
 def _rank_key(
     item: FlightInventoryItem,
     prefs: FlightPreferences,
@@ -176,28 +308,18 @@ def _rank_key(
     party_size: int,
     *,
     needs_wheelchair_assist: bool = False,
+    priority: Sequence[str] = DEFAULT_RANK_PRIORITY,
 ) -> tuple:
-    """Lexicographic, not a blended score — each position is individually
-    nameable ("accessibility unverified", "violates avoid_red_eye", "violates
-    prefer_direct", "can't meet the seat configuration", "later than the
-    traveller's soft arrival preference"), so ranking stays explainable
-    instead of an opaque weighted number nobody can justify.
+    """The lexicographic sort key. See `RANK_COMPONENTS` for what each position
+    means and `normalise_priority` for why `priority` cannot make it unsafe.
 
-    The unverified-accessibility position leads because it outranks every
-    other consideration for the traveller it applies to: if a wheelchair user
-    can be given a flight whose assistance is confirmed, that beats a cheaper
-    or better-timed flight whose assistance is merely unknown. It is inert for
-    everyone else, and inert for seed inventory (every seed row states a real
-    True/False), so pre-existing rankings are unchanged.
+    `priority` is assumed already normalised; `rank_leg` is the caller that
+    normalises. Every item in one sort uses the same order, so positions are
+    type-consistent and comparable.
     """
-    soft_pref = _soft_arrival_preference(prefs, direction)
-    return (
-        1 if (needs_wheelchair_assist and item.wheelchair_assist_available is None) else 0,
-        1 if (prefs.avoid_red_eye and _is_red_eye(item)) else 0,
-        1 if (prefs.prefer_direct and item.stops > 0) else 0,
-        1 if _seat_config_unsatisfiable(item, prefs) else 0,
-        _parse_ts(item.arr_ts) if soft_pref is not None else datetime.min,
-        _effective_cost(item, prefs, party_size),
+    return tuple(
+        RANK_COMPONENTS[name](item, prefs, direction, party_size, needs_wheelchair_assist)
+        for name in priority
     )
 
 
@@ -327,7 +449,7 @@ def _survivors_for_leg(
 ) -> list[FlightInventoryItem]:
     """Items passing every hard filter (route, date, seats, constraints,
     hard preferences) for this leg — unsorted, before top_n. Shared by
-    ranking (`_candidates_for_leg`) and the option-B relaxation-gap check
+    ranking (`rank_leg`) and the option-B relaxation-gap check
     (`preference_gap_for_leg`) so the two never drift apart."""
     return [
         item
@@ -415,7 +537,7 @@ def apply_relaxation(prefs: FlightPreferences, relaxation: PreferenceRelaxation)
     return prefs.model_copy(update=update)
 
 
-def _candidates_for_leg(
+def rank_leg(
     inventory: list[FlightInventoryItem],
     request: FlightProposalRequest,
     *,
@@ -423,15 +545,29 @@ def _candidates_for_leg(
     dest: AirportCodes,
     leg_date: date,
     direction: str,
-    top_n: int,
+    top_n: int = 3,
+    priority: Sequence[str] | None = None,
 ) -> list[FlightCandidate]:
+    """Hard-filter survivors for one leg, ranked and truncated to `top_n`.
+
+    Public because ranking is callable on its own — the same survivors can be
+    ordered by different priorities without re-running the search. `priority` of
+    `None` means `DEFAULT_RANK_PRIORITY`, which is what `propose_flights` passes,
+    so the default path produces byte-identical output to before this was
+    parameterised.
+
+    Use `normalise_priority` first if you need to report back what was adjusted;
+    this normalises internally and discards the notes.
+    """
+    effective, _notes = normalise_priority(priority)
     matches = _survivors_for_leg(inventory, request, origin=origin, dest=dest, leg_date=leg_date, direction=direction)
     prefs = request.trip_context.flight_preferences
     party_size = _party_size(request.trip_context)
     needs_assist = needs_wheelchair(request.trip_context.accessibility_needs)
     matches.sort(
         key=lambda item: _rank_key(
-            item, prefs, direction, party_size, needs_wheelchair_assist=needs_assist
+            item, prefs, direction, party_size,
+            needs_wheelchair_assist=needs_assist, priority=effective,
         )
     )
     return [
@@ -467,7 +603,7 @@ def propose_flights(
     you need the reasons rejected flights didn't make it (explainability log).
     """
     ctx = request.trip_context
-    outbound = _candidates_for_leg(
+    outbound = rank_leg(
         inventory,
         request,
         origin=ctx.origin_airports,
@@ -476,7 +612,7 @@ def propose_flights(
         direction="OUTBOUND",
         top_n=top_n,
     )
-    inbound = _candidates_for_leg(
+    inbound = rank_leg(
         inventory,
         request,
         origin=ctx.dest_airports,

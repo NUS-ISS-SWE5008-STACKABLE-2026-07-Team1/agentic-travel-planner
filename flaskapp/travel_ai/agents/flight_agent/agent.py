@@ -38,10 +38,13 @@ from flaskapp.travel_ai.a2a import response_message
 from flaskapp.travel_ai.agents.base import make_specialist_node
 from flaskapp.travel_ai.agents.flight_agent.adapter import to_flight_request
 from flaskapp.travel_ai.agents.flight_agent.domain import screen_flights
-from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION
+from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION, PATH2_INSTRUCTION
 from flaskapp.travel_ai.agents.flight_agent.providers import get_inventory_provider
 from flaskapp.travel_ai.agents.flight_agent.providers.seed import INVENTORY_ASSUMPTION
 from flaskapp.travel_ai.agents.flight_agent.reasoning import run_flight_agent
+from flaskapp.travel_ai.agents.flight_agent.tools import budget_from_config, build_cache
+from flaskapp.travel_ai.agents.loop import EVENT_BUDGET_EXHAUSTED
+from flaskapp.travel_ai.guardrails.specialist import make_postprocess, make_preflight
 from flaskapp.travel_ai.agents.flight_agent.schemas import FlightCandidate, FlightProposal
 from flaskapp.travel_ai.schemas import AgentFinding, Option, TravelRequest
 from flaskapp.travel_ai.terminal import log_payload
@@ -68,6 +71,16 @@ ESTIMATE_WARNING = (
     "Confirm every detail with the carrier."
 )
 
+# Paired with ESTIMATE_WARNING, not a replacement for it: that string carries the
+# substring `safeguards.UNVERIFIED_OPTIONS_MARKER` matches on, which is what makes
+# `enforce_provenance_disclosure` write the flag into the plan's own limitations.
+# Reword or drop ESTIMATE_WARNING and that disclosure silently stops firing.
+NO_CONCRETE_OPTIONS_WARNING = (
+    "No verified inventory covers this route, so no specific flights are listed. "
+    "The guidance above is general route knowledge, not live availability — confirm "
+    "actual flights, times and fares with a carrier or booking site."
+)
+
 
 # `run_flight_agent` emits its own agent_started/agent_completed because it is
 # also usable standalone (the demo scripts call it directly, with no graph).
@@ -87,6 +100,41 @@ class _InnerTracer:
     def record(self, event: str, agent: str, details: dict | None = None) -> None:
         if event not in _DUPLICATE_EVENTS:
             self._tracer.record(event, agent, details)
+
+
+def _forbid_concrete_options(agent_name: str, tracer):
+    """Path 2 postprocess: screen the prose, then strip every concrete flight.
+
+    `docs/flight_agent/design.md` §3 names this path as the design's weakest
+    point. With no inventory to ground against, a model asked for flight options
+    returns invented flight numbers, times and fares — and the guardrail aimed at
+    exactly that (`validate_grounded_explanation`) cannot run here, because the
+    candidate set it checks membership against does not exist. Disclosure was the
+    only control, and a warning in `warnings` is weaker than a fabricated option
+    in `options`, which is the part the UI renders most prominently.
+
+    This is design.md §3's option 3: keep the guidance, drop the specifics. The
+    prompt asks for the same thing, but a prompt is not a guarantee — this is.
+
+    Order matters. The generic L1 output screen runs FIRST, so prose that fails
+    bias/toxicity/injection screening is replaced wholesale (by a canned finding
+    that carries no options) rather than being stripped and kept.
+    """
+    screen_output = make_postprocess(agent_name)
+
+    def postprocess(finding: AgentFinding, context=None) -> AgentFinding:
+        finding = screen_output(finding, context)
+        if not finding.options:
+            return finding
+        # A count, never the content: the fabricated flight numbers are exactly
+        # what `tracing.py` says must not enter the audit trail.
+        tracer.record("agent_path2_options_stripped", agent_name, {"count": len(finding.options)})
+        return finding.model_copy(update={
+            "options": [],
+            "warnings": [*finding.warnings, NO_CONCRETE_OPTIONS_WARNING],
+        })
+
+    return postprocess
 
 
 def _accessibility_limitations(candidate: FlightCandidate) -> list[str]:
@@ -184,13 +232,28 @@ def create_node(llm, tracer, provider=None, config=None):
     specialist factory, and the provider is resolved from `Config` once, here,
     rather than per request.
     """
-    prompt_only_node = make_specialist_node(NAME, INSTRUCTION, llm, tracer)
+    # Both hooks have existed on `make_specialist_node` since it was written and
+    # this call site had never used either, so the fallback path ran with no input
+    # screening and no output screening at all — design.md §6's "Path 2: none"
+    # column. `INSTRUCTION` stays the agent's registry description; the node runs
+    # PATH2_INSTRUCTION, which asks only for route-level guidance.
+    prompt_only_node = make_specialist_node(
+        NAME, PATH2_INSTRUCTION, llm, tracer,
+        preflight=make_preflight(NAME),
+        postprocess=_forbid_concrete_options(NAME, tracer),
+    )
     provider_note = None
     if provider is None:
         provider, provider_note = get_inventory_provider(
             vars(Config) if config is None else config
         )
     assumption = getattr(provider, "assumption", INVENTORY_ASSUMPTION)
+    # Limits resolved once here, like the provider, then a fresh per-request
+    # budget taken from them inside the node — spend must never be shared
+    # between travellers.
+    budget_limits, max_date_shift_days = budget_from_config(
+        vars(Config) if config is None else config
+    )
 
     def flight_node(state) -> dict:
         incoming = next(
@@ -210,11 +273,24 @@ def create_node(llm, tracer, provider=None, config=None):
         # two must never independently ask for the same inventory — and they
         # must see the identical row set, or the explainability trace would
         # describe a different search than the one that produced the options.
+        #
+        # Routed through `InventoryCache` so that invariant is enforced by a
+        # component rather than by this function being careful. The cache is also
+        # what generalises it once searching becomes multi-step: it deduplicates
+        # repeated searches, caps provider calls, and accumulates `seen_ids` as
+        # the provenance ledger. Here it still makes exactly one call, which
+        # `test_flight_node_providers.py` pins.
+        budget = budget_limits.fresh().start()
+        cache = build_cache(
+            provider, budget,
+            on_budget_exhausted=lambda limit: tracer.record(
+                EVENT_BUDGET_EXHAUSTED, NAME, {"limit": limit, **budget.as_counts()}
+            ),
+        )
         inventory = []
         if provider.covers(adapted.request):
-            result = provider.fetch(adapted.request)
-            inventory = result.items
-            notes.extend(result.notes)
+            inventory, fetch_notes = cache.rows_for(adapted.request)
+            notes.extend(fetch_notes)
 
         if not inventory:
             # Nothing to ground an answer in — an unstocked route, an
