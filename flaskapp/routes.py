@@ -9,8 +9,9 @@ from uuid import UUID
 from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, session, url_for
 from werkzeug.security import generate_password_hash
 
-from flaskapp.database import authenticate_user, create_user
+from flaskapp.database import authenticate_user, create_user, get_intake_conversation
 from flaskapp.countries import COUNTRIES
+from flaskapp.places import city_options
 from flaskapp.forms import LoginForm, RegistrationForm
 from flaskapp.admin_auth import is_admin_email
 
@@ -93,18 +94,38 @@ def register():
 @pages_bp.get("/main")
 @login_required
 def main():
+    # `city_options` is embedded in the page rather than fetched, so the
+    # dependent city <select> repopulates instantly and the form still works if
+    # a later request fails. It is public reference data — no per-user content.
     return render_template(
         "main.html", user_name=session.get("user_name", "Traveller"), countries=COUNTRIES,
         is_admin=is_admin_email(current_app.config, session.get("user_email")),
         user_country=session.get("user_country", ""),
+        city_options=city_options(),
     )
 
 
 @pages_bp.get("/chat/<uuid:request_id>")
 @login_required
 def chat(request_id: UUID):
+    conversation = get_intake_conversation(
+        current_app.config["DATABASE"], str(request_id), session.get("user_id")
+    )
     return render_template(
-        "chat.html", user_name=session.get("user_name", "Traveller"), request_id=request_id
+        "chat.html", user_name=session.get("user_name", "Traveller"), request_id=request_id,
+        intake_mode=False, conversation=conversation,
+        is_admin=is_admin_email(current_app.config, session.get("user_email")),
+    )
+
+
+@pages_bp.get("/chat/intake")
+@login_required
+def intake_chat():
+    """Host clarification before a complete request is sent to specialist agents."""
+    return render_template(
+        "chat.html", user_name=session.get("user_name", "Traveller"), countries=COUNTRIES,
+        intake_mode=True,
+        is_admin=is_admin_email(current_app.config, session.get("user_email")),
     )
 
 

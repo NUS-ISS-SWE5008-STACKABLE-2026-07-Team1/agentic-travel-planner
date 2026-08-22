@@ -33,8 +33,9 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="travel-planner
 _logger = logging.getLogger(__name__)
 
 
-def submit_plan(request: TravelRequest, settings: dict, user_id: int | None) -> PlanningJob:
-    job = PlanningJob(request_id=str(uuid4()), user_id=user_id)
+def submit_plan(request: TravelRequest, settings: dict, user_id: int | None,
+                request_id: str | None = None) -> PlanningJob:
+    job = PlanningJob(request_id=request_id or str(uuid4()), user_id=user_id)
     create_planning_job(
         settings["database_path"], job.request_id, user_id, request.model_dump(mode="json")
     )
@@ -59,9 +60,14 @@ def _run_plan(request_id: str, request: TravelRequest, settings: dict,
             endpoint=settings.get("endpoint"), api_version=settings.get("api_version"),
             base_url=settings.get("base_url"),
             temperature=settings["temperature"], timeout=settings["timeout"],
-            trace_dir=Path(settings["trace_dir"]), database_path=Path(settings["database_path"]),
+            trace_dir=Path(settings["trace_dir"]),
+            # NOT Path(...): this may be a postgresql:// DSN, and Path would
+            # normalise the // away and silently turn it back into SQLite.
+            database_path=settings["database_path"],
             user_id=user_id,
             cancel_event=_cancel_events[request_id],
+            guardrail_settings=settings.get("guardrail"),
+            input_guardrail=settings.get("input_guardrail"),
         )
         response = service.create_plan(request, request_id=request_id)
         with _lock:

@@ -12,7 +12,7 @@ built, tested against stubs, **and exercised against a live model**.
 
 For period-by-period delivery detail, the automated/manual test breakdown, and the two
 manual acceptance scenarios with their analysis, see
-[`docs/flight_agent/progress.md`](../flight_agent/progress.md). This document stays
+[`docs/progress.md`](../progress.md) (Part B). This document stays
 scoped to the two assessed sections below.
 
 > **Changed since the 2026-07-19 draft.** The agent is now wired into the LangGraph
@@ -93,7 +93,7 @@ Verified against a live model, not only stubs: in a full five-agent run, every f
 the resulting plan was a real inventory row with the correct fare and per-airport UTC
 offsets, and the per-option provenance note ("from the project's static inventory ...
 must be verified with the airline") survived orchestrator synthesis verbatim into the
-traveller-facing plan. Full scenarios and analysis in `docs/flight_agent/progress.md` §5.
+traveller-facing plan. Full scenarios and analysis in `docs/progress.md` Part B §5.
 
 ### Bias & Fairness
 

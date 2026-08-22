@@ -4,21 +4,50 @@ from __future__ import annotations
 
 import json
 import re
+from uuid import uuid4
 
 from flask import Blueprint, current_app, jsonify, request, session
 from pydantic import ValidationError
 from werkzeug.security import generate_password_hash
 
-from flaskapp.travel_ai.safeguards import SafetyError, validate_request
+from flaskapp.travel_ai.safeguards import (
+    GuardrailBlocked, SafetyError, screen_answers, screen_prompt, screen_request_l2,
+    validate_request,
+)
+from flaskapp.travel_ai.guardrails import (
+    GUARDRAIL_PROMPT_VERSION, Category, LlmGuardrail, build_guardrail, guardrail_settings,
+)
 from flaskapp.travel_ai.jobs import cancel_job, get_job, submit_plan
+from flaskapp.travel_ai.llm import build_llm
+from flaskapp.travel_ai.tracing import AuditTracer
+from flaskapp.travel_ai.agents.orchestrator_agent.intake import (
+    clarification_question, compute_gaps, extract_intent, merge_answers,
+    merge_intents, to_request_payload,
+)
+from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
+    ExtractedIntent, IntentResponse,
+)
 from flaskapp.database import (
     get_admin_activity, get_admin_token_summary, get_admins, get_platform_dashboard,
-    get_recent_feedback, get_system_logs, owns_request, register_admin, save_plan_feedback,
+    end_user_request_session, get_recent_feedback, get_system_logs,
+    owns_intake_request, owns_request, register_admin, save_intake_request,
+    save_intake_message, save_plan_feedback,
 )
 from flaskapp.admin_auth import is_admin_email
 from flaskapp.config import get_llm_settings
 
 travel_api_bp = Blueprint("travel_api", __name__)
+
+
+def validation_details(exc: ValidationError) -> list[dict]:
+    """JSON-safe validation errors.
+
+    `ValidationError.errors()` keeps the original exception object in
+    `ctx["error"]` for `model_validator` failures, so passing it to `jsonify`
+    raises TypeError and the caller receives Flask's HTML error page instead of
+    the 422 it is waiting for. `.json()` renders the same errors as text.
+    """
+    return json.loads(exc.json())
 
 
 @travel_api_bp.before_request
@@ -38,24 +67,147 @@ def create_travel_plan():
         payload = request.get_json(force=False, silent=False)
         if not isinstance(payload, dict):
             return jsonify(error="A JSON object is required"), 400
+        intake_request_id = str(payload.pop("_request_id", "")).strip() or None
+        if intake_request_id and not owns_intake_request(
+            current_app.config["DATABASE"], intake_request_id, session.get("user_id")
+        ):
+            return jsonify(error="Intake request not found"), 404
         travel_request = validate_request(payload, current_app.config["MAX_INPUT_CHARS"])
+        # L2 runs here rather than inside the background job so a rejected
+        # traveller gets an immediate 422 instead of a job that fails ~75s
+        # later. It costs the POST one small-model round trip; the plan it
+        # guards costs five large ones.
+        guard_settings = guardrail_settings(current_app.config)
+        input_verdict = screen_request_l2(
+            travel_request, LlmGuardrail.from_settings(guard_settings)
+        )
         settings = {
             **llm_settings,
             "trace_dir": str(current_app.config["TRACE_DIR"]),
             "database_path": str(current_app.config["DATABASE"]),
+            # Carried into the background thread so the orchestrator's output
+            # gate uses the same configuration the input gate just used.
+            "guardrail": guard_settings,
+            "input_guardrail": input_verdict.as_audit_details() if input_verdict else None,
         }
-        job = submit_plan(travel_request, settings, session.get("user_id"))
+        job = (
+            submit_plan(travel_request, settings, session.get("user_id"), intake_request_id)
+            if intake_request_id
+            else submit_plan(travel_request, settings, session.get("user_id"))
+        )
         return jsonify(
             request_id=job.request_id,
             status=job.status,
             chat_url=f"/chat/{job.request_id}",
         ), 202
+    except GuardrailBlocked as exc:
+        # No AuditTracer exists yet — the request has no id and no job — so the
+        # application log is the only place this decision can be recorded.
+        # Enums and numbers only, never the traveller's text.
+        current_app.logger.warning("L2 input guardrail blocked: %s", exc.verdict.as_audit_details())
+        return jsonify(error="Invalid travel request", details=[{"msg": str(exc)}]), 422
     except (ValidationError, SafetyError) as exc:
-        details = exc.errors() if isinstance(exc, ValidationError) else [{"msg": str(exc)}]
+        details = validation_details(exc) if isinstance(exc, ValidationError) else [{"msg": str(exc)}]
         return jsonify(error="Invalid travel request", details=details), 422
     except Exception:
         current_app.logger.exception("Travel planning failed")
         return jsonify(error="Travel planning failed", retryable=True), 502
+
+
+@travel_api_bp.post("/travel-intents")
+def create_travel_intent():
+    """Read a free-text trip request and report what is still missing."""
+    llm_settings, configuration_error = get_llm_settings(current_app.config)
+    if configuration_error:
+        return jsonify(error=configuration_error), 503
+    payload = request.get_json(silent=True) or {}
+    try:
+        prompt = screen_prompt(
+            payload.get("prompt"), current_app.config["MAX_INPUT_CHARS"],
+            build_guardrail(current_app.config),
+        )
+        current = ExtractedIntent.model_validate(payload.get("extracted") or {})
+        is_first_turn = not payload.get("request_id")
+        intake_request_id = str(payload.get("request_id") or uuid4())
+        if not save_intake_request(
+            current_app.config["DATABASE"], intake_request_id, session.get("user_id"),
+            current.model_dump(mode="json"),
+        ):
+            return jsonify(error="Intake request not found"), 404
+        save_intake_message(
+            current_app.config["DATABASE"], intake_request_id, "user", prompt
+        )
+        extraction = extract_intent(build_llm(**llm_settings), prompt)
+        intent = merge_intents(current, extraction.intent)
+    except GuardrailBlocked as exc:
+        current_app.logger.warning("L2 intake guardrail blocked: %s", exc.verdict.as_audit_details())
+        return jsonify(error=str(exc)), 422
+    except SafetyError as exc:
+        return jsonify(error=str(exc)), 422
+    except ValidationError as exc:
+        return jsonify(error="The assistant could not read that request. Try the detailed form.",
+                       details=validation_details(exc)), 422
+    except Exception:
+        current_app.logger.exception("Travel intent extraction failed")
+        return jsonify(error="The assistant is unavailable. Please retry.", retryable=True), 502
+    if not save_intake_request(
+        current_app.config["DATABASE"], intake_request_id, session.get("user_id"),
+        intent.model_dump(mode="json"),
+    ):
+        return jsonify(error="Intake request not found"), 404
+    response_body = _intent_response(intent, extraction.question, intake_request_id)
+    save_intake_message(
+        current_app.config["DATABASE"], intake_request_id, "assistant",
+        response_body["question"],
+    )
+    tracer = AuditTracer(
+        current_app.config["TRACE_DIR"], intake_request_id, current_app.config["DATABASE"]
+    )
+    if is_first_turn:
+        tracer.record("user_request_submitted", "system", {"stage": "intake"})
+    tracer.record(
+        "orchestrator_validation_started", "orchestrator_agent",
+        {"turn": "initial" if is_first_turn else "clarification"},
+    )
+    tracer.record(
+        "orchestrator_validation_completed", "orchestrator_agent",
+        {
+            "complete": response_body["complete"],
+            "missing_count": len(response_body["missing"]),
+            "next_stage": "specialist_planning" if response_body["complete"] else "clarification",
+        },
+    )
+    return jsonify(response_body)
+
+
+@travel_api_bp.post("/travel-intents/resolve")
+def resolve_travel_intent():
+    """Apply the traveller's answers. Deterministic: no model call happens here."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        answers = screen_answers(payload.get("answers") or {})
+        extracted = ExtractedIntent.model_validate(payload.get("extracted") or {})
+        extracted = merge_answers(extracted, answers)
+    except SafetyError as exc:
+        return jsonify(error=str(exc)), 422
+    except ValidationError as exc:
+        return jsonify(error="Some answers could not be used", details=validation_details(exc)), 422
+    return jsonify(_intent_response(extracted, str(payload.get("question") or "")))
+
+
+def _intent_response(extracted, question: str, request_id: str | None = None):
+    """Shared reply shape for both intake endpoints."""
+    missing = compute_gaps(extracted)
+    complete = not missing
+    return IntentResponse(
+        complete=complete,
+        question=(f"{question} {clarification_question(missing)}" if missing
+                  else clarification_question(missing)),
+        extracted=extracted,
+        missing=missing,
+        request=to_request_payload(extracted) if complete else None,
+        request_id=request_id,
+    ).model_dump(mode="json")
 
 
 @travel_api_bp.get("/travel-plans/<uuid:request_id>/status")
@@ -81,6 +233,15 @@ def cancel_travel_plan(request_id):
     if job is None:
         return jsonify(error="Planning job not found"), 404
     return jsonify(request_id=job.request_id, status=job.status)
+
+
+@travel_api_bp.post("/user-requests/<uuid:request_id>/session/end")
+def end_user_request(request_id):
+    if not end_user_request_session(
+        current_app.config["DATABASE"], str(request_id), session.get("user_id")
+    ):
+        return jsonify(error="User request not found"), 404
+    return jsonify(request_id=str(request_id), session_status="ended")
 
 
 @travel_api_bp.get("/admin/activity")
@@ -115,6 +276,13 @@ def _prompt_catalog():
         {"agent": "Shared deterministic guardrails", "instruction":
          f"Reject oversized input, sensitive ranking fields ({', '.join(sorted(SENSITIVE_KEYS))}), "
          f"and prompt-injection patterns matching: {PROMPT_INJECTION.pattern}"},
+        {"agent": "LLM guardrail classifier (L2)", "instruction":
+         f"Prompt version {GUARDRAIL_PROMPT_VERSION}. Runs after the deterministic gates on "
+         f"traveller free text and on the synthesized plan. Blocks at confidence >= "
+         f"{current_app.config.get('GUARDRAIL_BLOCK_THRESHOLD', 0.7)}; a lower-confidence block is "
+         f"recorded as a flag without denying the request. Fail mode: "
+         f"{current_app.config.get('GUARDRAIL_FAIL_MODE', 'closed')}. Categories: "
+         + ", ".join(item.value for item in Category if item is not Category.NONE)},
     ]
 
 

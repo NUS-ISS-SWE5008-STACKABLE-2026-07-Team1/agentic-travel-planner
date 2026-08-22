@@ -1,0 +1,120 @@
+# =============================================================================
+# DRAFT — NOT ACTIVE. Lives in docs/security/drafts/ on purpose.
+#
+# Backlog item 18, tier 2: promote scripts/e2e_test.py to a workflow so that
+# something in CI finally exercises a real model. Tier 3 (promptfoo) is a
+# later, separate file.
+#
+# *** DO NOT MERGE THIS BEFORE BACKLOG ITEM 10 (network lockdown). ***
+# This workflow is what puts a real provider key in the repository. Until
+# tests/conftest.py clears provider keys and blocks sockets, any unmocked test
+# in the BLOCKING fast suite could silently make a live billed call and pass.
+# The two items are coupled and this is the wrong order without item 10.
+# =============================================================================
+name: Evals — live model (scheduled)
+
+on:
+  workflow_dispatch:
+  # Weekly, Monday 03:00 UTC (11:00 SGT). Deliberately not on push or PR.
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+# Never let scheduled runs stack up — each scenario invokes five agents.
+concurrency:
+  group: evals-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  live-eval:
+    name: End-to-end against a real model
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Belt and braces against fork PRs receiving secrets. `schedule` and
+    # `workflow_dispatch` cannot fire from a fork, so this is defence in
+    # depth rather than the primary control — but if anyone later wires this
+    # to pull_request, this line is what stops the key leaving.
+    if: github.repository_owner == 'NUS-ISS-SWE5008-STACKABLE-2026-07-Team1'
+
+    env:
+      # Add these in Settings > Secrets and variables > Actions FIRST.
+      # Use a spend-capped key dedicated to CI, not a personal one.
+      LLM_PROVIDER: ${{ vars.EVAL_LLM_PROVIDER || 'openai' }}
+      LLM_API_KEY: ${{ secrets.EVAL_LLM_API_KEY }}
+      LLM_MODEL: ${{ vars.EVAL_LLM_MODEL }}
+      SECRET_KEY: ${{ github.run_id }}-evals-ephemeral
+      SESSION_COOKIE_SECURE: "false"
+      DATABASE: ${{ github.workspace }}/ci-instance/travel_planner.sqlite3
+      TRACE_DIR: ${{ github.workspace }}/ci-instance/traces
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Fail early if the provider key is missing
+        run: |
+          if [ -z "${LLM_API_KEY}" ]; then
+            echo "::error::EVAL_LLM_API_KEY is not set. Add it as a repository secret."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.lock ]; then
+            python -m pip install -r requirements.lock
+          else
+            python -m pip install -r requirements.txt
+          fi
+
+      - name: Prepare CI instance directory
+        run: mkdir -p ci-instance/traces
+
+      - name: Start app
+        run: |
+          nohup python app.py > app.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:5000/ -o /dev/null && exit 0
+            sleep 1
+          done
+          echo "::error::App did not start in time"; cat app.log; exit 1
+
+      # NEVER BLOCKING. Model output is non-deterministic; a flaky merge gate
+      # teaches people to ignore red, which costs more than the evals gain.
+      # The assertions in e2e_test.py are about grounding rather than prose
+      # (real inventory rows, estimated-route labelling, ranking stability
+      # under a protected-attribute change), which is what keeps this useful
+      # rather than merely noisy — but "useful" still is not "gate-worthy".
+      #
+      # Verified against scripts/e2e_test.py: its only argument is --base-url,
+      # already defaulting to http://127.0.0.1:5000, so no flags are needed.
+      # It runs 6 scenarios (grounded, fallback, bias, injection, validation,
+      # audit trail) and exits 1 if any check fails — which continue-on-error
+      # deliberately swallows.
+      - name: Run end-to-end evaluation
+        continue-on-error: true
+        run: |
+          python scripts/e2e_test.py 2>&1 | tee eval-report.txt
+
+      - name: Check logs for leaked material
+        if: always()
+        run: |
+          if grep -REn "sk-[A-Za-z0-9]{16,}|api[_-]?key['\"]?[[:space:]]*[:=][[:space:]]*\S{16,}" app.log eval-report.txt; then
+            echo "::error::Credential-shaped string found; refusing to upload."
+            exit 1
+          fi
+
+      - name: Upload evaluation report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: eval-report
+          path: |
+            eval-report.txt
+            app.log
+          retention-days: 14
