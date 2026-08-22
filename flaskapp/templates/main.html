@@ -148,6 +148,7 @@
   <!-- Country -> cities for the dependent selects. A data block, not a script:
        it is never executed, so it needs no CSP allowance and cannot be a
        script-injection vector. app.js reads it by id. -->
+  <script type="application/json" id="country-options">{{ countries | tojson }}</script>
   <script type="application/json" id="city-options">{{ city_options | tojson }}</script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
