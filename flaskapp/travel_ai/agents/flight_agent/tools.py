@@ -143,6 +143,11 @@ class ToolContext:
     # Per-run rather than a module constant so `FLIGHT_AGENT_MAX_DATE_SHIFT_DAYS`
     # can tune it without the envelope becoming a global.
     max_date_shift_days: int = MAX_DATE_SHIFT_DAYS
+    # Direction -> the date a search actually found flights on. Empty until a
+    # widened search succeeds. Without this the loop can find flights on a nearby
+    # date and then throw them away, because the final `propose_flights` filters
+    # on exact date equality against the traveller's original request.
+    effective_dates: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def for_request(
@@ -152,14 +157,50 @@ class ToolContext:
         budget: LoopBudget,
         *,
         max_date_shift_days: int = MAX_DATE_SHIFT_DAYS,
+        on_budget_exhausted=None,
     ) -> "ToolContext":
         return cls(
             base_request=request,
             current_request=request,
-            cache=build_cache(provider, budget),
+            cache=build_cache(provider, budget, on_budget_exhausted=on_budget_exhausted),
             budget=budget,
             max_date_shift_days=max_date_shift_days,
         )
+
+    def resolved_request(self) -> FlightProposalRequest:
+        """`current_request` with the leg dates that actually produced flights.
+
+        A leg that never found anything keeps the traveller's own date, so the
+        "no flight satisfies these dates" warning stays true rather than being
+        quietly rewritten to a date they never asked about.
+
+        This is the only place a search's date shift becomes part of the answer,
+        and it is paired with `date_shift_notes()` — moving a traveller's date
+        without telling them would be worse than returning nothing.
+        """
+        if not self.effective_dates:
+            return self.current_request
+        updates = {}
+        if "OUTBOUND" in self.effective_dates:
+            updates["depart_date"] = self.effective_dates["OUTBOUND"]
+        if "RETURN" in self.effective_dates:
+            updates["return_date"] = self.effective_dates["RETURN"]
+        context = self.current_request.trip_context.model_copy(update=updates)
+        return self.current_request.model_copy(update={"trip_context": context})
+
+    def date_shift_notes(self) -> list[str]:
+        """Traveller-facing disclosure for every leg shown on a different date."""
+        notes = []
+        for direction, used in sorted(self.effective_dates.items()):
+            asked = _leg_date(self.base_request, direction).isoformat()
+            if used == asked:
+                continue
+            notes.append(
+                f"No {direction.lower()} flight was available on {asked}. "
+                f"The options shown depart on {used} instead — confirm this date "
+                "works before booking."
+            )
+        return notes
 
     def record(self, event: str, details: dict) -> None:
         if self.tracer is not None:
@@ -311,6 +352,12 @@ def search_flights(
         direction=direction, top_n=MAX_ROWS_RETURNED,
     )
     shift = (leg_date - _leg_date(ctx.base_request, direction)).days
+
+    # Only a search that found something moves the leg. A widened search that
+    # also came back empty leaves the traveller's own date in place, so the
+    # coverage warning still names the date they asked for.
+    if candidates:
+        ctx.effective_dates[direction] = leg_date.isoformat()
 
     ctx.record(EVENT_TOOL_CALLED, {
         "tool": "search_flights",

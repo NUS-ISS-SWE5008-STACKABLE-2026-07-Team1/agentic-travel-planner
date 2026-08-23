@@ -41,8 +41,9 @@ from flaskapp.travel_ai.agents.flight_agent.domain import screen_flights
 from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION, PATH2_INSTRUCTION
 from flaskapp.travel_ai.agents.flight_agent.providers import get_inventory_provider
 from flaskapp.travel_ai.agents.flight_agent.providers.seed import INVENTORY_ASSUMPTION
+from flaskapp.travel_ai.agents.flight_agent.agentic import run_agentic_flight_agent
 from flaskapp.travel_ai.agents.flight_agent.reasoning import run_flight_agent
-from flaskapp.travel_ai.agents.flight_agent.tools import budget_from_config, build_cache
+from flaskapp.travel_ai.agents.flight_agent.tools import ToolContext, budget_from_config
 from flaskapp.travel_ai.agents.loop import EVENT_BUDGET_EXHAUSTED
 from flaskapp.travel_ai.guardrails.specialist import make_postprocess, make_preflight
 from flaskapp.travel_ai.agents.flight_agent.schemas import FlightCandidate, FlightProposal
@@ -251,9 +252,13 @@ def create_node(llm, tracer, provider=None, config=None):
     # Limits resolved once here, like the provider, then a fresh per-request
     # budget taken from them inside the node — spend must never be shared
     # between travellers.
-    budget_limits, max_date_shift_days = budget_from_config(
-        vars(Config) if config is None else config
-    )
+    settings = vars(Config) if config is None else config
+    budget_limits, max_date_shift_days = budget_from_config(settings)
+    # "structured" (the default) is the single-shot path this agent has always
+    # run: domain.py searches once, the model explains the result. "agentic"
+    # opens the tool loop. Resolved once here rather than per request so the mode
+    # cannot change under a traveller mid-plan.
+    agentic_mode = str(settings.get("FLIGHT_AGENT_MODE", "structured")).strip().lower() == "agentic"
 
     def flight_node(state) -> dict:
         incoming = next(
@@ -281,15 +286,19 @@ def create_node(llm, tracer, provider=None, config=None):
         # the provenance ledger. Here it still makes exactly one call, which
         # `test_flight_node_providers.py` pins.
         budget = budget_limits.fresh().start()
-        cache = build_cache(
-            provider, budget,
+        # One context for the whole request. The loop, when it runs, uses this
+        # same cache — building it a second one there would re-fetch inventory
+        # already paid for, which is free on seed and billed on Duffel.
+        ctx = ToolContext.for_request(
+            adapted.request, provider, budget,
+            max_date_shift_days=max_date_shift_days,
             on_budget_exhausted=lambda limit: tracer.record(
                 EVENT_BUDGET_EXHAUSTED, NAME, {"limit": limit, **budget.as_counts()}
             ),
         )
         inventory = []
         if provider.covers(adapted.request):
-            inventory, fetch_notes = cache.rows_for(adapted.request)
+            inventory, fetch_notes = ctx.cache.rows_for(adapted.request)
             notes.extend(fetch_notes)
 
         if not inventory:
@@ -307,22 +316,35 @@ def create_node(llm, tracer, provider=None, config=None):
                 finding.warnings = [*finding.warnings, *notes, ESTIMATE_WARNING]
             return result
 
-        tracer.record("agent_started", NAME, {"mode": "grounded", "source": provider.name})
+        tracer.record("agent_started", NAME, {
+            "mode": "agentic" if agentic_mode else "grounded", "source": provider.name,
+        })
         if tracer.database_path:
             save_agent_run(tracer.database_path, state["request_id"], NAME, "processing")
 
         usage = TokenUsageCallback()
         try:
-            proposal, response = run_flight_agent(
-                adapted.request, inventory, llm, tracer=_InnerTracer(tracer)
-            )
-            screening = screen_flights(adapted.request, inventory)
+            if agentic_mode:
+                proposal, response = run_agentic_flight_agent(
+                    ctx, llm, tracer=_InnerTracer(tracer)
+                )
+                # The loop may have searched more than once, so the screening
+                # trace is computed over everything it saw — same rule as before
+                # (describe the search that produced the options), applied to a
+                # search that now has more than one step.
+                screening = screen_flights(ctx.resolved_request(), ctx.cache.all_rows)
+                notes.extend(note for note in ctx.notes if note not in notes)
+            else:
+                proposal, response = run_flight_agent(
+                    adapted.request, inventory, llm, tracer=_InnerTracer(tracer)
+                )
+                screening = screen_flights(adapted.request, inventory)
             finding = _build_finding(
                 proposal, response, travel_request.currency, notes, assumption
             )
             log_payload(f"REQUEST {state['request_id']} | {NAME.upper()} RESPONSE", finding)
             tracer.record("agent_completed", NAME, {
-                "mode": "grounded",
+                "mode": "agentic" if agentic_mode else "grounded",
                 "source": provider.name,
                 "confidence": finding.confidence,
                 "option_count": len(finding.options),

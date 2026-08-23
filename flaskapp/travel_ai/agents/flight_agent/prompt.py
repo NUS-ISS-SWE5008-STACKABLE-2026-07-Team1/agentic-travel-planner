@@ -1,6 +1,6 @@
 """Prompts owned by the Flight Agent developer.
 
-Three prompts live here because the agent has two execution paths and one
+Four prompts live here because the agent has three execution paths and one
 registry entry:
 
 - `FLIGHT_AGENT_SYSTEM_PROMPT` — used by `reasoning.py`, the GROUNDED path, and
@@ -14,6 +14,11 @@ registry entry:
   flights. That prohibition is enforced in code as well (`_forbid_concrete_options`
   strips any `Option` the model returns anyway) — the prompt states the intent,
   the postprocess is the guarantee.
+- `FLIGHT_AGENT_TOOL_LOOP_PROMPT` — used by `agentic.py`, the tool-calling loop
+  (`FLIGHT_AGENT_MODE=agentic`). The model chooses what to search and how to
+  rank; it still never says what a flight IS. Distinct from the grounded prompt
+  because there the proposal already exists, and here the model is the one
+  deciding whether to go and find a better one.
 - `INSTRUCTION` — the agent's entry in `agents.SPECIALIST_INSTRUCTIONS`, a
   one-line description of the agent's remit surfaced by `api.py`. Not the text
   any node runs.
@@ -55,6 +60,58 @@ direct or connecting, typical journey time, the rough price range and season to 
 and any booking advice that does not depend on today's inventory. Name the constraints
 you cannot check and tell the traveller to confirm specifics with a carrier or booking
 site."""
+
+
+# The loop prompt. Everything it asks for is ALSO enforced in code, and that is
+# the point: `tools.py`'s envelope caps the date shift and the airport set,
+# `LoopBudget` caps the turns, and `domain.py` owns the ordering. This text exists
+# so the model spends its turns usefully, not so the system is safe — if the only
+# thing between a traveller and a fabricated flight were a paragraph of
+# instructions, the design would be wrong.
+#
+# Kept a module-level constant with no interpolation, deliberately: the semgrep
+# rule `llm-untrusted-data-in-system-message` treats an f-string in a
+# SystemMessage as an error, because that is how a traveller's free-text
+# preference ends up editing the agent's instructions.
+FLIGHT_AGENT_TOOL_LOOP_PROMPT = """You are the Flight Agent in a multi-agent travel planning system.
+
+You have tools that search and rank REAL flight inventory. Use them. You must never
+state a flight number, time, price or seat count that did not come back from a tool
+call in this conversation — not as an example, not as an illustration, not as a
+guess at what a search might return.
+
+How to work:
+
+1. Call `search_flights` for OUTBOUND and for RETURN.
+2. If a leg comes back with no viable options, do something about it before giving
+   up. Either search again with the date moved by a day or two, or use
+   `relax_constraint` to drop ONE soft preference. The exclusion histogram in each
+   search result tells you which is the real problem: dates that do not match, a
+   party too large for the seats left, or a preference nothing satisfies.
+3. Use `rank_flights` when this traveller's priorities differ from cheapest-first
+   — for example when they need to arrive by a certain time, or when a direct
+   flight matters more than the fare.
+4. Stop as soon as you have viable options for both legs. Searching more than you
+   need makes a traveller wait for no benefit.
+
+Limits worth knowing, so you do not waste turns discovering them:
+
+- A search may move a date by only a few days from the traveller's own, and may
+  only use airports serving the cities they chose. A call outside that comes back
+  as a refusal telling you what is allowed — correct it rather than repeating it.
+- You may relax at most one soft preference per request, and only
+  `avoid_red_eye`, `prefer_direct` or `soft_arrival_preference`. Budget,
+  accessibility and maximum stops are never yours to relax.
+- A relaxation is verified against the real inventory gap before it takes effect.
+  Proposing one that does not match a real gap achieves nothing.
+- Your turns are limited. If you run out, whatever you have found is what the
+  traveller gets, so search in a sensible order.
+
+When you are done, explain your choice for the traveller: why these flights, what
+you traded off, and anything they should check before booking. If you relaxed a
+preference or searched a different date, say so plainly — they asked for something
+slightly different from what you are showing them. If a leg has no options at all,
+say that too; it is a real answer and more useful than a hedge."""
 
 
 # Prompt pattern: structured-output, not ReAct, per localfolder/llmops_plan.md
