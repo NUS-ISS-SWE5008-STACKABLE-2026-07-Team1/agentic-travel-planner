@@ -275,7 +275,11 @@ def run_agentic_flight_agent(
     # search is not found and then discarded by a filter on the original date.
     # Every shift is disclosed; see `ToolContext.date_shift_notes`.
     ctx.notes.extend(note for note in ctx.date_shift_notes() if note not in ctx.notes)
-    proposal = propose_flights(resolved, ctx.cache.all_rows or rows)
+    ctx.notes.extend(note for note in ctx.ranking_notes() if note not in ctx.notes)
+    # `ctx.final_proposal`, not `propose_flights`, so a ranking the model chose
+    # actually reaches the traveller. Identical to `propose_flights` when no
+    # ordering was chosen, which is the common case and the golden-safe one.
+    proposal = ctx.final_proposal(ctx.cache.all_rows or rows)
 
     response = _terminal_response(llm, ctx, messages, proposal, tracer)
     if ctx.relaxation_applied is not None:

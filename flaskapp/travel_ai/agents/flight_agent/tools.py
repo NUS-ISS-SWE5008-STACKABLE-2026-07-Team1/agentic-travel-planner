@@ -37,6 +37,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from flaskapp.travel_ai.agents.flight_agent.domain import (
+    DEFAULT_RANK_PRIORITY,
     RANK_COMPONENTS,
     apply_relaxation,
     flight_preference_gaps,
@@ -46,6 +47,7 @@ from flaskapp.travel_ai.agents.flight_agent.domain import (
     screen_leg,
 )
 from flaskapp.travel_ai.agents.flight_agent.schemas import (
+    FlightProposal,
     FlightProposalRequest,
     PreferenceRelaxation,
 )
@@ -148,6 +150,11 @@ class ToolContext:
     # date and then throw them away, because the final `propose_flights` filters
     # on exact date equality against the traveller's original request.
     effective_dates: dict[str, str] = field(default_factory=dict)
+    # Direction -> the ranking order the caller asked for, when it asked for one
+    # at all. Same reason as `effective_dates`: a tool whose result does not
+    # survive into the final proposal is a tool that does nothing. Empty means
+    # nobody expressed a preference, and the deterministic default applies.
+    effective_priority: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     @classmethod
     def for_request(
@@ -187,6 +194,43 @@ class ToolContext:
             updates["return_date"] = self.effective_dates["RETURN"]
         context = self.current_request.trip_context.model_copy(update=updates)
         return self.current_request.model_copy(update={"trip_context": context})
+
+    def final_proposal(self, rows, *, top_n: int = 3) -> FlightProposal:
+        """The traveller-facing proposal: resolved dates, chosen ranking, real rows.
+
+        Built here rather than by `propose_flights` because that function ranks
+        both legs with one order and takes no priority, so a caller's chosen
+        ordering could never reach the answer — `rank_flights` was, until this
+        existed, a tool that cost a turn and changed nothing.
+
+        Still entirely deterministic: `rank_leg` does the sorting, the caller only
+        chooses which named component leads, and `normalise_priority` guarantees
+        the result is a total order over every component. With no choice
+        expressed this is exactly `propose_flights`, which is what keeps the
+        golden scenarios valid.
+        """
+        request = self.resolved_request()
+        candidates = []
+        for direction in DIRECTIONS:
+            origin, dest = _leg_airports(request, direction)
+            candidates.extend(rank_leg(
+                rows, request, origin=origin, dest=dest,
+                leg_date=_leg_date(request, direction), direction=direction,
+                top_n=top_n, priority=self.effective_priority.get(direction),
+            ))
+        return FlightProposal(candidates=candidates)
+
+    def ranking_notes(self) -> list[str]:
+        """Disclosure for any leg not shown in the default order."""
+        notes = []
+        for direction, priority in sorted(self.effective_priority.items()):
+            leading = priority[0] if priority else None
+            if leading and leading != DEFAULT_RANK_PRIORITY[0]:
+                notes.append(
+                    f"{direction.title()} options are ordered by "
+                    f"{leading.replace('_', ' ')} first rather than by overall cost."
+                )
+        return notes
 
     def date_shift_notes(self) -> list[str]:
         """Traveller-facing disclosure for every leg shown on a different date."""
@@ -488,8 +532,14 @@ def rank_flights(
             "preference for this leg, so cost decided the order."
         )]
 
+    # Recorded only when the caller expressed a preference: storing the default
+    # would make `ranking_notes` claim a choice nobody made.
+    if priority:
+        ctx.effective_priority[direction] = tuple(effective)
+
     ctx.record(EVENT_TOOL_CALLED, {
         "tool": "rank_flights", "direction": direction, "returned": len(candidates),
+        "reordered": bool(priority),
     })
     return {
         "direction": direction,

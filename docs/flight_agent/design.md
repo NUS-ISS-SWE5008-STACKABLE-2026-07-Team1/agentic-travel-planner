@@ -7,7 +7,7 @@ corrected below and the changes are marked. The guardrail refactor sketched in
 
 Sources: `flaskapp/travel_ai/agents/flight_agent/` (agent.py, reasoning.py,
 domain.py, guardrails.py), `flaskapp/travel_ai/agents/base.py`,
-`flaskapp/travel_ai/safeguards.py`, and `docs/progress.md` Part B.
+`flaskapp/travel_ai/safeguards.py`, and `docs/flight_agent/report.md`.
 
 ---
 
@@ -92,11 +92,12 @@ Path 2, and with nothing fabricated. Path 2 on seed fires if and only if the
 airport pair is unstocked, which (since every seed row has SIN at one end) means
 any trip that does not touch Singapore.
 
-Per `docs/progress.md` §6 the seed dataset is **284 rows, SIN-origin only, dates
-2026-08-24 → 2026-10-08**. On the default `FLIGHT_INVENTORY_SOURCE=seed`, any
-trip from another origin or outside that window takes Path 2. This is not a rare
-edge case — for a demo driven from anywhere other than Singapore, it is the
-*normal* path.
+The seed dataset is **476 rows across two hubs** (Singapore and London), dates
+2026-08-24 → 2026-10-08 — see `report.md` §6. Until 2026-08-23 it was 284 rows with
+Singapore at one end of every route, which made Path 2 the *normal* path for a demo
+driven from anywhere else. The second hub narrows that, and does not close it: 60 of
+`places.py`'s 64,262 ordered city pairs are stocked, so any trip outside them still
+takes Path 2. That is why §3's fix matters more than the dataset's size.
 
 ---
 
@@ -201,8 +202,8 @@ warning would silently disable the plan-level disclosure — a trap
 now holds shut.
 
 Applied to `hotel_transport_agent` in the same change: the two modules are
-near-duplicates, and `docs/progress.md` records that the last guardrail fix had
-to be applied twice because one was missed. `tests/test_agent_parity.py` now
+near-duplicates, and an earlier guardrail fix (the toxicity word-boundary one)
+had to be applied twice because one of them was missed. `tests/test_agent_parity.py` now
 fails if either agent regains the gap alone.
 
 Still open from the options above: option 1's presentational half — making
@@ -324,6 +325,33 @@ empty leg into a failed request. That is checked as a capability
 (`hasattr(llm, "bind_tools")`) and traced as `agent_loop_unavailable`, rather than
 caught as an exception, so the trace says what happened.
 
+### `rank_flights` is built, correct, and currently unexercised
+
+Worth stating plainly rather than leaving for someone to discover from the logs:
+across 36 live runs the model called `search_flights` and `relax_constraint` and
+never once called `rank_flights`.
+
+Two causes were found, and only one was a defect.
+
+**The defect, now fixed.** The loop built its final answer with `propose_flights`,
+which takes no priority — so even when a caller chose an ordering, it was
+discarded and the default re-applied. `rank_flights` cost a turn and could not
+change the answer. `ToolContext.final_proposal` now carries the chosen order
+through, and `ranking_notes()` discloses it. Same class of bug as the date one in
+§4b: a tool whose result did not survive into the proposal.
+
+**The remaining cause is the dataset, not the prompt.** `_generate_leg` samples
+exactly two carriers per leg, so **every one of the 238 (route, date) groups holds
+exactly two flights**. The list a caller could reorder is always two items, and on
+the scenarios tested both were direct, both economy, both wheelchair-accessible.
+Declining to spend a turn re-ordering two equivalent options is the right call, and
+no prompt wording changes that.
+
+So the tool is real and tested; it has nothing to demonstrate on this data.
+Deliberately not fixed by widening the dataset yet — doing it properly means more
+flights per date on the Singapore routes too, which reorders golden scenarios and
+so needs its own change with the expectations regenerated under review.
+
 ### Grounding, measured against a real model
 
 - **120 options across 36 live runs, 0 fabricated.** Every option is built by
@@ -423,8 +451,8 @@ Still open:
 
 - **Option 1's presentational half** (§3) — estimated output is still
   distinguished only by a warning list, not visually.
-- `docs/progress.md` §3.3's guardrail table describes Path 1 only. A reader would
-  reasonably conclude the agent is guarded in all cases.
+- `docs/flight_agent/report.md` §3.3's guardrail table describes Path 1 only. A
+  reader would reasonably conclude the agent is guarded in all cases.
 - **`agent_relaxation_applied` records `relaxation.reason`** — model-generated free
   text in the audit trail, contradicting §5's "counts, not content". Pre-existing;
   worth narrowing to a reason code.

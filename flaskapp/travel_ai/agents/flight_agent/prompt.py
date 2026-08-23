@@ -88,9 +88,21 @@ How to work:
    `relax_constraint` to drop ONE soft preference. The exclusion histogram in each
    search result tells you which is the real problem: dates that do not match, a
    party too large for the seats left, or a preference nothing satisfies.
-3. Use `rank_flights` when this traveller's priorities differ from cheapest-first
-   — for example when they need to arrive by a certain time, or when a direct
-   flight matters more than the fare.
+3. Search results arrive ordered by overall cost, which is the right default and
+   wrong for some travellers. Call `rank_flights` when ANY of these is true, and
+   say in your answer why you did:
+   - they stated a wheelchair or accessibility need — lead with
+     `accessibility_verified`, so flights whose assistance is confirmed outrank
+     flights where it is merely unknown;
+   - they need to arrive by a particular time — lead with `arrival_time`;
+   - they asked for direct flights or to avoid red-eyes and the cheapest option
+     violates it — lead with `prefer_direct` or `avoid_red_eye`;
+   - they are travelling as a group and seating together matters — lead with
+     `seat_config`.
+   You are choosing which factor leads, not inventing an order: whatever you omit
+   is applied after, and cost always breaks ties. If a factor does not apply to
+   this traveller the tool will tell you it had no effect — do not call it again
+   for the same leg.
 4. Stop as soon as you have viable options for both legs. Searching more than you
    need makes a traveller wait for no benefit.
 
