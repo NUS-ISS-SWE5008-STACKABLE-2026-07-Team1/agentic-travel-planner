@@ -33,3 +33,50 @@ def test_extended_rows_carry_seat_inventory_golden_rows_do_not():
             assert item.seat_inventory is None
         else:
             assert item.seat_inventory is not None
+
+
+def test_dataset_has_two_hubs():
+    """Shape, not size, is what limited this dataset.
+
+    Every row used to have Singapore at one end, so any trip that did not touch
+    Singapore had no data at all and fell to the unbacked prompt-only path. A
+    second hub is the qualitative change; more rows of the same shape would not
+    have been.
+    """
+    pairs = {(item.origin_airport, item.dest_airport) for item in SEED_FLIGHT_INVENTORY}
+    without_singapore = {pair for pair in pairs if "SIN" not in pair}
+
+    assert without_singapore, "every route still touches Singapore"
+    assert {"LHR", "LGW"} & {airport for pair in without_singapore for airport in pair}
+
+
+def test_some_routes_are_deliberately_unstocked():
+    """The prompt-only path must stay reachable.
+
+    If the dataset ever covered everything, the regression tests guarding the
+    no-inventory path (`test_flight_path2_screening.py`) would silently stop
+    exercising it — they would be testing the grounded path instead.
+    """
+    from flaskapp.travel_ai.agents.flight_agent.seed_data import covers_route
+
+    assert not covers_route(("CDG",), ("FCO",)), "Paris-Rome is stocked; Path 2 tests need it not to be"
+    assert not covers_route(("GRU",), ("SIN",)), "Brazil is stocked; Path 2 tests use it"
+
+
+def test_golden_scenario_routes_are_unchanged_by_the_second_hub():
+    """The London rows must not be able to enter a Singapore search.
+
+    `domain._matches_route` filters by route before ranking, so this holds by
+    construction — but it is the property that lets the seed dataset grow without
+    rewriting `tests/golden/flight_scenarios.json`, so it is worth asserting.
+    """
+    sin_nrt = {
+        item.flight_id for item in SEED_FLIGHT_INVENTORY
+        if item.origin_airport == "SIN" and item.dest_airport == "NRT"
+    }
+    london_origin = {
+        item.flight_id for item in SEED_FLIGHT_INVENTORY if item.origin_airport == "LHR"
+    }
+
+    assert london_origin, "the London hub is missing"
+    assert not (sin_nrt & london_origin)

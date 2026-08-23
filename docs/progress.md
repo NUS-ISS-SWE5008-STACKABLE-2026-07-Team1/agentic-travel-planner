@@ -31,6 +31,98 @@ never actually being committed.
 
 # Part A — Session log
 
+## 2026-08-23 (later) — the three open items closed, against a real model
+
+**Goal:** finish the refactor's open items and actually verify them, using the
+OpenAI key in `.env.secrets`. All three needed a live model or new data; none
+could be settled by a unit test.
+
+### 1. Seed expansion — a second hub
+
+280 → 472 generated rows (476 with the golden four), 36 → 60 ordered airport
+pairs, of which **24 no longer touch Singapore**. London hub, twelve spokes
+(CDG/AMS/FRA/MAD/BCN/FCO/MXP/DUB/LIS/ZRH/CPH/JFK), four departures each.
+
+Shape, not size, was the limit. Every row used to have Singapore at one end, so
+any trip that did not touch Singapore had no data at all. Chasing coverage was
+never the answer — `places.py` has 254 cities, which is 64,262 ordered pairs and
+~8.1M rows at this density. The dataset is a test fixture, not a product database.
+
+Three rules held: a third RNG stream and flight-number range so **the existing 280
+rows regenerate byte-identically** (verified: 192 insertions, 0 deletions); only
+NEW airport pairs, so no golden scenario could be reordered; and plenty of routes
+left deliberately unstocked, so the prompt-only path stays reachable and its
+regression tests keep exercising it. `test_flight_seed_data.py` now asserts all
+three.
+
+### 2. Turning the loop on — measured, and it changed the design
+
+`scripts/flight_mode_eval.py`, 36 live runs against `openai/gpt-4o`, six
+scenarios, two repeats. Report: `docs/flight_agent/mode-eval.md`.
+
+| mode | median | options | runs returning options |
+|---|---|---|---|
+| `structured` | 5377ms | 32 | 8/12 |
+| **`auto`** | **6046ms** | **44** | **10/12** |
+| `agentic` | 8525ms | 44 | 10/12 |
+
+The per-scenario numbers are what mattered. The loop's benefit sat almost entirely
+in **one** case — a stocked route on an unstocked date, **0 options → 6**. Every
+other covered scenario produced an identical option count for 2-4 extra seconds.
+Always-on would have made every traveller pay for a benefit most never see.
+
+So the answer was not "on" or "off" but a third mode. **`auto` is now the
+default**: single-shot, escalating to the loop only when the deterministic search
+leaves a leg empty. The escalation test costs no model call, so the common path
+keeps single-shot latency exactly (`plain` 2924ms vs 2934ms) and only requests that
+would otherwise return nothing pay. `auto` gets `agentic`'s full benefit for
++669ms median instead of +3148ms, at a third of the tool calls.
+
+Because `auto` is the default, a model without tool calling would have turned an
+empty leg into a failed request. Now checked as a capability and traced as
+`agent_loop_unavailable`.
+
+### 3. The grounding spike — settled, keep code-built options
+
+Of the runs where the model named specific flights, **5 of 5 named exactly the
+shortlist the deterministic ranking had already chosen**. It cited 0 flights the
+ranking had dropped and 0 that no provider returned. The model would have picked
+the same flights, so letting it select buys nothing and costs the strongest
+guarantee in the codebase. Decision recorded in `design.md` §4b.
+
+Separately: **120 options across 36 live runs, 0 fabricated.**
+
+### The bug a real model found that 649 tests did not
+
+The first live run of the empty-date scenario did **not** widen the date. The model
+searched, got nothing, tried relaxing a preference (correctly rejected — the
+preference was not the problem), and gave up on a leg with flights two days away.
+
+The cause was the exclusion histogram. It keyed on each reason's leading clause, so
+twelve rows rejected for the same cause produced twelve distinct keys with a count
+of one each. There was no signal to act on. Fixed by grouping reasons into
+categories, and by returning `dates_this_route_flies_nearby` — derived from real
+rows, never guessed — when a leg comes back empty. The model then widened the date
+on the next run and found `SQ116-20260910`.
+
+Worth recording because every unit test passed both before and after: the plumbing
+was right and the *signal* was wrong, which is not a thing a stub can tell you.
+
+661 passing, semgrep clean on 9 rules.
+
+### Still open
+
+- **Duffel.** Everything above is measured on seed, where searching is free. On a
+  live supplier the latency and cost profile differ, and `max_provider_calls`
+  bounds `fetch` calls rather than supplier searches — `duffel.fetch` fans out over
+  airport pairs and can issue four billed POSTs per call.
+- `design.md` §3 option 1's presentational half: estimated output is still
+  distinguished only by a warning list, not visually.
+- `agent_relaxation_applied` still records `relaxation.reason`, model-generated free
+  text in a trail that is supposed to hold counts.
+
+---
+
 ## 2026-08-23 — Agentic Flight Agent refactor: Path 2 fabrication fix, plus Phases A and B
 
 **Goal:** start the agentic Flight Agent refactor — make the *process* agentic

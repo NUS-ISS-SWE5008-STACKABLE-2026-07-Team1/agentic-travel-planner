@@ -114,13 +114,20 @@ class Config:
 
     # --- Flight Agent execution mode and loop budgets ---
     #
-    # "structured" (default) is the single-shot path: domain.py searches once and
-    # the model explains the result. "agentic" opens the tool-calling loop, where
-    # the model chooses what to search and how to rank. The default stays
-    # structured until the latency measurement in the refactor plan is done,
-    # because the flight node sits on a fan-out branch joined by a barrier edge —
-    # the whole plan waits for the slowest specialist.
-    FLIGHT_AGENT_MODE = os.getenv("FLIGHT_AGENT_MODE", "structured").strip().lower()
+    # "auto" (default), "structured", or "agentic".
+    #
+    # `structured` is the single-shot path: domain.py searches once and the model
+    # explains the result. `agentic` always opens the tool-calling loop. `auto`
+    # runs structured unless the deterministic search leaves a leg empty, and only
+    # then opens the loop.
+    #
+    # Default is `auto` on the evidence in docs/flight_agent/mode-eval.md: across
+    # 24 live runs the loop's benefit was concentrated in one scenario (a stocked
+    # route on an unstocked date, 0 options -> 6), while every other covered
+    # scenario produced an identical option count for 2-4 extra seconds. The
+    # escalation test costs no model call, so `auto` keeps single-shot latency on
+    # the common path and spends the loop only where it changes the answer.
+    FLIGHT_AGENT_MODE = os.getenv("FLIGHT_AGENT_MODE", "auto").strip().lower()
     # Model turns inside the loop, excluding the terminal structured turn that
     # always follows. Three is enough for search, widen, conclude.
     FLIGHT_AGENT_MAX_LLM_TURNS = int(os.getenv("FLIGHT_AGENT_MAX_LLM_TURNS", "3"))
