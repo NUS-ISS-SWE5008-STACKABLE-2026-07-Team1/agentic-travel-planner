@@ -154,9 +154,31 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
 .live-processing-log { list-style: none; padding: 0; }
 .live-processing-log li { position: relative; margin-left: .4rem; padding: .6rem 0 .6rem 1.35rem; border-left: 2px solid #dce5f1; }
 .live-processing-log li::before { content: ""; position: absolute; left: -.35rem; top: .95rem; width: .65rem; height: .65rem; border-radius: 50%; background: var(--atlas-blue); }
-.processing-timeline-dialog { width: min(92vw, 52rem); max-height: 82vh; padding: 0; border: 0; border-radius: 1.2rem; box-shadow: 0 1.5rem 4rem rgba(7, 28, 51, .28); }
+.processing-timeline-dialog { width: min(96vw, 68rem); max-height: 88vh; padding: 0; border: 0; border-radius: 1.2rem; box-shadow: 0 1.5rem 4rem rgba(7, 28, 51, .28); }
 .processing-timeline-dialog::backdrop { background: rgba(7, 28, 51, .62); backdrop-filter: blur(3px); }
-.processing-timeline-body { max-height: calc(82vh - 6rem); overflow-y: auto; }
+.processing-timeline-body { max-height: calc(88vh - 6rem); overflow-y: auto; }
+.admin-status-button { border: 0; padding: .3rem .65rem; cursor: pointer; }
+.admin-status-button:hover, .admin-status-button:focus-visible { box-shadow: 0 0 0 .2rem rgba(25, 135, 84, .22); }
+.agent-workflow-canvas { overflow-x: auto; border: 1px solid #dfe6ef; border-radius: 1rem; background: linear-gradient(145deg, #f8fbff, #eef4fb); }
+.agent-workflow-canvas svg { display: block; width: 100%; min-width: 64rem; height: auto; }
+.agent-workflow-edge { fill: none; stroke: #aebccc; stroke-width: 3; }
+.agent-workflow-edge.completed { stroke: #198754; }
+.agent-workflow-edge.processing { stroke: #195ee7; stroke-dasharray: 9 7; }
+.agent-workflow-node rect { stroke-width: 2; filter: drop-shadow(0 4px 5px rgba(7, 28, 51, .1)); }
+.agent-workflow-node text { pointer-events: none; text-anchor: middle; }
+.agent-workflow-node .node-name { fill: #132b46; font-size: 14px; font-weight: 700; }
+.agent-workflow-node .node-status { fill: #607186; font-size: 11px; text-transform: capitalize; }
+.agent-workflow-node.completed rect { fill: #e7f6ed; stroke: #198754; }
+.agent-workflow-node.processing rect { fill: #e8f0ff; stroke: #195ee7; }
+.agent-workflow-node.failed rect { fill: #fdebec; stroke: #dc3545; }
+.agent-workflow-node.cancelled rect { fill: #fff3cd; stroke: #cc9a06; }
+.agent-workflow-node.queued rect { fill: #fff; stroke: #aebccc; }
+.agent-workflow-legend { display: flex; flex-wrap: wrap; gap: .8rem; }
+.agent-workflow-legend span { display: inline-flex; align-items: center; gap: .35rem; }
+.agent-workflow-legend i { width: .7rem; height: .7rem; border-radius: 50%; background: #aebccc; }
+.agent-workflow-legend .completed i { background: #198754; }
+.agent-workflow-legend .processing i { background: #195ee7; }
+.agent-workflow-legend .failed i { background: #dc3545; }
 
 @media (max-width: 767.98px) {
   .agent-orbit { transform: scale(.82); }
