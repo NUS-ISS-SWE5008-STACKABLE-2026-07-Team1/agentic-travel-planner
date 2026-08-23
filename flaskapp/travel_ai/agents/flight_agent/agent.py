@@ -37,7 +37,7 @@ from flaskapp.database import save_agent_run
 from flaskapp.travel_ai.a2a import response_message
 from flaskapp.travel_ai.agents.base import make_specialist_node
 from flaskapp.travel_ai.agents.flight_agent.adapter import to_flight_request
-from flaskapp.travel_ai.agents.flight_agent.domain import screen_flights
+from flaskapp.travel_ai.agents.flight_agent.domain import propose_flights, screen_flights
 from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION, PATH2_INSTRUCTION
 from flaskapp.travel_ai.agents.flight_agent.providers import get_inventory_provider
 from flaskapp.travel_ai.agents.flight_agent.providers.seed import INVENTORY_ASSUMPTION
@@ -101,6 +101,20 @@ class _InnerTracer:
     def record(self, event: str, agent: str, details: dict | None = None) -> None:
         if event not in _DUPLICATE_EVENTS:
             self._tracer.record(event, agent, details)
+
+
+def _has_empty_leg(request, inventory) -> bool:
+    """Whether the deterministic search leaves either leg with no candidates.
+
+    The escalation test for `auto` mode, and deliberately the cheap one: pure
+    Python over rows already fetched, no model call. An empty leg is precisely the
+    case the tool loop improves — it can search a nearby date — and a full leg is
+    precisely the case where the loop was measured to add latency for an identical
+    result.
+    """
+    proposal = propose_flights(request, inventory)
+    directions = {candidate.direction for candidate in proposal.candidates}
+    return directions != {"OUTBOUND", "RETURN"}
 
 
 def _forbid_concrete_options(agent_name: str, tracer):
@@ -254,11 +268,26 @@ def create_node(llm, tracer, provider=None, config=None):
     # between travellers.
     settings = vars(Config) if config is None else config
     budget_limits, max_date_shift_days = budget_from_config(settings)
-    # "structured" (the default) is the single-shot path this agent has always
-    # run: domain.py searches once, the model explains the result. "agentic"
-    # opens the tool loop. Resolved once here rather than per request so the mode
-    # cannot change under a traveller mid-plan.
-    agentic_mode = str(settings.get("FLIGHT_AGENT_MODE", "structured")).strip().lower() == "agentic"
+    # Three modes, resolved once here rather than per request so the mode cannot
+    # change under a traveller mid-plan:
+    #
+    #   structured  the single-shot path this agent has always run.
+    #   agentic     always open the tool loop.
+    #   auto        the default: structured, escalating to the loop only when the
+    #               deterministic search leaves a leg empty.
+    #
+    # `auto` exists because of what the measurement actually showed
+    # (`docs/flight_agent/mode-eval.md`). The loop's benefit is concentrated
+    # almost entirely in one case: a stocked route on an unstocked date went from
+    # 0 options to 6. On every other covered scenario it produced an identical
+    # option count for 2-4 extra seconds. Making it the global default would tax
+    # every traveller for a benefit most of them never see.
+    #
+    # The escalation test is free, which is what makes this worth doing: whether a
+    # leg is empty is decided by `propose_flights` over an in-memory list, with no
+    # model call. So the common path keeps single-shot latency exactly, and only
+    # the requests that would otherwise return nothing pay for the loop.
+    mode = str(settings.get("FLIGHT_AGENT_MODE", "auto")).strip().lower()
 
     def flight_node(state) -> dict:
         incoming = next(
@@ -317,14 +346,30 @@ def create_node(llm, tracer, provider=None, config=None):
             return result
 
         tracer.record("agent_started", NAME, {
-            "mode": "agentic" if agentic_mode else "grounded", "source": provider.name,
+            "mode": mode, "source": provider.name,
         })
         if tracer.database_path:
             save_agent_run(tracer.database_path, state["request_id"], NAME, "processing")
 
         usage = TokenUsageCallback()
         try:
-            if agentic_mode:
+            # Free, model-free escalation test: `propose_flights` is pure Python
+            # over rows already in memory. `run_flight_agent` computes it again
+            # internally, which is cheap and keeps this decision independent of
+            # whichever path is chosen.
+            use_loop = mode == "agentic" or (
+                mode == "auto" and _has_empty_leg(adapted.request, inventory)
+            )
+            # Not every chat model exposes tool calling, and `auto` is the default
+            # — so a model without it would otherwise turn an empty leg from a
+            # disappointing answer into a failed request. Checked as a capability
+            # rather than caught as an exception, so the trace says what happened.
+            if use_loop and not hasattr(llm, "bind_tools"):
+                tracer.record("agent_loop_unavailable", NAME, {
+                    "reason": "model_does_not_support_tool_calling",
+                })
+                use_loop = False
+            if use_loop:
                 proposal, response = run_agentic_flight_agent(
                     ctx, llm, tracer=_InnerTracer(tracer)
                 )
@@ -344,7 +389,7 @@ def create_node(llm, tracer, provider=None, config=None):
             )
             log_payload(f"REQUEST {state['request_id']} | {NAME.upper()} RESPONSE", finding)
             tracer.record("agent_completed", NAME, {
-                "mode": "agentic" if agentic_mode else "grounded",
+                "mode": "agentic" if use_loop else "grounded",
                 "source": provider.name,
                 "confidence": finding.confidence,
                 "option_count": len(finding.options),

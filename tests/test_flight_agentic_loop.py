@@ -559,3 +559,86 @@ def test_node_surfaces_the_date_shift_as_a_warning(stub_tool_llm, tracer):
     assert any("2026-09-01" in warning for warning in finding.warnings), (
         f"date shift never reached the traveller: {finding.warnings}"
     )
+
+
+# --- auto mode ----------------------------------------------------------------
+#
+# The default. `docs/flight_agent/mode-eval.md` measured the loop against a real
+# model across 24 runs: its benefit was concentrated in ONE scenario (a stocked
+# route on an unstocked date, 0 options -> 6), while every other covered scenario
+# produced an identical option count for 2-4 extra seconds. A global default would
+# have taxed every traveller for a benefit most never see.
+#
+# `auto` escalates only when the deterministic search leaves a leg empty. The test
+# for that costs no model call, which is what makes it worth doing.
+
+
+def test_auto_does_not_open_the_loop_when_both_legs_are_full(stub_tool_llm, tracer):
+    """The common path must keep single-shot latency exactly."""
+    node = create_node(
+        stub_tool_llm(SEARCH_BOTH_LEGS), tracer, provider=SpyProvider(),
+        config={"FLIGHT_AGENT_MODE": "auto"},
+    )
+    finding = node(_state())["findings"][0]
+
+    assert finding.options
+    assert "agent_loop_completed" not in _events(tracer), "the loop ran unnecessarily"
+
+
+def test_auto_opens_the_loop_when_a_leg_is_empty(stub_tool_llm, tracer):
+    """And the case it exists for."""
+    node = create_node(
+        stub_tool_llm([
+            [tool_call("search_flights", "c1", direction="OUTBOUND", depart_date="2026-09-01")],
+            [],
+        ]),
+        tracer, provider=SpyProvider(), config={"FLIGHT_AGENT_MODE": "auto"},
+    )
+    state = _state()
+    state["request"]["departure_date"] = "2026-09-03"  # unstocked
+
+    finding = node(state)["findings"][0]
+
+    assert "agent_loop_completed" in _events(tracer), "an empty leg did not escalate"
+    assert finding.options, "escalation produced nothing"
+
+
+def test_auto_degrades_when_the_model_cannot_call_tools(tracer):
+    """`auto` is the default, so a model without tool calling must still answer.
+
+    Checked as a capability rather than caught as an exception, so the trace says
+    what happened instead of the request simply failing.
+    """
+    class NoToolsLLM:
+        def with_structured_output(self, schema, method=None):
+            class _S:
+                def invoke(self, messages, config=None):
+                    return FlightAgentResponse(
+                        rationale="Nothing available on those dates.",
+                        highlighted_flight_ids=[], confidence=0.4,
+                    )
+            return _S()
+
+    node = create_node(
+        NoToolsLLM(), tracer, provider=SpyProvider(), config={"FLIGHT_AGENT_MODE": "auto"},
+    )
+    state = _state()
+    state["request"]["departure_date"] = "2026-09-03"
+
+    result = node(state)  # must not raise
+
+    assert result["findings"]
+    assert "agent_loop_unavailable" in _events(tracer)
+
+
+def test_explicit_structured_mode_never_opens_the_loop(stub_tool_llm, tracer):
+    """The escape hatch stays an escape hatch."""
+    node = create_node(
+        stub_tool_llm(SEARCH_BOTH_LEGS), tracer, provider=SpyProvider(),
+        config={"FLIGHT_AGENT_MODE": "structured"},
+    )
+    state = _state()
+    state["request"]["departure_date"] = "2026-09-03"
+    node(state)
+
+    assert "agent_loop_completed" not in _events(tracer)

@@ -309,19 +309,76 @@ def _search_request(
     return ctx.current_request.model_copy(update={"trip_context": context})
 
 
-def _reason_histogram(screening) -> dict[str, int]:
-    """Exclusion reasons collapsed to their leading clause and counted.
+# Exclusion reasons, grouped into the handful of things a caller can actually do
+# something about. Matched on the stable wording `domain._screen_item` produces.
+_REASON_CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("wrong_date", ("departs ",)),
+    ("not_enough_seats", ("seat(s) available, party needs",)),
+    ("over_budget", ("exceeds", "budget")),
+    ("arrives_too_late", ("arrives", "after")),
+    ("too_many_stops", ("stop",)),
+    ("seat_requirement", ("seat", "adjacent", "exit row", "accessible")),
+    ("accessibility", ("wheelchair", "step-free")),
+)
 
-    A histogram rather than the raw list: it tells the model whether to widen the
-    date or drop a preference without pasting every rejected row into the
-    conversation.
+
+def _categorise(reason: str) -> str:
+    lowered = reason.lower()
+    for label, needles in _REASON_CATEGORIES:
+        if all(needle.lower() in lowered for needle in needles):
+            return label
+    return "other"
+
+
+def _reason_histogram(screening) -> dict[str, int]:
+    """Exclusion reasons grouped by CATEGORY and counted.
+
+    Categories, not raw strings. An earlier version keyed on the reason's leading
+    clause, which for the commonest case ("departs 2026-09-10, requested
+    2026-09-12") produced one bucket per row: twelve keys with a count of one
+    each. Against a real model that was actively misleading — it searched, saw no
+    pattern in the noise, tried relaxing a preference instead (correctly rejected,
+    since the preference was not the problem), and gave up on a leg that had
+    flights two days away.
+
+    Twelve rows excluded for `wrong_date` is a signal. Twelve distinct strings is
+    not.
     """
     histogram: dict[str, int] = {}
     for result in screening:
         for reason in result.reasons:
-            key = reason.split(",")[0].strip()
+            key = _categorise(reason)
             histogram[key] = histogram.get(key, 0) + 1
     return histogram
+
+
+def _nearby_dates(
+    ctx: "ToolContext", request: FlightProposalRequest, direction: str, rows,
+) -> list[str]:
+    """Dates this route DOES fly, inside the search envelope, nearest first.
+
+    Derived from real rows, never guessed. Returned only when a leg comes back
+    empty, which is the one moment the caller needs it: knowing the route flies on
+    the 10th and the 15th is what turns "no flights" into a second search, and it
+    is information the caller cannot obtain by reasoning.
+    """
+    origin, dest = _leg_airports(request, direction)
+    base = _leg_date(ctx.base_request, direction)
+    origins, dests = set(origin), set(dest)
+    candidates: set[date] = set()
+    for item in rows:
+        if item.origin_airport not in origins or item.dest_airport not in dests:
+            continue
+        try:
+            flown = date.fromisoformat(item.dep_ts[:10])
+        except ValueError:
+            continue
+        if abs((flown - base).days) <= ctx.max_date_shift_days:
+            candidates.add(flown)
+    return [
+        day.isoformat()
+        for day in sorted(candidates, key=lambda d: (abs((d - base).days), d))
+    ]
 
 
 def search_flights(
@@ -366,7 +423,7 @@ def search_flights(
         "included_count": len(candidates),
         "excluded_count": sum(1 for s in screening if not s.included),
     })
-    return {
+    result = {
         "direction": direction,
         "searched_date": leg_date.isoformat(),
         "date_shift_days": shift,
@@ -376,6 +433,18 @@ def search_flights(
         "exclusion_reason_histogram": _reason_histogram(screening),
         "notes": notes,
     }
+    if not candidates:
+        # The one moment this is worth the tokens: an empty leg, where knowing
+        # which nearby dates the route actually flies is what makes a second
+        # search worth issuing rather than a guess.
+        nearby = _nearby_dates(ctx, request, direction, rows)
+        result["dates_this_route_flies_nearby"] = nearby
+        if nearby:
+            result["suggestion"] = (
+                f"No flights on {leg_date.isoformat()}. This route flies on "
+                f"{', '.join(nearby)} — search again with one of those dates."
+            )
+    return result
 
 
 def rank_flights(

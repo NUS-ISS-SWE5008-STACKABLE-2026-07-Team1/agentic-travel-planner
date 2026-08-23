@@ -386,3 +386,77 @@ def test_node_fetches_inventory_exactly_once(tracer):
 
     assert provider.fetches == 1, "the node fetched inventory more than once"
     assert finding.options, "the grounded path returned nothing to check"
+
+
+# --- Telling the caller WHY a leg is empty ------------------------------------
+#
+# These exist because of an observed failure against a real model, not a
+# hypothetical one. The first version of the histogram keyed on each reason's
+# leading clause, so twelve rows rejected for the same cause produced twelve
+# distinct keys with a count of one. The model searched, saw no pattern, tried
+# relaxing a preference instead (correctly rejected, since the preference was not
+# the problem) and gave up on a leg that had flights two days away.
+#
+# Every unit test passed at the time. The signal, not the plumbing, was broken.
+
+EMPTY_LEG_DATE = "2026-09-12"   # SIN-NRT is stocked, but not on this date
+
+
+def _empty_leg_context():
+    request = _request()
+    context = request.trip_context.model_copy(update={"depart_date": EMPTY_LEG_DATE})
+    return tools.ToolContext.for_request(
+        request.model_copy(update={"trip_context": context}),
+        SeedInventoryProvider(), LoopBudget().start(),
+    )
+
+
+def test_exclusions_are_grouped_by_cause_not_by_row():
+    """One bucket per cause. Twelve rows excluded for `wrong_date` is a signal;
+    twelve distinct strings is noise."""
+    result = tools.search_flights(_empty_leg_context(), direction="OUTBOUND")
+    histogram = result["exclusion_reason_histogram"]
+
+    assert result["included_count"] == 0, "scenario is no longer an empty leg"
+    assert histogram.get("wrong_date", 0) > 1, f"date exclusions not grouped: {histogram}"
+    assert len(histogram) < result["excluded_count"], "one key per row is not a histogram"
+
+
+def test_empty_leg_reports_dates_the_route_actually_flies():
+    """Derived from real rows, never guessed. This is what makes a second search
+    worth issuing rather than a shot in the dark."""
+    result = tools.search_flights(_empty_leg_context(), direction="OUTBOUND")
+
+    nearby = result["dates_this_route_flies_nearby"]
+    assert nearby, "an empty leg gave the caller nothing to act on"
+    assert "2026-09-10" in nearby
+    assert "suggestion" in result
+
+
+def test_suggested_dates_are_inside_the_search_envelope():
+    """Suggesting a date the envelope would then refuse would send the caller
+    into a guaranteed rejection."""
+    ctx = _empty_leg_context()
+    result = tools.search_flights(ctx, direction="OUTBOUND")
+
+    for day in result["dates_this_route_flies_nearby"]:
+        follow_up = tools.search_flights(ctx, direction="OUTBOUND", depart_date=day)
+        assert "error" not in follow_up, f"suggested {day} but the envelope refuses it"
+
+
+def test_suggested_dates_actually_have_flights():
+    """The suggestion must be true: searching one of them must return rows."""
+    ctx = _empty_leg_context()
+    suggested = tools.search_flights(ctx, direction="OUTBOUND")["dates_this_route_flies_nearby"]
+
+    found = tools.search_flights(ctx, direction="OUTBOUND", depart_date=suggested[0])
+    assert found["included_count"] > 0, f"{suggested[0]} was suggested but has no flights"
+
+
+def test_a_populated_leg_does_not_carry_suggestions():
+    """Only spend the tokens when the caller needs them."""
+    result = tools.search_flights(_context(), direction="OUTBOUND")
+
+    assert result["included_count"] > 0
+    assert "dates_this_route_flies_nearby" not in result
+    assert "suggestion" not in result

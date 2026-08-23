@@ -291,16 +291,59 @@ routability-only and Path 2 means "the search came back empty" — which a retry
 genuinely fix. That is why `max_provider_calls` exists even though seed makes
 searching free.
 
-### Before turning it on
+### Measured, and the default that came out of it
 
-- **Measure latency.** The flight node already can make four model calls, and it
-  sits on a fan-out branch joined by a barrier edge with a 180s per-call client
-  timeout — the whole plan waits for the slowest specialist. `agent_loop_completed`
-  carries `elapsed_ms`; compare against today's `agent_completed` before flipping
-  the default.
-- **Re-read `max_provider_calls` if Duffel is on.** It bounds `fetch` calls, not
-  supplier searches; `duffel.fetch` fans out over airport pairs and can issue four
-  billed POSTs per call.
+Run against `openai/gpt-4o` on the seed provider, 36 live runs, six scenarios,
+two repeats — `scripts/flight_mode_eval.py`, full numbers in
+`docs/flight_agent/mode-eval.md`.
+
+| mode | median | options found | runs returning options | tool calls |
+| --- | --- | --- | --- | --- |
+| `structured` | 5377ms | 32 | 8/12 | 0 |
+| **`auto`** | **6046ms** | **44** | **10/12** | 8 |
+| `agentic` | 8525ms | 44 | 10/12 | 24 |
+
+The per-scenario table is what decided the design. The loop's benefit is
+concentrated almost entirely in **one** case: a stocked route on an unstocked date
+went from **0 options to 6**. On every other covered scenario it produced an
+identical option count for 2-4 extra seconds. Always-on would have taxed every
+traveller for a benefit most never see.
+
+Hence a third mode, **`auto`, now the default**: run the single-shot path, and open
+the loop only when the deterministic search leaves a leg empty. The escalation test
+is `_has_empty_leg`, pure Python over rows already in memory with no model call,
+which is what makes it worth doing — the common path keeps single-shot latency
+exactly (`plain` 2924ms vs 2934ms; `london_hub` 3658ms vs 5276ms), and only the
+requests that would otherwise return nothing pay for the loop.
+
+`auto` reaches `agentic`'s full benefit (44 options, 10/12 runs) for +669ms on the
+median rather than +3148ms, at a third of the tool calls.
+
+Because `auto` is the default, a model without tool calling would otherwise turn an
+empty leg into a failed request. That is checked as a capability
+(`hasattr(llm, "bind_tools")`) and traced as `agent_loop_unavailable`, rather than
+caught as an exception, so the trace says what happened.
+
+### Grounding, measured against a real model
+
+- **120 options across 36 live runs, 0 fabricated.** Every option is built by
+  `_candidate_to_option` from `proposal.candidates`, so this is a structural
+  property; the measurement confirms nothing routes around it.
+- **The spike is settled: keep code-built options.** Of the runs where the model
+  named specific flights, **5 of 5** named exactly the shortlist the deterministic
+  ranking had already chosen. It cited **0** flights the ranking had dropped and
+  **0** that no provider returned. The model would have picked the same flights, so
+  letting it select buys nothing and costs the strongest guarantee in the codebase.
+  Revisit only if that agreement rate falls on a larger or more varied corpus.
+
+### Still worth knowing
+
+- **`max_provider_calls` bounds `fetch` calls, not supplier searches.**
+  `duffel.fetch` fans out over airport pairs and can issue four billed POSTs per
+  call, so 2 can mean 8 billed searches. Re-read it before enabling Duffel.
+- The measurement is on **seed**, where searching is free. On Duffel the loop's
+  latency and cost profile will differ, and `auto` limits exposure by opening the
+  loop only when a leg is empty.
 
 ---
 

@@ -27,6 +27,9 @@ RNG = random.Random(42)
 # existing rows on the next regeneration — a diff no reviewer could check, and
 # a silent change to data other tests read.
 CITY_RNG = random.Random(2026)
+# Third stream, same reasoning again: the London hub was added after the SIN
+# routes and must not shift a single existing row when the CSV is regenerated.
+HUB_RNG = random.Random(7)
 
 ORIGIN = "SIN"
 ORIGIN_OFFSET = "+08:00"
@@ -101,6 +104,74 @@ CITY_TRIP_PLANS = {
 # New-route flight numbers start well above the originals so the two streams
 # can never mint the same flight_id.
 CITY_FLIGHT_NO_BASE = 600
+
+# --- Second hub: London -----------------------------------------------------
+#
+# Everything above is SIN-origin: every row has Singapore at one end. That shape,
+# not the row count, is what forces every non-Singapore trip onto the unbacked
+# prompt-only path — a traveller flying Paris to Rome has no data at all, and no
+# amount of re-searching invents rows that do not exist.
+#
+# Chasing coverage is not the answer: `places.py` has 254 cities, which is 64,262
+# ordered pairs and roughly 8.1M rows at this density. The dataset is a test
+# fixture, not a product database. Adding a SECOND HUB changes its shape from one
+# hub to two, which is the qualitative unlock; going from 280 to 2,800 rows of the
+# same shape would not be.
+#
+# London, because `places.py` already resolves LHR/LGW/STN/LTN, SIN-LHR is
+# already stocked (so the two hubs connect), and `scripts/duffel_smoke.py` already
+# uses LHR-JFK as its reference search.
+#
+# Two rules, both load-bearing:
+#
+# 1. **Only NEW airport pairs.** `domain._matches_route` filters by route before
+#    ranking, so an LHR-CDG row can never enter a SIN-NRT search. Adding a row to
+#    an EXISTING SIN route would reorder a golden scenario and break
+#    `test_flight_golden.py`.
+# 2. **Deliberately incomplete.** Plenty of pairs stay unstocked on purpose. The
+#    prompt-only path must remain reachable, or the regression tests covering it
+#    (`test_flight_path2_screening.py`) would have nothing to exercise.
+HUB_ORIGIN = "LHR"
+HUB_ORIGIN_OFFSET = "+01:00"
+
+# (dest_airport, dest_offset, direct_duration_min, [(carrier, tier), ...])
+HUB_ROUTES = [
+    ("CDG", "+02:00", 75, [("BA", "full"), ("AF", "full")]),
+    ("AMS", "+02:00", 70, [("BA", "full"), ("KL", "full")]),
+    ("FRA", "+02:00", 95, [("BA", "full"), ("LH", "full")]),
+    ("MAD", "+02:00", 140, [("BA", "full"), ("IB", "full")]),
+    ("BCN", "+02:00", 130, [("BA", "full"), ("VY", "budget")]),
+    ("FCO", "+02:00", 155, [("BA", "full"), ("AZ", "full")]),
+    ("MXP", "+02:00", 120, [("BA", "full"), ("AZ", "full"), ("U2", "budget")]),
+    ("DUB", "+01:00", 85, [("BA", "full"), ("EI", "full")]),
+    ("LIS", "+01:00", 165, [("BA", "full"), ("TP", "full")]),
+    ("ZRH", "+02:00", 100, [("BA", "full"), ("LX", "full")]),
+    ("CPH", "+02:00", 115, [("BA", "full"), ("SK", "full")]),
+    ("JFK", "-04:00", 420, [("BA", "full"), ("VS", "full")]),
+]
+
+# Four departures per spoke, spread across the dataset's 2026-08-24 -> 2026-10-08
+# window and deliberately NOT consecutive. The gaps are the point: a traveller
+# asking for a date between them gets an empty leg on the single-shot path, which
+# is exactly the case the tool loop's date widening improves.
+HUB_TRIP_PLANS = {
+    "CDG": [("2026-08-26", 4), ("2026-09-08", 3), ("2026-09-19", 5), ("2026-10-01", 4)],
+    "AMS": [("2026-08-27", 3), ("2026-09-09", 4), ("2026-09-21", 3), ("2026-10-02", 4)],
+    "FRA": [("2026-08-28", 4), ("2026-09-11", 3), ("2026-09-22", 4), ("2026-10-03", 3)],
+    "MAD": [("2026-08-29", 5), ("2026-09-12", 6), ("2026-09-23", 5), ("2026-10-01", 6)],
+    "BCN": [("2026-08-30", 4), ("2026-09-13", 5), ("2026-09-24", 4), ("2026-10-02", 5)],
+    "FCO": [("2026-08-25", 6), ("2026-09-10", 5), ("2026-09-20", 6), ("2026-09-30", 5)],
+    "MXP": [("2026-08-31", 4), ("2026-09-14", 3), ("2026-09-25", 4), ("2026-10-04", 3)],
+    "DUB": [("2026-08-26", 3), ("2026-09-07", 2), ("2026-09-18", 3), ("2026-10-05", 2)],
+    "LIS": [("2026-09-01", 6), ("2026-09-15", 5), ("2026-09-26", 6), ("2026-10-02", 5)],
+    "ZRH": [("2026-08-27", 4), ("2026-09-16", 3), ("2026-09-27", 4), ("2026-10-03", 3)],
+    "CPH": [("2026-09-02", 5), ("2026-09-17", 4), ("2026-09-28", 5), ("2026-10-04", 3)],
+    "JFK": [("2026-08-24", 7), ("2026-09-06", 8), ("2026-09-19", 7), ("2026-09-29", 8)],
+}
+
+# Third flight-number range, above the city routes' 600, so the three streams can
+# never mint the same flight_id.
+HUB_FLIGHT_NO_BASE = 900
 
 CABINS_BY_TIER = {
     "full": ["ECONOMY", "ECONOMY", "PREMIUM_ECONOMY", "BUSINESS"],
@@ -208,17 +279,20 @@ def _round_trip(
     dest: str, dest_offset: str, direct_duration: int, carriers: list[tuple[str, str]],
     depart_date: str, trip_len: int, flight_no_counter: dict[str, int],
     rng: random.Random,
+    origin: str = ORIGIN, origin_offset: str = ORIGIN_OFFSET,
 ) -> list[dict]:
+    """Both legs of one round trip. `origin` defaults to SIN so every existing
+    call site is unchanged; the London hub passes its own."""
     return_date = (
         datetime.strptime(depart_date, "%Y-%m-%d") + timedelta(days=trip_len)
     ).strftime("%Y-%m-%d")
     return [
         *_generate_leg(
-            ORIGIN, ORIGIN_OFFSET, dest, dest_offset, depart_date,
+            origin, origin_offset, dest, dest_offset, depart_date,
             direct_duration, carriers, flight_no_counter, rng,
         ),
         *_generate_leg(
-            dest, dest_offset, ORIGIN, ORIGIN_OFFSET, return_date,
+            dest, dest_offset, origin, origin_offset, return_date,
             direct_duration, carriers, flight_no_counter, rng,
         ),
     ]
@@ -248,6 +322,19 @@ def generate() -> list[dict]:
             all_rows.extend(_round_trip(
                 dest, dest_offset, direct_duration, carriers,
                 depart_date, trip_len, city_counter, CITY_RNG,
+            ))
+
+    # London hub, appended last on its own RNG stream and flight-number range so
+    # regenerating never rewrites a row above.
+    hub_counter: dict[str, int] = {}
+    for dest, dest_offset, direct_duration, carriers in HUB_ROUTES:
+        for carrier, _tier in carriers:
+            hub_counter.setdefault(carrier, HUB_FLIGHT_NO_BASE)
+        for depart_date, trip_len in HUB_TRIP_PLANS[dest]:
+            all_rows.extend(_round_trip(
+                dest, dest_offset, direct_duration, carriers,
+                depart_date, trip_len, hub_counter, HUB_RNG,
+                origin=HUB_ORIGIN, origin_offset=HUB_ORIGIN_OFFSET,
             ))
     return all_rows
 
