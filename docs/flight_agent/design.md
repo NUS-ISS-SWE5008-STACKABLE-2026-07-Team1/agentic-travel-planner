@@ -232,6 +232,78 @@ flight-agent run can invoke the model up to four times.
 
 ---
 
+## 4b. The tool-calling loop (`FLIGHT_AGENT_MODE=agentic`)
+
+Added 2026-08-23. **Off by default** — `structured` remains the shipped mode until
+the latency measurement below is done.
+
+`agentic.py` is a two-node subgraph *inside* the flight node: `plan` binds the
+tools and proposes calls, `act` dispatches them, and a conditional edge ends the
+loop when the model stops asking for tools. Not `tools_condition` on the top-level
+graph, because `graph.py` is a fan-out/fan-in with a barrier edge and no
+conditional edges — the specialists are peers, and one specialist's internals
+should not become part of the workflow the others run through.
+
+Three tools, wrapping `domain.py`: `search_flights`, `rank_flights`,
+`relax_constraint`. `check_cost` and `check_accessibility` were considered and
+dropped — Duffel publishes neither seat maps nor accessibility, and seed already
+carries accessibility on every row, so both would have been tools with no data
+behind them.
+
+### What holds the loop, and none of it is the prompt
+
+| Control | Where | What it prevents |
+| --- | --- | --- |
+| Argument envelope | `tools._validate_search_args` | A search wandering to a different trip: at most ±3 days from the **base** request (never the current one, or repeated shifts accumulate), and only airports already resolved for the traveller's cities |
+| `LoopBudget` | `agents/loop.py` | Spiralling: turns, tool calls, provider calls, wall clock |
+| Deterministic ranking | `domain._rank_key` | The model re-deriving an order in prose; it may permute named components, never invent one |
+| Code-built options | `agent._candidate_to_option` | Fabricated flights — `Option`s come from `proposal.candidates`, which `propose_flights` builds from provider rows |
+| Terminal structured turn | `agentic._terminal_response` | An unvalidated free-text answer; the loop always ends in `with_structured_output` |
+
+A refused tool call returns a readable refusal **to the model**, not an exception:
+it gets a chance to correct itself, the run survives, and the traveller's trip is
+never quietly changed.
+
+### What it actually buys, honestly
+
+**Not** a reduction in Path 2. On seed, Path 2 is caused by an unstocked *airport
+pair*, and no amount of re-searching creates rows that do not exist (§2's
+correction).
+
+What it buys is **empty → populated**. SIN↔NRT is stocked on only a handful of
+dates inside the 42-day window, so a traveller asking for 12 September gets a
+grounded, honest, empty answer today. The loop searches again a day or two either
+side and returns real flights. Demonstrated end to end in
+`test_widened_search_turns_an_empty_leg_into_real_options`.
+
+That required one thing beyond the loop itself: a widened search that finds
+flights must also be allowed to *keep* them. `ToolContext.resolved_request()`
+carries the leg dates that actually produced results into the final proposal —
+without it the loop finds flights on a nearby date and then discards them, because
+`propose_flights` filters on exact date equality against the original request. A
+leg that finds nothing keeps the traveller's own date, so the coverage warning
+still names the date they asked for, and every moved leg is disclosed by
+`date_shift_notes()`. Showing someone a different date without saying so would be
+worse than showing them nothing.
+
+On Duffel the loop *would* reclaim real Path 2, because there `covers()` is
+routability-only and Path 2 means "the search came back empty" — which a retry can
+genuinely fix. That is why `max_provider_calls` exists even though seed makes
+searching free.
+
+### Before turning it on
+
+- **Measure latency.** The flight node already can make four model calls, and it
+  sits on a fan-out branch joined by a barrier edge with a 180s per-call client
+  timeout — the whole plan waits for the slowest specialist. `agent_loop_completed`
+  carries `elapsed_ms`; compare against today's `agent_completed` before flipping
+  the default.
+- **Re-read `max_provider_calls` if Duffel is on.** It bounds `fetch` calls, not
+  supplier searches; `duffel.fetch` fans out over airport pairs and can issue four
+  billed POSTs per call.
+
+---
+
 ## 5. Tracing
 
 `run_flight_agent` emits its own `agent_started`/`agent_completed` because it is

@@ -94,6 +94,71 @@ rules:
                   ...
                   $LLM.invoke(...)
 
+  - id: llm-tool-loop-without-budget
+    languages: [python]
+    severity: ERROR
+    message: >
+      A tool-calling loop is being opened without declaring where its budget comes
+      from. A bound-tool invoke returns tool calls, not a validated schema, so the
+      structured-output contract that makes the downstream guardrails meaningful
+      does not hold on that turn. Two things must be true in code, not in the
+      prompt: the loop is bounded (LLM turns, tool calls, provider calls, wall
+      clock), and it TERMINATES in a
+      .with_structured_output(..., method="json_schema") turn so what leaves it is
+      still a validated object.
+
+      The fix is to annotate the enclosing function with where the bound lives:
+      `budget: LoopBudget` or `ctx: ToolContext`. That annotation is load-bearing,
+      not decoration — it is how this rule tells a bounded loop from an unbounded
+      one. See agents/flight_agent/agentic.py:build_flight_subgraph.
+
+      Deliberately a convention check rather than a dataflow one. An earlier draft
+      tried to detect a budget reachable anywhere in the enclosing scope; it passed
+      agentic.py but fired on an equivalent function whose only difference was a
+      missing type annotation. A rule that fires on correct code teaches people to
+      ignore it, which is the failure mode this whole file is written to avoid.
+
+      This rule exists because llm-invoke-without-structured-output cannot see this
+      case: that rule requires the client to be constructed and invoked in the same
+      scope, and every agent here receives an already-built llm.
+    patterns:
+      - pattern-either:
+          - pattern: $LLM.bind_tools(...)
+          - pattern: create_react_agent(...)
+      - pattern-not-inside: |
+          def $F(..., budget: LoopBudget, ...):
+              ...
+      - pattern-not-inside: |
+          def $F(..., ctx: ToolContext, ...):
+              ...
+      - pattern-not-inside: |
+          def $F(..., ctx: tools.ToolContext, ...):
+              ...
+
+  - id: llm-tool-result-into-inventory-row
+    languages: [python]
+    severity: ERROR
+    message: >
+      A FlightInventoryItem or FlightCandidate is being built from model-supplied
+      data. Inventory rows come from a provider and candidates come from
+      domain.py; a model may choose WHICH rows to search and rank, never what a
+      row says. This is the executable form of the invariant agent.py relies on
+      when it builds every Option from proposal.candidates.
+
+      Best-effort by construction — semgrep cannot reason about provenance, so a
+      determined violation can evade it. The real control is the membership check
+      in guardrails.validate_grounded_ids against InventoryCache.seen_ids, tested
+      in tests/test_flight_provenance.py. This rule is the cheap tripwire.
+    patterns:
+      - pattern-either:
+          - pattern: FlightInventoryItem(..., flight_id=$RESP.$FIELD, ...)
+          - pattern: FlightCandidate(..., flight_id=$RESP.$FIELD, ...)
+          - pattern: FlightInventoryItem(..., flight_id=$RESP[...], ...)
+          - pattern: FlightCandidate(..., flight_id=$RESP[...], ...)
+      - metavariable-regex:
+          metavariable: $RESP
+          regex: ^(response|result|tool_result|message|completion|llm_.*|ai_.*)$
+
   - id: llm-provider-tls-verification-disabled
     languages: [python]
     severity: ERROR

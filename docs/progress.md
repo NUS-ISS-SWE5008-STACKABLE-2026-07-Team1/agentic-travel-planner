@@ -187,13 +187,77 @@ stdlib-only `loop.py` "failed" it. Rewritten as a static AST check of each
 module's own imports, which is the property actually intended, with two tests
 proving the detector can fail.
 
+### Phase C — the loop
+
+`flight_agent/agentic.py`: a two-node subgraph (`plan` binds tools and proposes
+calls, `act` dispatches them) inside the flight node, behind
+`FLIGHT_AGENT_MODE=agentic` and **off by default**. It is the only module in the
+flight package that imports langgraph, which `test_flight_imports.py` enforces.
+
+The loop takes the node's `ToolContext` rather than a provider, so the node's
+cache is the loop's cache — building a second one would re-fetch inventory the
+node already paid for, free on seed and billed on Duffel. It always ends in a
+`with_structured_output` turn, so whatever happens inside, what leaves is a
+validated `FlightAgentResponse` and `agent.py`'s `_build_finding` and
+`_candidate_to_option` are untouched.
+
+**What it actually buys, and what it does not.** Not a reduction in Path 2 — on
+seed that is caused by an unstocked airport pair, and re-searching cannot create
+rows. What it buys is **empty → populated**: SIN↔NRT is stocked on only a handful
+of dates in the 42-day window, so asking for 12 September returns a grounded,
+honest, empty answer today, and the loop searches a day or two either side and
+returns real flights.
+
+**That did not work on the first attempt, and the bug is worth recording.** The
+loop searched the widened date, found flights, and then threw them away: the final
+`propose_flights` filters on exact date equality against the traveller's original
+request, so the rows were excluded again. Caught by running the scenario end to
+end rather than by a test — every unit test still passed. Fixed with
+`ToolContext.resolved_request()`, which carries the leg dates that actually
+produced results into the final proposal. Two constraints on that:
+
+- a leg that found nothing keeps the traveller's own date, so the "no flight
+  satisfies these dates" warning still names the date they asked for;
+- every moved leg is disclosed by `date_shift_notes()` and surfaced as a warning.
+  Showing someone a different date without saying so would be worse than showing
+  them nothing.
+
+**The semgrep rules were inert when first written, twice.** The plan called for
+two new rules covering `bind_tools`, since `llm-invoke-without-structured-output`
+cannot see it (that rule needs the client constructed and invoked in the same
+scope, and every agent here receives an already-built `llm`). Draft one reported
+zero findings on the codebase, which looked like success and was actually a rule
+that could not match anything. Draft two matched the violations but also fired on
+a correct function whose only difference was a missing type annotation.
+
+Both mistakes are invisible without fixtures, so `tests/fixtures/semgrep/` now
+holds one file of deliberate violations and one of bounded shapes that must stay
+silent, and `test_semgrep_rules.py` asserts both directions. The final rule is a
+convention check — a function opening a tool loop must declare where its bound
+comes from (`budget: LoopBudget` or `ctx: ToolContext`) — rather than an attempt at
+dataflow analysis, because a rule that fires on correct code teaches people to
+ignore it, which is the failure mode `.semgrep/llm-agent.yml`'s own header warns
+about.
+
+`tests/conftest.py` is the repo's first, holding `stub_tool_llm` (a scripted
+tool-calling model) and `frozen_budget`. Additive only — no existing per-file stub
+was migrated, because the Phase A/B gate is that the pre-existing tests pass
+unchanged.
+
+618 → 649 passing. Semgrep clean on 9 rules.
+
 ### Still open
 
-- **Phase C — the loop itself**, in a new `flight_agent/agentic.py`: the only
-  module in the package that may import langgraph. A subgraph inside the flight
-  node, not `tools_condition` on the top-level graph, which is a fan-out/fan-in
-  with a barrier edge and no conditional edges. Terminating in a structured turn
-  so the output contract stays a validated Pydantic object.
+- **Turning the loop on.** Measure `agent_loop_completed.elapsed_ms` against
+  today's `agent_completed` first: the flight node already can make four model
+  calls and sits on a fan-out branch joined by a barrier edge, so the whole plan
+  waits for it.
+- **Seed expansion** to ~500 rows / two hubs (London), so non-Singapore trips can
+  be grounded at all. Only *new* routes may be added — an extra row on an existing
+  SIN route would reorder a golden scenario.
+- **The grounding spike**: whether the model may select ids (validated against
+  `seen_ids`) or code keeps building every option. Currently built for the latter,
+  which is the stronger guarantee.
 - Seed expansion to ~500 rows / two hubs, so non-Singapore trips can be grounded
   at all. Only *new* routes may be added: an extra row on an existing SIN route
   would reorder a golden scenario.
