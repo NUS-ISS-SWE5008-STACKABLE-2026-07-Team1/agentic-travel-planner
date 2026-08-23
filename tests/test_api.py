@@ -337,6 +337,8 @@ def test_admin_page_and_activity_require_configured_admin(tmp_path):
     admin_page = client.get("/admin")
     assert b'id="processing-timeline-dialog"' in admin_page.data
     assert b'id="close-processing-timeline"' in admin_page.data
+    assert b'id="agent-workflow-graph"' in admin_page.data
+    assert b'id="agent-workflow-legend"' in admin_page.data
     assert b'id="live-processing-log"' in admin_page.data
     assert b'id="live-request-conversation"' in admin_page.data
     assert b"User request details" not in admin_page.data
