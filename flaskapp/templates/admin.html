@@ -67,7 +67,20 @@
       <button id="close-processing-timeline" class="btn-close" type="button" aria-label="Close processing timeline"></button>
     </div>
     <div class="p-4 processing-timeline-body">
+      <section class="mb-4" aria-labelledby="agent-workflow-heading">
+        <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+          <div><h3 id="agent-workflow-heading" class="h6 mb-1">Request and agent workflow</h3><p class="small text-body-secondary mb-0">From the traveller’s submission through intake, parallel specialist work, and final synthesis.</p></div>
+          <div id="agent-workflow-legend" class="agent-workflow-legend small" aria-label="Workflow status legend"></div>
+        </div>
+        <div class="agent-workflow-canvas">
+          <svg id="agent-workflow-graph" role="img" aria-labelledby="agent-workflow-title agent-workflow-description" viewBox="0 0 1260 430" preserveAspectRatio="xMidYMid meet">
+            <title id="agent-workflow-title">Request and agent workflow for the selected request</title>
+            <desc id="agent-workflow-description">The user submits a request, the orchestrator validates it, four specialist agents work in parallel, and the orchestrator creates the final itinerary.</desc>
+          </svg>
+        </div>
+      </section>
       <div class="d-none" aria-hidden="true"><span id="live-request-label"></span><span id="live-request-status"></span><div id="live-request-conversation"></div><div id="live-agent-stages"></div></div>
+      <h3 class="h6 mb-2">Processing events</h3>
       <ol id="live-processing-log" class="live-processing-log mb-0" aria-live="polite"></ol>
     </div>
   </dialog>
