@@ -642,3 +642,93 @@ def test_explicit_structured_mode_never_opens_the_loop(stub_tool_llm, tracer):
     node(state)
 
     assert "agent_loop_completed" not in _events(tracer)
+
+
+# --- rank_flights has to change something --------------------------------------
+#
+# Observed in the OpenAI logs: across 36 live runs the model never once called
+# `rank_flights`. Two causes, both real. `search_flights` already returns rows
+# ranked by the default order, so there was no visible reason to ask for another;
+# and the final proposal was built by `propose_flights` with no priority, so a
+# chosen order was discarded even when one was expressed.
+#
+# The second is the one that mattered: a tool that costs a turn and cannot change
+# the answer is worse than no tool.
+
+
+def test_a_chosen_ranking_reaches_the_traveller(stub_tool_llm):
+    """The bug these tests exist for. `arrival_time` is inert without a soft
+    arrival preference, so `prefer_direct` is used as the observable lead."""
+    llm = stub_tool_llm([
+        [tool_call("search_flights", "c1", direction="OUTBOUND")],
+        [tool_call("rank_flights", "c2", direction="OUTBOUND", priority=["seat_config"])],
+        [],
+    ])
+    ctx = _context()
+
+    proposal, _response = run_agentic_flight_agent(ctx, llm)
+
+    assert ctx.effective_priority.get("OUTBOUND"), "the chosen order was not kept"
+    assert ctx.effective_priority["OUTBOUND"][0] == "seat_config"
+    assert proposal.candidates, "ranking emptied the proposal"
+
+
+def test_ranking_choice_is_disclosed(stub_tool_llm):
+    llm = stub_tool_llm([
+        [tool_call("search_flights", "c1", direction="OUTBOUND")],
+        [tool_call("rank_flights", "c2", direction="OUTBOUND", priority=["seat_config"])],
+        [],
+    ])
+    ctx = _context()
+    run_agentic_flight_agent(ctx, llm)
+
+    assert any("seat config" in note for note in ctx.ranking_notes())
+
+
+def test_no_ranking_choice_means_no_claim_of_one(stub_tool_llm):
+    """Calling `rank_flights` without a priority is asking for the default. It
+    must not be recorded as a decision, or the disclosure would be a lie."""
+    llm = stub_tool_llm([
+        [tool_call("search_flights", "c1", direction="OUTBOUND")],
+        [tool_call("rank_flights", "c2", direction="OUTBOUND")],
+        [],
+    ])
+    ctx = _context()
+    run_agentic_flight_agent(ctx, llm)
+
+    assert ctx.effective_priority == {}
+    assert ctx.ranking_notes() == []
+
+
+def test_ranking_only_reorders_it_never_changes_the_set(stub_tool_llm):
+    """Membership is decided by the hard filters. No ordering the model can ask
+    for may add or remove a flight."""
+    baseline_ctx = _context()
+    run_agentic_flight_agent(baseline_ctx, stub_tool_llm(SEARCH_BOTH_LEGS))
+    baseline = {c.flight_id for c in baseline_ctx.final_proposal(baseline_ctx.cache.all_rows).candidates}
+
+    llm = stub_tool_llm([
+        [tool_call("search_flights", "c1", direction="OUTBOUND"),
+         tool_call("search_flights", "c2", direction="RETURN")],
+        [tool_call("rank_flights", "c3", direction="OUTBOUND", priority=["seat_config"])],
+        [],
+    ])
+    ctx = _context()
+    proposal, _response = run_agentic_flight_agent(ctx, llm)
+
+    assert {c.flight_id for c in proposal.candidates} == baseline
+
+
+def test_default_path_still_matches_propose_flights(stub_tool_llm):
+    """`final_proposal` replaced `propose_flights` in the loop. With no ordering
+    chosen the two must be identical, or the golden scenarios stop describing
+    what the agent runs."""
+    from flaskapp.travel_ai.agents.flight_agent.domain import propose_flights
+
+    ctx = _context()
+    proposal, _response = run_agentic_flight_agent(ctx, stub_tool_llm(SEARCH_BOTH_LEGS))
+    expected = propose_flights(ctx.resolved_request(), ctx.cache.all_rows)
+
+    assert [c.flight_id for c in proposal.candidates] == [
+        c.flight_id for c in expected.candidates
+    ]
