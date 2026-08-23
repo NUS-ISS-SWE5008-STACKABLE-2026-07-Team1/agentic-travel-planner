@@ -111,6 +111,44 @@ class Config:
     # before our HTTP client gives up on it.
     DUFFEL_SUPPLIER_TIMEOUT_MS = int(os.getenv("DUFFEL_SUPPLIER_TIMEOUT_MS", "20000"))
     DUFFEL_MAX_OFFERS = int(os.getenv("DUFFEL_MAX_OFFERS", "50"))
+
+    # --- Flight Agent execution mode and loop budgets ---
+    #
+    # "auto" (default), "structured", or "agentic".
+    #
+    # `structured` is the single-shot path: domain.py searches once and the model
+    # explains the result. `agentic` always opens the tool-calling loop. `auto`
+    # runs structured unless the deterministic search leaves a leg empty, and only
+    # then opens the loop.
+    #
+    # Default is `auto` on the evidence in docs/flight_agent/mode-eval.md: across
+    # 24 live runs the loop's benefit was concentrated in one scenario (a stocked
+    # route on an unstocked date, 0 options -> 6), while every other covered
+    # scenario produced an identical option count for 2-4 extra seconds. The
+    # escalation test costs no model call, so `auto` keeps single-shot latency on
+    # the common path and spends the loop only where it changes the answer.
+    FLIGHT_AGENT_MODE = os.getenv("FLIGHT_AGENT_MODE", "auto").strip().lower()
+    # Model turns inside the loop, excluding the terminal structured turn that
+    # always follows. Three is enough for search, widen, conclude.
+    FLIGHT_AGENT_MAX_LLM_TURNS = int(os.getenv("FLIGHT_AGENT_MAX_LLM_TURNS", "3"))
+    FLIGHT_AGENT_MAX_TOOL_CALLS = int(os.getenv("FLIGHT_AGENT_MAX_TOOL_CALLS", "6"))
+    # Calls to `provider.fetch`, NOT supplier searches. `duffel.fetch` fans out
+    # over airport pairs and can issue up to MAX_AIRPORTS_PER_CITY ** 2 = 4 billed
+    # POSTs per call, so 2 here can mean 8 billed searches. Sized with that in
+    # mind rather than renamed, because `fetch` is the only unit the cache can
+    # observe. Free on seed, which returns its whole dataset in one call.
+    FLIGHT_AGENT_MAX_PROVIDER_CALLS = int(os.getenv("FLIGHT_AGENT_MAX_PROVIDER_CALLS", "2"))
+    # Wall clock for the whole loop. Deliberately far below
+    # AI_REQUEST_TIMEOUT_SECONDS: that bounds one model call, this bounds a
+    # sequence of them, and a traveller is waiting on the slowest specialist.
+    FLIGHT_AGENT_LOOP_DEADLINE_SECONDS = float(
+        os.getenv("FLIGHT_AGENT_LOOP_DEADLINE_SECONDS", "45")
+    )
+    # How far a search may move a leg from the traveller's own date. Measured
+    # against the original request, so repeated shifts cannot accumulate.
+    FLIGHT_AGENT_MAX_DATE_SHIFT_DAYS = int(
+        os.getenv("FLIGHT_AGENT_MAX_DATE_SHIFT_DAYS", "3")
+    )
     TRACE_DIR = Path(os.getenv("TRACE_DIR", "instance/traces"))
     # A DSN wins when present; otherwise the local SQLite file. Keeping both in
     # one setting is what lets every database function take one target argument.

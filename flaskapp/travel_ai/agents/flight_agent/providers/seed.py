@@ -26,6 +26,10 @@ class SeedInventoryProvider:
     name = "seed"
     assumption = INVENTORY_ASSUMPTION
 
+    # `fetch` returns the whole dataset regardless of dates or airports, so a
+    # loop may re-search as often as it likes for the cost of one call.
+    is_static = True
+
     def covers(self, request: FlightProposalRequest) -> bool:
         """Whether the dataset stocks any airport pair for this trip.
 

@@ -5,8 +5,8 @@
 **Source:** comparison against the PeerConnect project's CI/CD write-up (§4.1.2–4.5.2),
 supplied as a reference implementation from a previous project.
 
-Kept separate from [`docs/progress.md`](../progress.md) deliberately: that file is a
-session log, this is a standing plan that outlives any one session.
+A standing plan that outlives any one session, kept separate from the per-session
+working notes deliberately.
 
 > **Before implementing anything here**, re-read §6 (Decisions still pending). Two
 > unanswered questions determine whether half of this backlog is worth building at all.
