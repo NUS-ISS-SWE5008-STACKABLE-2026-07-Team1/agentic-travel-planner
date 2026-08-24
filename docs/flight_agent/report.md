@@ -11,7 +11,7 @@ architecture, `inventory_sources.md` the seed/Duffel split, and
 ---
 
 **Owner:** Mark
-**Period covered:** to 2026-08-05, with counts refreshed 2026-08-11
+**Period covered:** to 2026-08-05, with counts refreshed 2026-08-24 (§2.4)
 **Branch:** `mark`
 **Status:** integrated into the LangGraph workflow and verified against a live model
 
@@ -48,7 +48,7 @@ Three properties now hold, each covered by tests:
 | `schemas.py` | Typed contracts (`extra="forbid"`, so an invented field is rejected on arrival) |
 | `guardrails.py` | Input screening (injection, bias, toxicity) and output grounding |
 | `reasoning.py` | The model layer over the tool's output, with retry-then-fallback |
-| `seed_data.py` | 284 inventory rows across 19 airports (104 across 5 routes at the time of writing) |
+| `seed_data.py` | 1,568 inventory rows across 30 airports and 60 ordered routes, 2026-08-24 to 2026-12-31 |
 | `prompt.py` | Both prompts — the grounded one and the fallback |
 
 Ranking is lexicographic rather than a weighted score, so each position is individually
@@ -89,6 +89,44 @@ reached the model without passing the injection, bias and toxicity gates that th
 initial preferences go through. Now screened identically.
 
 **Provenance flags did not survive synthesis.** Found during manual testing — see §5.3.
+
+### 2.4 Seed calendar extended to 31 December 2026
+
+Added 2026-08-24. The dataset previously stopped at 2026-10-08, which meant any
+search past early October fell off the end of the data entirely — not a
+deliberate gap between stocked dates, but the edge of the world. The whole of Q4
+behaved like an unstocked route, which made the demo calendar awkward to use and
+made "no flights found" ambiguous between the two cases.
+
+`scripts/generate_flight_seed_csv.py` now re-flies the same routes across
+2026-10-09 → 2026-12-31: **472 → 1,564 CSV rows** (1,568 with the golden four).
+
+| Property | How it is held |
+|---|---|
+| No existing row changed | A fourth RNG stream and flight-number range (bases 4000/6000/8000, above the 1384 the hub stream reaches). The regenerated diff is 1,092 insertions and **zero** deletions, verified against a snapshot rather than assumed. |
+| No new routes | Route count is unchanged at 60. No previously unroutable trip became routable, so the prompt-only path keeps exactly the coverage `test_flight_path2_screening.py` relies on. |
+| Gaps preserved | An irregular 8/9/11/10-day cadence, staggered per route, averaging the density of the original window. |
+| Ids stay unique | `main()` now asserts it. Four streams mint ids independently, and a collision would be silent data corruption rather than a visible failure. |
+
+**December carries a holiday peak.** Departures 18–31 December are priced at
+1.75× with seat counts capped at 6. This is the only part of the calendar where
+the budget-renegotiation path is exercised by the data itself rather than by a
+hand-written constraint. The multiplier is derived from the departure date and
+consumes **no** random draws — that is what makes it provably unable to shift the
+pre-existing rows, since a surcharge drawn from `rng` would have rewritten all 472.
+
+Two defects were found and fixed while doing this:
+
+- **`CDG` appears in two route tables** — a 9-day holiday from Singapore and a
+  75-minute hop from London. Deriving trip lengths by first-match lookup gave the
+  hop the holiday's duration; the lookup is now scoped by origin.
+- **`test_flight_domain.py` used `2026-12-25`** as its "no data for this date"
+  case. That date is now inside the window and stayed empty only because the
+  SIN–NRT cadence happens to skip Christmas Day — a test passing by luck, and one
+  that a change to the step cycle would have silently retired. Repointed to
+  `2027-06-15`, past the end of the calendar, where it is robust by construction.
+
+666 tests pass, unchanged from the baseline taken before the work started.
 
 ---
 
@@ -339,10 +377,17 @@ single agent's output rather than what the orchestrator does with it downstream.
 
 ## 6. Known limitations
 
-1. **Inventory is static.** 476 rows across two hubs (Singapore and London), 31
-   airports, 60 ordered routes, dates 2026-08-24 to 2026-10-08. Everything else
-   takes the fallback path — which now returns route guidance rather than invented
-   flights (see `design.md` §3).
+1. **Inventory is static.** 1,568 rows across two hubs (Singapore and London), 30
+   airports, 60 ordered routes, departures 2026-08-24 to 2026-12-31 (return legs
+   spill into the first week of 2027 so late-December trips have a way home).
+   Everything else takes the fallback path — which now returns route guidance
+   rather than invented flights (see `design.md` §3).
+
+   Dates inside that window are deliberately **not** continuous: each route flies
+   roughly every 8–11 days, so a search for an arbitrary date can still
+   legitimately come back empty. That is the case the agentic loop's date widening
+   exists to improve, and closing the gaps would leave it with nothing to
+   exercise. Past 2026-12-31 there is nothing at all.
 1b. **Exactly two flights per route and date.** A consequence of how the seed is
    generated, and the reason `rank_flights` has nothing meaningful to reorder. See
    `design.md`. Widening it means regenerating the golden expectations, so it is
