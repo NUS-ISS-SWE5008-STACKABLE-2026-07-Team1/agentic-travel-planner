@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import csv
 import random
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 RNG = random.Random(42)
@@ -173,6 +173,49 @@ HUB_TRIP_PLANS = {
 # never mint the same flight_id.
 HUB_FLIGHT_NO_BASE = 900
 
+# --- Calendar extension: 2026-10-09 -> 2026-12-31 ----------------------------
+#
+# Everything above stops at 2026-10-08. That made any search past early October
+# fall off the end of the dataset entirely — not a deliberate gap between stocked
+# dates, just the edge of the world — so the whole Q4 of the demo calendar
+# behaved like an unstocked route.
+#
+# This block re-flies the SAME routes across the rest of the year. It adds no new
+# airport pairs: `SEED_ROUTES` and `covers_route()` are unchanged by it, so no
+# trip that was previously unroutable becomes routable, and the prompt-only path
+# (`test_flight_path2_screening.py`) keeps exactly the coverage it had.
+#
+# Fourth RNG stream and a fourth flight-number range, for the reason the three
+# above have their own: appending must not shift a single one of the 472 existing
+# rows when the CSV is regenerated. The bases start at 4000 because the hub
+# stream's counters already climb into the 1300s (BA), and two streams that
+# overlap would mint colliding flight_ids.
+EXT_RNG = random.Random(1231)
+EXT_SIN_FLIGHT_NO_BASE = 4000
+EXT_CITY_FLIGHT_NO_BASE = 6000
+EXT_HUB_FLIGHT_NO_BASE = 8000
+
+EXT_START = date(2026, 10, 9)
+EXT_END = date(2026, 12, 31)
+
+# Irregular on purpose. A fixed 9-day step would make "is this date stocked?"
+# predictable modulo 9; the varying cycle keeps the gaps between stocked dates
+# uneven, which is what the tool loop's date widening actually has to cope with.
+# Average ~9.2 days matches the density of the Aug-Oct rows above.
+EXT_STEP_CYCLE = (8, 9, 11, 8, 10, 9)
+
+# Departures are capped at EXT_END, but a round trip that departs 28 December
+# has to come home in January — return legs are allowed to spill into early 2027
+# rather than leaving late-December departures with no way back.
+
+# Christmas/New Year peak. Fares rise and seats tighten, which is the only part
+# of the calendar where the budget-renegotiation path gets exercised by the data
+# itself rather than by a hand-written constraint.
+PEAK_START = date(2026, 12, 18)
+PEAK_END = date(2026, 12, 31)
+PEAK_MULTIPLIER = 1.75
+PEAK_MAX_SEATS = 6
+
 CABINS_BY_TIER = {
     "full": ["ECONOMY", "ECONOMY", "PREMIUM_ECONOMY", "BUSINESS"],
     "budget": ["ECONOMY", "ECONOMY", "ECONOMY"],
@@ -189,6 +232,18 @@ DEPARTURE_HOURS = [7, 9, 13, 17, 21, 23]
 def _fmt_ts(date_str: str, hour: int, minute: int, offset: str) -> tuple[str, datetime]:
     naive = datetime.strptime(f"{date_str} {hour:02d}:{minute:02d}", "%Y-%m-%d %H:%M")
     return f"{naive.strftime('%Y-%m-%dT%H:%M')}{offset}", naive
+
+
+def _is_peak(date_str: str) -> bool:
+    """Whether a departure falls in the Christmas/New Year peak window.
+
+    Deliberately derived from the date alone and consuming NO random draws:
+    every existing row departs on or before 2026-10-08, so this returns False
+    for all of them and the three original RNG streams advance exactly as they
+    did before this window existed. A peak surcharge that drew from `rng` would
+    have rewritten all 472 of them.
+    """
+    return PEAK_START <= datetime.strptime(date_str, "%Y-%m-%d").date() <= PEAK_END
 
 
 def _offset_minutes(offset: str) -> int:
@@ -227,8 +282,14 @@ def _generate_leg(
         cabin = rng.choice(CABINS_BY_TIER[tier])
         band_lo, band_hi = PRICE_BAND[tier]
         base_price = direct_duration * rng.uniform(band_lo, band_hi)
-        price = round(base_price * CABIN_MULTIPLIER[cabin], 0)
+        # Peak multiplier is applied to the price and the seat count, both after
+        # their draws, so the peak window changes what the numbers ARE without
+        # changing how many values come off the stream.
+        peak = _is_peak(date_str)
+        price = round(base_price * CABIN_MULTIPLIER[cabin] * (PEAK_MULTIPLIER if peak else 1.0), 0)
         seats = rng.choice([1, 2, 3, 4, 6, 8, 9, 12, 14, 18, 22, 30, 40]) if cabin == "ECONOMY" else rng.randint(1, 8)
+        if peak:
+            seats = min(seats, PEAK_MAX_SEATS)
         wheelchair = rng.random() > 0.05  # near-always True, small illustrative variance
         step_free = tier == "full" or rng.random() > 0.4
         date_compact = date_str.replace("-", "")
@@ -298,6 +359,85 @@ def _round_trip(
     ]
 
 
+def _ext_plans(
+    dest: str,
+    sources: tuple[dict[str, list[tuple[str, int]]], ...],
+    origin: str,
+    shares_dates_with: str | None = None,
+) -> list[tuple[str, int]]:
+    """(depart_date, trip_length) pairs from EXT_START to EXT_END for one route.
+
+    Trip lengths are reused from the route's existing plans, so a Bangkok trip
+    stays a long weekend and a London trip stays a fortnight in the extension
+    window too. `sources` is passed in rather than searched across all three
+    tables because a destination can appear in two of them with very different
+    trip lengths — CDG is a 9-day holiday from Singapore and a 3-day hop from
+    London, and picking whichever table matched first gave the hop the holiday.
+
+    Departure dates are staggered per route so the routes do not all fly on the
+    same dates, keyed on origin+destination for that same collision reason, and
+    computed from the airport codes rather than drawn so the stagger stays stable
+    when routes are added or reordered. Second airports pass `shares_dates_with`
+    to inherit their primary's stagger — HND must keep flying on NRT's dates for
+    the two to compete on a Tokyo search, as they do in the window above.
+    """
+    key = dest if shares_dates_with is None else shares_dates_with
+    for plans in sources:
+        if key in plans:
+            lengths = [length for _date, length in plans[key]]
+            break
+    else:
+        raise KeyError(f"no existing trip plan to derive lengths from: {origin}-{dest}")
+    current = EXT_START + timedelta(days=sum(ord(c) for c in origin + key) % 9)
+    plans: list[tuple[str, int]] = []
+    index = 0
+    while current <= EXT_END:
+        plans.append((current.strftime("%Y-%m-%d"), lengths[index % len(lengths)]))
+        current += timedelta(days=EXT_STEP_CYCLE[index % len(EXT_STEP_CYCLE)])
+        index += 1
+    return plans
+
+
+def _extend_calendar(all_rows: list[dict]) -> None:
+    """Re-fly every route above across 2026-10-09 -> 2026-12-31.
+
+    Appended last, on its own RNG stream and flight-number ranges, so nothing
+    already in `all_rows` is touched.
+    """
+    sin_counter: dict[str, int] = {}
+    for dest, dest_offset, direct_duration, carriers in ROUTES:
+        for carrier, _tier in carriers:
+            sin_counter.setdefault(carrier, EXT_SIN_FLIGHT_NO_BASE)
+        for depart_date, trip_len in _ext_plans(dest, (TRIP_PLANS,), ORIGIN):
+            all_rows.extend(_round_trip(
+                dest, dest_offset, direct_duration, carriers,
+                depart_date, trip_len, sin_counter, EXT_RNG,
+            ))
+
+    city_counter: dict[str, int] = {}
+    for dest, dest_offset, direct_duration, carriers, shares_dates_with in CITY_ROUTES:
+        for carrier, _tier in carriers:
+            city_counter.setdefault(carrier, EXT_CITY_FLIGHT_NO_BASE)
+        for depart_date, trip_len in _ext_plans(
+            dest, (CITY_TRIP_PLANS, TRIP_PLANS), ORIGIN, shares_dates_with,
+        ):
+            all_rows.extend(_round_trip(
+                dest, dest_offset, direct_duration, carriers,
+                depart_date, trip_len, city_counter, EXT_RNG,
+            ))
+
+    hub_counter: dict[str, int] = {}
+    for dest, dest_offset, direct_duration, carriers in HUB_ROUTES:
+        for carrier, _tier in carriers:
+            hub_counter.setdefault(carrier, EXT_HUB_FLIGHT_NO_BASE)
+        for depart_date, trip_len in _ext_plans(dest, (HUB_TRIP_PLANS,), HUB_ORIGIN):
+            all_rows.extend(_round_trip(
+                dest, dest_offset, direct_duration, carriers,
+                depart_date, trip_len, hub_counter, EXT_RNG,
+                origin=HUB_ORIGIN, origin_offset=HUB_ORIGIN_OFFSET,
+            ))
+
+
 def generate() -> list[dict]:
     all_rows: list[dict] = []
     flight_no_counter: dict[str, int] = {}
@@ -336,11 +476,25 @@ def generate() -> list[dict]:
                 depart_date, trip_len, hub_counter, HUB_RNG,
                 origin=HUB_ORIGIN, origin_offset=HUB_ORIGIN_OFFSET,
             ))
+
+    # Calendar extension last, for the same reason each block above it is last in
+    # its turn: it must not shift a row written before it.
+    _extend_calendar(all_rows)
     return all_rows
 
 
 def main() -> None:
     rows = generate()
+
+    # flight_id is the join key the agent quotes back and the tests match on, so
+    # a collision between two streams would be a silent data corruption rather
+    # than a visible failure. Four streams now mint ids independently; assert
+    # rather than trust the flight-number ranges stay disjoint.
+    ids = [row["flight_id"] for row in rows]
+    if len(ids) != len(set(ids)):
+        duplicates = sorted({i for i in ids if ids.count(i) > 1})
+        raise SystemExit(f"duplicate flight_id minted by overlapping streams: {duplicates}")
+
     out_path = (
         Path(__file__).parent.parent
         / "flaskapp" / "travel_ai" / "agents" / "flight_agent" / "seed_data_extended.csv"
