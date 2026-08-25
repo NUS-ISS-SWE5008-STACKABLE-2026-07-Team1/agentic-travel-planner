@@ -1,12 +1,19 @@
-"""Risk & Advisory Agent guardrails — output grounding gate.
+"""Risk & Advisory Agent guardrails — input/output screening plus grounding.
 
-Prompt-injection/bias/toxicity screening of the traveller's own free text
-already happens once, upstream, for every agent
-(`flaskapp.travel_ai.safeguards.validate_request`) before any specialist runs.
-Re-checking that here would just repeat the same regexes for no benefit.
+`preflight`/`postprocess` wire this agent's node to the shared L1 detectors
+(`guardrails.detectors`, a top-level module owned by no single agent)
+directly, rather than through `guardrails.specialist`'s generic hooks, so
+this module owns its own screening without depending on another agent's
+folder for it.
 
-What is specific to this agent, and not covered anywhere else, is whether ITS
-OWN OUTPUT keeps the two promises `prompt.py` makes:
+Note: `guardrails.detectors` currently duplicates the same pattern lists
+that live in `flight_agent/guardrails.py` (still the source `accessibility_agent`
+and `guardrails.specialist` import). Repointing those onto this module too
+would remove that duplication, but that's a cross-agent change outside this
+agent's own scope -- left for the team to do together, not unilaterally here.
+
+What is specific to this agent is whether ITS OWN OUTPUT keeps the two
+promises `prompt.py` makes:
 
 1. Never present a destination's risk facts as sourced when this agent has no
    reference profile for it (`seed_data.get_profile` returned None).
@@ -30,8 +37,15 @@ from flaskapp.travel_ai.agents.risk_advisory_agent.seed_data import (
     active_seasonal_risks,
     get_profile,
 )
-from flaskapp.travel_ai.schemas import AgentFinding
+from flaskapp.travel_ai.guardrails.detectors import (
+    screen_input_text,
+    screen_output_text,
+    screen_preferences,
+)
+from flaskapp.travel_ai.guardrails.fields import collect_free_text
+from flaskapp.travel_ai.schemas import AgentFinding, TravelGraphState
 
+NAME = "risk_advisory_agent"
 ESCALATE_PREFIX = "ESCALATE:"
 
 # safety_advisory_level values (seed_data.AdvisoryLevel) severe enough that any
@@ -118,3 +132,73 @@ def validate_finding(
             + "; ".join(missing)
         )
     return violations
+
+
+def _finding_text(finding: AgentFinding) -> str:
+    values = [finding.summary, *finding.warnings]
+    for option in finding.options:
+        values.extend([
+            option.name, option.description, *option.assumptions,
+            *option.limitations, *option.selection_factors,
+        ])
+    return "\n".join(values)
+
+
+def preflight(state: TravelGraphState) -> AgentFinding | None:
+    result = screen_input_text(collect_free_text(state.get("request", {})))
+    if not result["blocked"]:
+        return None
+    reasons = []
+    if result["injection"]:
+        reasons.append("instruction-like content")
+    if result["high_bias"]:
+        reasons.append("high-risk biased or stereotyping content")
+    if result["toxicity"]:
+        reasons.append("toxic content")
+    return AgentFinding(
+        agent=NAME,
+        summary=f"{NAME} analysis was not sent to the model because input screening failed.",
+        warnings=[f"Human review required: blocked {', '.join(reasons)}."],
+        confidence=0.0,
+    )
+
+
+def trip_context(state: TravelGraphState) -> tuple[str | None, date, date]:
+    request = state.get("request", {})
+    return (
+        request.get("destination"),
+        date.fromisoformat(request["departure_date"]),
+        date.fromisoformat(request["return_date"]),
+    )
+
+
+def postprocess(
+    finding: AgentFinding, context: tuple[str | None, date, date]
+) -> AgentFinding:
+    text = _finding_text(finding)
+    if screen_output_text(text)["flagged"] or screen_preferences([text]):
+        return AgentFinding(
+            agent=NAME,
+            summary=f"Generated {NAME} analysis was withheld by output guardrails.",
+            warnings=["Human review required before acting on this section."],
+            confidence=0.0,
+        )
+
+    destination, departure_date, return_date = context
+    if ungrounded_destination(finding, destination):
+        return AgentFinding(
+            agent=NAME,
+            summary=f"Generated {NAME} analysis was withheld: unverifiable destination claims.",
+            warnings=[
+                f"No reference data available for '{destination}'; the model's claims could "
+                "not be verified and the finding did not say so."
+            ],
+            confidence=0.0,
+        )
+
+    missing = missing_escalation(finding, destination, departure_date, return_date)
+    if missing:
+        return finding.model_copy(update={
+            "warnings": [f"{ESCALATE_PREFIX} " + "; ".join(missing), *finding.warnings]
+        })
+    return finding
