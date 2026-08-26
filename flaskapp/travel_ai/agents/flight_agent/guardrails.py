@@ -44,6 +44,7 @@ back to the deterministic response.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from typing import Any
 
 from flaskapp.travel_ai.agents.flight_agent.schemas import FlightProposal
@@ -199,6 +200,30 @@ def screen_output_text(text: str) -> dict[str, Any]:
 # --- Grounding (unchanged) ---
 
 
+def validate_grounded_ids(
+    mentioned_flight_ids: list[str], known_ids: Collection[str]
+) -> list[str]:
+    """The grounding check, against any set of ids known to be real.
+
+    Returns the offending ids (empty list = every claim is grounded).
+
+    Split out from `validate_grounded_explanation` because a multi-step agent
+    needs a wider notion of "real" than a single proposal can express. A model
+    that searches twice may legitimately discuss a flight found in the first
+    search but ranked out of the final list — that id is grounded (a provider
+    returned it) yet absent from `proposal.candidates`. Checking against the
+    proposal alone would reject a true statement; checking against nothing would
+    accept a fabricated one. The membership set is therefore the caller's to
+    supply: the whole proposal for the single-shot path, `InventoryCache.seen_ids`
+    for the loop.
+
+    The set must only ever be populated from provider output. `InventoryCache`
+    registers ids inside `rows_for` and nowhere else, so no tool can widen it.
+    """
+    known = set(known_ids)
+    return [flight_id for flight_id in mentioned_flight_ids if flight_id not in known]
+
+
 def validate_grounded_explanation(mentioned_flight_ids: list[str], proposal: FlightProposal) -> list[str]:
     """Post-tool grounding gate for the explanation-generation LLM call.
 
@@ -209,6 +234,10 @@ def validate_grounded_explanation(mentioned_flight_ids: list[str], proposal: Fli
 
     Implements llmops_plan.md §3's "grounding by construction" concretely:
     verify every mentioned id exists in what the agent actually returned.
+
+    Kept as the single-shot path's entry point, unchanged in behaviour: there the
+    proposal *is* everything the agent saw, so it is the correct membership set.
     """
-    known_ids = {candidate.flight_id for candidate in proposal.candidates}
-    return [flight_id for flight_id in mentioned_flight_ids if flight_id not in known_ids]
+    return validate_grounded_ids(
+        mentioned_flight_ids, {candidate.flight_id for candidate in proposal.candidates}
+    )

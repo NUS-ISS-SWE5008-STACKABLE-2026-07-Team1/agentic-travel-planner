@@ -55,6 +55,18 @@ class InventoryProvider(Protocol):
 
     name: str
 
+    # Whether `fetch` ignores the request's dates and airports and returns the
+    # provider's whole dataset. True for seed, which hands back all its rows and
+    # lets `domain.py` narrow them; False for any live supplier, where each fetch
+    # is a distinct billed search.
+    #
+    # It exists so `agents.loop.InventoryCache` can collapse every cache key to
+    # one on a static provider, making repeated searches provably free rather
+    # than free-if-you-happen-to-know-how-seed-works. Read via `getattr` with a
+    # False default, so a provider predating this attribute is treated as billed
+    # — the safe direction to be wrong in.
+    is_static: bool = False
+
     def covers(self, request: FlightProposalRequest) -> bool: ...
 
     def fetch(self, request: FlightProposalRequest) -> InventoryResult: ...

@@ -1,20 +1,17 @@
 """Flight Agent package.
 
-Two layers live here, and they are not yet connected:
+Two layers live here, and they are connected:
 
-- **The graph node** (`agent.py`, `prompt.INSTRUCTION`) — what the compiled
-  LangGraph workflow runs today. Prompt-only: the model is handed the travel
-  request and asked for an `AgentFinding`, with no inventory behind it.
 - **The deterministic layer** (`domain.py`, `schemas.py`, `guardrails.py`,
   `seed_data.py`, `reasoning.py`, `adapter.py`, `airports.py`) — searches,
   filters and ranks real inventory in code, then uses the model only to explain
   what the code already decided, with grounding enforced by
   `guardrails.validate_grounded_explanation`.
-
-`agent.py` does not call the deterministic layer yet. Connecting them is a
-single change to `create_node` — `adapter.to_flight_request` produces the input
-`reasoning.run_flight_agent` needs — but it changes behaviour the whole graph
-sees, so it is left as its own reviewed step rather than folded into the port.
+- **The graph node** (`agent.py`) — what the compiled LangGraph workflow runs.
+  It calls the deterministic layer whenever the provider covers the trip, and
+  falls back to a prompt-only node (`prompt.PATH2_INSTRUCTION`) only when no
+  inventory covers the route. That fallback is screened on the way in and out,
+  and cannot return concrete flights — see `docs/flight_agent/design.md` §3.
 
 Exports below are the deterministic layer's public surface. Import from this
 package, not from its modules directly, so internal layout can change without

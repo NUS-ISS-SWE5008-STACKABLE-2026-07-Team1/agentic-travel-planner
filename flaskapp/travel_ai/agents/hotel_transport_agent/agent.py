@@ -40,7 +40,7 @@ from flaskapp.travel_ai.agents.hotel_transport_agent.domain import screen_hotels
 from flaskapp.travel_ai.agents.hotel_transport_agent.guardrails import (
     validate_grounded_explanation,
 )
-from flaskapp.travel_ai.agents.hotel_transport_agent.prompt import INSTRUCTION
+from flaskapp.travel_ai.agents.hotel_transport_agent.prompt import INSTRUCTION, PATH2_INSTRUCTION
 from flaskapp.travel_ai.agents.hotel_transport_agent.providers import (
     get_hotel_inventory_provider,
 )
@@ -54,18 +54,59 @@ from flaskapp.travel_ai.agents.hotel_transport_agent.schemas import (
     TransportOption,
 )
 from flaskapp.travel_ai.agents.hotel_transport_agent.seed_data import transport_for
+from flaskapp.travel_ai.guardrails.specialist import make_postprocess, make_preflight
 from flaskapp.travel_ai.schemas import AgentFinding, Option, TravelRequest
 from flaskapp.travel_ai.terminal import log_payload
 from flaskapp.travel_ai.usage import TokenUsageCallback
 
 NAME = "hotel_transport_agent"
 
-__all__ = ["NAME", "INVENTORY_ASSUMPTION", "ESTIMATE_WARNING", "create_node"]
+__all__ = ["NAME", "INVENTORY_ASSUMPTION", "ESTIMATE_WARNING",
+           "NO_CONCRETE_OPTIONS_WARNING", "create_node"]
 
 ESTIMATE_WARNING = (
     "These hotel and transport options are model estimates, not drawn from verified inventory. "
     "Confirm every detail with the property or carrier before booking."
 )
+
+# Paired with ESTIMATE_WARNING, not a replacement for it: that string carries the
+# substring `safeguards.UNVERIFIED_OPTIONS_MARKER` matches on, which is what makes
+# `enforce_provenance_disclosure` write the flag into the plan's own limitations.
+NO_CONCRETE_OPTIONS_WARNING = (
+    "No verified inventory covers this destination, so no specific properties or "
+    "services are listed. The guidance above is general area knowledge, not live "
+    "availability — confirm actual options, rates and accessibility with the property "
+    "or operator."
+)
+
+
+def _forbid_concrete_options(agent_name: str, tracer):
+    """Path 2 postprocess: screen the prose, then strip every concrete option.
+
+    Deliberately identical in shape to `flight_agent/agent.py`'s version — see
+    `docs/flight_agent/design.md` §3 for the full reasoning, which applies
+    unchanged here: with no inventory to ground against, a model asked for
+    options invents property names and nightly rates, and there is no candidate
+    set for a grounding check to test membership against.
+
+    Order matters. The generic L1 output screen runs FIRST, so prose that fails
+    screening is replaced wholesale (by a canned finding carrying no options)
+    rather than being stripped and kept.
+    """
+    screen_output = make_postprocess(agent_name)
+
+    def postprocess(finding: AgentFinding, context=None) -> AgentFinding:
+        finding = screen_output(finding, context)
+        if not finding.options:
+            return finding
+        # A count, never the content.
+        tracer.record("agent_path2_options_stripped", agent_name, {"count": len(finding.options)})
+        return finding.model_copy(update={
+            "options": [],
+            "warnings": [*finding.warnings, NO_CONCRETE_OPTIONS_WARNING],
+        })
+
+    return postprocess
 
 
 class _InnerTracer:
@@ -136,7 +177,16 @@ def _transport_to_option(option: TransportOption, currency: str) -> Option:
 
 def create_node(llm, tracer, provider=None, config=None):
     """The graph node. Grounded when inventory covers the city, prompt-only otherwise."""
-    prompt_only_node = make_specialist_node(NAME, INSTRUCTION, llm, tracer)
+    # Both hooks have existed on `make_specialist_node` since it was written and
+    # this call site had never used either, so the fallback path ran with no input
+    # and no output screening. Fixed alongside the flight agent deliberately: these
+    # two modules are near-duplicates, and `docs/progress.md` records that the last
+    # guardrail fix had to be applied twice because one of them was missed.
+    prompt_only_node = make_specialist_node(
+        NAME, PATH2_INSTRUCTION, llm, tracer,
+        preflight=make_preflight(NAME),
+        postprocess=_forbid_concrete_options(NAME, tracer),
+    )
     provider_note = None
     if provider is None:
         provider, provider_note = get_hotel_inventory_provider(
