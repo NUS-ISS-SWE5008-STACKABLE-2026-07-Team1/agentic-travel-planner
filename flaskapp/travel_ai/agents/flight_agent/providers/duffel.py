@@ -295,6 +295,9 @@ class DuffelInventoryProvider:
     """Live inventory from one Duffel offer-request per proposal round."""
 
     name = "duffel"
+    # Every fetch is a distinct billed, rate-limited supplier search, and one
+    # fetch fans out over airport pairs. See `agents.loop.LoopBudget`.
+    is_static = False
     assumption = INVENTORY_ASSUMPTION
 
     def __init__(
