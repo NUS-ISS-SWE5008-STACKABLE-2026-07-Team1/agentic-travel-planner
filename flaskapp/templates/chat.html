@@ -114,6 +114,12 @@
                   <button class="btn btn-primary" type="submit">Send</button>
                 </div>
               </form>
+              <div id="plan-navigation" class="d-flex flex-wrap gap-2 mt-3 d-none">
+                <button class="btn btn-outline-secondary" type="button" id="go-back"
+                        data-main-url="{{ url_for('pages.main') }}">← Go back</button>
+                <button class="btn btn-outline-secondary" type="button" id="start-over"
+                        data-intake-url="{{ url_for('pages.intake_chat') }}">Start from first</button>
+              </div>
               <section id="plan-feedback" class="plan-feedback mt-4 pt-4 border-top d-none" aria-labelledby="feedback-heading">
                 <h3 id="feedback-heading" class="h5">Was This A Good Plan?</h3>
                 <p class="text-body-secondary">Your feedback helps us monitor and improve the complete agent system.</p>
