@@ -95,6 +95,18 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
 .agent-activity li { position: relative; margin-left: .65rem; padding: .7rem 0 .7rem 1.5rem; border-left: 2px solid #dce5f1; font-size: .9rem; }
 .agent-activity li::before { content: ""; position: absolute; width: .65rem; height: .65rem; left: -.38rem; top: 1rem; border-radius: 50%; background: var(--atlas-blue); box-shadow: 0 0 0 .25rem #eaf2ff; }
 .plan-itinerary li { margin-bottom: .65rem; }
+.accessibility-evidence-list { margin-top: .75rem; }
+.accessibility-evidence-card { padding: 1rem 1.1rem; border: 1px solid #cfe0f5; border-left: .3rem solid var(--atlas-blue); border-radius: .9rem; background: #f8fbff; }
+.accessibility-evidence-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .65rem; margin-bottom: .65rem; }
+.accessibility-evidence-badges { display: flex; flex-wrap: wrap; gap: .4rem; }
+.accessibility-evidence-badge { padding: .25rem .55rem; border-radius: 999px; color: #5d4600; background: #fff3cd; font-size: .72rem; font-weight: 700; }
+.accessibility-evidence-badge.is-verified { color: #0f5132; background: #d1e7dd; }
+.accessibility-evidence-description { margin-bottom: .8rem; line-height: 1.55; }
+.accessibility-evidence-label { margin-bottom: .3rem; color: var(--atlas-navy); font-size: .75rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.accessibility-source-list { display: grid; gap: .55rem; margin: 0; padding-left: 1.25rem; }
+.accessibility-source-list a { font-weight: 650; overflow-wrap: anywhere; }
+.accessibility-source-address { display: block; color: var(--bs-secondary-color); font-size: .72rem; overflow-wrap: anywhere; }
+.accessibility-evidence-limitations { margin-top: .8rem; padding: .65rem .75rem; border-radius: .55rem; color: #664d03; background: #fff3cd; font-size: .82rem; }
 .travel-assistant-card { height: min(48rem, calc(100vh - 8rem)); min-height: 34rem; }
 .travel-assistant-body { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
 .travel-assistant-body > #result-heading {
