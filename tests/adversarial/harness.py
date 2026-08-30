@@ -44,7 +44,8 @@ def l1_input(text: str) -> dict:
     """Both deterministic input gates, reported separately.
 
     They are genuinely different rules and they disagree. `PROMPT_INJECTION`
-    (`safeguards.py:10`) guards the HTTP boundary and still matches a bare
+    (defined in `guardrails/injection.py`, re-exported by `safeguards`) guards
+    the HTTP boundary and still matches a bare
     "act as"; the per-agent `INJECTION_PATTERNS` were tightened to require
     "act as (an) unrestricted/unfiltered/developer mode". Reporting the union
     as one number would hide that, so both are kept.

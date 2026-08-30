@@ -356,9 +356,11 @@ def test_admin_page_and_activity_require_configured_admin(tmp_path):
     }
     assert dashboard["platform"]["total_requests"] == 0
     assert dashboard["logs"] == []
-    # Five agents, the deterministic gates, and the L2 classifier.
-    assert len(dashboard["prompts"]) == 7
-    assert "LLM guardrail classifier (L2)" in {item["agent"] for item in dashboard["prompts"]}
+    # Five agents, the deterministic gates, PII redaction, and the L2 classifier.
+    assert len(dashboard["prompts"]) == 8
+    agents = {item["agent"] for item in dashboard["prompts"]}
+    assert "LLM guardrail classifier (L2)" in agents
+    assert "PII redaction (L1)" in agents
 
     with client.session_transaction() as session:
         session["user_email"] = "SECOND-ADMIN@example.com"
