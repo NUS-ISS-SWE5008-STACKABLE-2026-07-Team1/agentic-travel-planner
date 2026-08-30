@@ -16,6 +16,8 @@ def test_retrieval_is_explicitly_unavailable_without_search_key(monkeypatch):
     result = retrieval.retrieve_accessibility_evidence(STATE)
     assert result["status"] == "unavailable"
     assert result["results"] == []
+    assert result["error_code"] == "not_configured"
+    assert result["search_plan"]["queries"]
 
 
 def test_retrieval_restricts_request_and_results_to_approved_domains(monkeypatch):
@@ -53,6 +55,8 @@ def test_retrieval_restricts_request_and_results_to_approved_domains(monkeypatch
     assert [item["url"] for item in result["results"]] == [
         "https://www.accessable.co.uk/venue"
     ]
+    assert result["results"][0]["evidence_id"] == "E1"
+    assert result["results"][0]["source_type"] == "specialist"
     assert "accessable.co.uk" in captured["body"]["include_domains"]
     assert captured["body"]["include_raw_content"] is False
     assert "private medical detail" not in captured["body"]["query"]
@@ -63,3 +67,20 @@ def test_only_https_subdomains_of_allowlisted_sources_are_accepted():
     assert retrieval._allowed_url("https://news.wheelmap.org/place", domains)
     assert not retrieval._allowed_url("http://wheelmap.org/place", domains)
     assert not retrieval._allowed_url("https://wheelmap.org.example.com/place", domains)
+
+
+def test_timeout_is_retried_and_reported_without_crashing(monkeypatch):
+    calls = 0
+
+    def timeout(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("slow provider")
+
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    monkeypatch.setattr(retrieval, "urlopen", timeout)
+    result = retrieval.retrieve_accessibility_evidence(STATE)
+
+    assert calls == retrieval.MAX_ATTEMPTS
+    assert result["status"] == "unavailable"
+    assert result["errors"][0]["error_code"] == "timeout"
