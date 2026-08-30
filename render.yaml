@@ -48,6 +48,9 @@ services:
       # sync: false = set by hand in the dashboard, never stored in this file.
       - key: OPENAI_API_KEY
         sync: false
+      # Used only by Accessibility Agent evidence retrieval.
+      - key: SERPER_API_KEY
+        sync: false
       - key: ADMIN_EMAILS
         sync: false
       # Supabase session pooler DSN. Set by hand in the dashboard; never here.

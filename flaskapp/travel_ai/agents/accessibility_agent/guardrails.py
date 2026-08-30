@@ -111,12 +111,12 @@ def _option_text(option) -> str:
 
 
 def _deterministic_rating(*, grounded: int, requirement_count: int,
-                          veto: bool, has_conflict: bool) -> int:
+                          veto: bool, has_conflict: bool, unknown_source: bool) -> int:
     if veto:
         return 1
     if not grounded:
         return 2
-    if has_conflict or grounded < max(1, requirement_count):
+    if unknown_source or has_conflict or grounded < max(1, requirement_count):
         return 3
     # Five is reserved for complete, current, measured evidence. Search
     # excerpts generally cannot establish that by themselves.
@@ -153,6 +153,9 @@ def enforce_accessibility_output(finding: AgentFinding, evidence: Any) -> AgentF
         cited_ids = {item.upper() for item in EVIDENCE_ID_PATTERN.findall(option_text)}
         valid_ids = cited_ids.intersection(evidence_by_id)
         cited_urls = {str(evidence_by_id[item]["url"]) for item in valid_ids}
+        unknown_source = any(
+            evidence_by_id[item].get("source_type") == "unknown" for item in valid_ids
+        )
         original = list(option.source_urls)
         # A URL is grounded only when the option also identifies the exact
         # retrieved evidence record supporting its claim.
@@ -160,8 +163,17 @@ def enforce_accessibility_output(finding: AgentFinding, evidence: Any) -> AgentF
         removed_urls += len(original) - len(option.source_urls)
         grounded = len(valid_ids)
         statuses = {item.casefold() for item in STATUS_PATTERN.findall(option_text)}
+        evidence_claim = bool(cited_ids or original) or "verified" in statuses
         veto = "unmet" in statuses or "veto:" in option_text.casefold()
         has_conflict = "conflicting" in statuses
+        if unknown_source and "verified" in statuses:
+            option.selection_factors = [
+                STATUS_PATTERN.sub("Status: unverified", factor)
+                for factor in option.selection_factors
+            ]
+            option.limitations.append(
+                "UNVERIFIED: cited evidence is not a recognized official or specialist source."
+            )
         if veto:
             vetoed_options += 1
             vetoed_names.append(option.name)
@@ -170,13 +182,24 @@ def enforce_accessibility_output(finding: AgentFinding, evidence: Any) -> AgentF
         if option.source_urls and grounded:
             grounded_options += 1
         else:
+            if evidence_claim:
+                option.description = (
+                    "Accessibility details were withheld because no valid supporting "
+                    "web reference link was provided."
+                )
+                option.selection_factors = [
+                    factor for factor in option.selection_factors
+                    if not EVIDENCE_ID_PATTERN.search(factor)
+                    and not STATUS_PATTERN.search(factor)
+                ]
+                option.selection_factors.append("Status: unverified")
             if "UNVERIFIED: no supporting retrieved source." not in option.limitations:
                 option.limitations.append("UNVERIFIED: no supporting retrieved source.")
         option.selection_factors = _set_rating(
             option.selection_factors,
             _deterministic_rating(
                 grounded=grounded, requirement_count=requirement_count,
-                veto=veto, has_conflict=has_conflict,
+                veto=veto, has_conflict=has_conflict, unknown_source=unknown_source,
             ),
         )
 

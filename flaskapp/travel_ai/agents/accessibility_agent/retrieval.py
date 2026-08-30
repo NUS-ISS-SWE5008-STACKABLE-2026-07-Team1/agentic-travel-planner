@@ -13,7 +13,7 @@ from flaskapp.travel_ai.agents.accessibility_agent.models import AccessibilityEv
 from flaskapp.travel_ai.agents.accessibility_agent.planning import build_search_plan
 from flaskapp.travel_ai.schemas import TravelGraphState
 
-TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+SERPER_SEARCH_URL = "https://google.serper.dev/search"
 PRIMARY_DOMAINS = (
     "wheeltheworld.com", "accessiblego.com", "pantou.org", "accessable.co.uk",
     "wheelmap.org", "accessibility.cloud",
@@ -23,6 +23,7 @@ OFFICIAL_DOMAINS = (
     "emirates.com", "visitbritain.com", "japan.travel", "jnto.go.jp",
 )
 MAX_RESULTS = 8
+RESULTS_PER_QUERY = 4
 MAX_EXCERPT_CHARS = 1_500
 MAX_ATTEMPTS = 2
 
@@ -36,11 +37,11 @@ def _allowed_domains() -> tuple[str, ...]:
     return (*PRIMARY_DOMAINS, *OFFICIAL_DOMAINS, *extras)
 
 
-def _allowed_url(url: str, domains: tuple[str, ...]) -> bool:
+def _allowed_url(url: str, domains: tuple[str, ...] | None = None) -> bool:
+    """Accept public HTTPS evidence; known domains receive stronger provenance."""
     host = (urlparse(url).hostname or "").lower()
-    return urlparse(url).scheme == "https" and any(
-        host == domain or host.endswith(f".{domain}") for domain in domains
-    )
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and bool(host) and parsed.username is None
 
 
 def _query(state: TravelGraphState) -> str:
@@ -71,27 +72,26 @@ def _error_code(exc: Exception) -> str:
     return "provider_error"
 
 
-def _search(query: str, domains: tuple[str, ...], api_key: str, timeout: float) -> dict:
+def _search(query: str, api_key: str, timeout: float) -> dict:
     body = json.dumps({
-        "api_key": api_key,
-        "query": query,
-        "search_depth": "basic",
-        "max_results": MAX_RESULTS,
-        "include_answer": False,
-        "include_raw_content": False,
-        "include_domains": list(domains),
+        "q": query,
+        "num": RESULTS_PER_QUERY,
     }).encode("utf-8")
     request = Request(
-        TAVILY_SEARCH_URL, data=body, method="POST",
-        headers={"Content-Type": "application/json", "User-Agent": "AtlasTravelPlanner/1.0"},
+        SERPER_SEARCH_URL, data=body, method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-API-KEY": api_key,
+            "User-Agent": "AtlasTravelPlanner/1.0",
+        },
     )
     last_error: Exception | None = None
     for _attempt in range(MAX_ATTEMPTS):
         try:
             with urlopen(request, timeout=timeout) as response:  # nosec B310: fixed HTTPS endpoint
                 payload = json.loads(response.read().decode("utf-8"))
-            if not isinstance(payload.get("results", []), list):
-                raise ValueError("provider results must be a list")
+            if not isinstance(payload.get("organic", []), list):
+                raise ValueError("Serper organic results must be a list")
             return payload
         except Exception as exc:  # provider boundary: converted to a typed status below
             last_error = exc
@@ -105,12 +105,12 @@ def retrieve_accessibility_evidence(state: TravelGraphState) -> dict:
     """Execute a bounded plan and return typed, deduplicated evidence."""
     domains = _allowed_domains()
     plan = build_search_plan(state)
-    api_key = os.getenv("TAVILY_API_KEY", "").strip()
+    api_key = os.getenv("SERPER_API_KEY", "").strip()
     if not api_key:
         return {
             "status": "unavailable",
             "error_code": "not_configured",
-            "reason": "TAVILY_API_KEY is not configured",
+            "reason": "SERPER_API_KEY is not configured",
             "approved_domains": list(domains),
             "search_plan": plan.model_dump(),
             "results": [],
@@ -121,12 +121,12 @@ def retrieve_accessibility_evidence(state: TravelGraphState) -> dict:
     errors: list[dict[str, str]] = []
     for query in plan.queries:
         try:
-            payload = _search(query, domains, api_key, timeout)
+            payload = _search(query, api_key, timeout)
         except Exception as exc:
             errors.append({"query_scope": query, "error_code": _error_code(exc)})
             continue
-        for item in payload.get("results", [])[:MAX_RESULTS]:
-            url = str(item.get("url") or "")
+        for item in payload.get("organic", [])[:RESULTS_PER_QUERY]:
+            url = str(item.get("link") or "")
             if url in seen_urls or not _allowed_url(url, domains):
                 continue
             seen_urls.add(url)
@@ -134,10 +134,12 @@ def retrieve_accessibility_evidence(state: TravelGraphState) -> dict:
                 evidence_id=f"E{len(results) + 1}",
                 title=str(item.get("title") or "Untitled")[:200],
                 url=url,
-                excerpt=str(item.get("content") or "")[:MAX_EXCERPT_CHARS],
-                relevance=round(min(1.0, max(0.0, float(item.get("score") or 0))), 3),
+                excerpt=str(item.get("snippet") or "")[:MAX_EXCERPT_CHARS],
+                relevance=round(
+                    max(0.1, 1.0 - (max(1, int(item.get("position") or 1)) - 1) * 0.1), 3
+                ),
                 source_type=_source_type(url), query_scope=query,
-                published_or_updated_at=item.get("published_date"),
+                published_or_updated_at=item.get("date"),
             )
             results.append(evidence.model_dump())
             if len(results) >= MAX_RESULTS:

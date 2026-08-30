@@ -264,6 +264,25 @@ Run `python app.py` after configuration. The local address is
 `http://127.0.0.1:5000`. Never paste credentials into prompts, logs, source code, or
 Git. If a key is exposed, revoke and replace it with the provider immediately.
 
+### Accessibility Agent web evidence
+
+The Accessibility Agent can use Serper to find current evidence related to each
+traveller's functional accessibility requirements. Create a key at `serper.dev`,
+then place it in the ignored `.env.secrets` file:
+
+```dotenv
+SERPER_API_KEY=your-serper-key
+```
+
+The key is read only by `accessibility_agent/retrieval.py` and is sent in the
+Serper `X-API-KEY` request header; it is never included in search text, model
+prompts, stored evidence, or chatbot output. Without the key, planning continues
+with an explicit “accessibility evidence unavailable” warning. Search queries use
+the destination and normalized functional categories rather than raw medical
+details. Returned HTTPS pages are treated as untrusted evidence, screened by the
+agent guardrails, cited by URL, and labelled as official, specialist,
+crowdsourced, or unknown provenance.
+
 For local development, set `FLASK_DEBUG=true` in the ignored `.env` file. Running
 `python app.py` then automatically restarts the server when application code or
 templates change. Keep debug mode disabled in production.

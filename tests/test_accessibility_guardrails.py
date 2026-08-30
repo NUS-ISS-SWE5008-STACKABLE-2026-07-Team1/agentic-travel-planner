@@ -95,7 +95,10 @@ def test_url_without_claim_level_evidence_id_is_not_grounded():
         "results": [{"evidence_id": "E1", "url": trusted}],
     })
     assert guarded.options[0].source_urls == []
-    assert guarded.options[0].selection_factors[-1] == "Accessibility rating: 2/5"
+    assert "withheld" in guarded.options[0].description
+    assert "Step-free entrance" not in guarded.options[0].description
+    assert "Accessibility rating: 2/5" in guarded.options[0].selection_factors
+    assert "Status: unverified" in guarded.options[0].selection_factors
 
 
 def test_unmet_status_creates_deterministic_veto_and_rating_one():

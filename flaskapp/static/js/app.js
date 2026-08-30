@@ -393,7 +393,7 @@ if (agentChat) {
   const renderPlan = (response) => {
     const plan = response.plan;
     result.replaceChildren();
-    const appendListSection = (label, items) => {
+    const appendListSection = (label, items, linkItems = false) => {
       if (!items || items.length === 0) return;
       const sectionHeading = document.createElement("h4");
       sectionHeading.className = "h6 mt-4";
@@ -401,7 +401,22 @@ if (agentChat) {
       const list = document.createElement("ul");
       items.forEach((value) => {
         const item = document.createElement("li");
-        item.textContent = value;
+        if (linkItems) {
+          try {
+            const url = new URL(value);
+            if (!["http:", "https:"].includes(url.protocol)) throw new Error("unsupported URL");
+            const link = document.createElement("a");
+            link.href = url.href;
+            link.textContent = url.href;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            item.append(link);
+          } catch (_error) {
+            item.textContent = value;
+          }
+        } else {
+          item.textContent = value;
+        }
         list.append(item);
       });
       result.append(sectionHeading, list);
@@ -431,7 +446,87 @@ if (agentChat) {
     }
     appendListSection("Why this plan was recommended", plan.rationale);
     appendListSection("Alternatives", plan.alternatives);
-    appendListSection("Sources to verify", plan.sources);
+    appendListSection("Accessibility evidence and other sources", plan.sources, true);
+    const accessibilityFinding = (response.agent_findings || []).find(
+      (finding) => finding.agent === "accessibility_agent"
+    );
+    if (accessibilityFinding?.options?.length) {
+      const evidenceHeading = document.createElement("h4");
+      evidenceHeading.className = "h6 mt-4";
+      evidenceHeading.textContent = "Accessibility evidence";
+      const evidenceList = document.createElement("div");
+      evidenceList.className = "vstack gap-3 accessibility-evidence-list";
+      accessibilityFinding.options.forEach((option) => {
+        const card = document.createElement("div");
+        card.className = "accessibility-evidence-card";
+        const header = document.createElement("div");
+        header.className = "accessibility-evidence-header";
+        const name = document.createElement("h5");
+        name.className = "h6 mb-0";
+        name.textContent = option.name;
+        const badges = document.createElement("div");
+        badges.className = "accessibility-evidence-badges";
+        const statusFactor = (option.selection_factors || []).find((factor) => /^status:/i.test(factor));
+        const ratingFactor = (option.selection_factors || []).find((factor) => /^accessibility rating:/i.test(factor));
+        [statusFactor, ratingFactor].filter(Boolean).forEach((factor) => {
+          const badge = document.createElement("span");
+          badge.className = `accessibility-evidence-badge ${/verified/i.test(factor) && !/unverified/i.test(factor) ? "is-verified" : ""}`;
+          badge.textContent = factor;
+          badges.append(badge);
+        });
+        header.append(name, badges);
+        const description = document.createElement("p");
+        description.className = "accessibility-evidence-description";
+        description.textContent = option.description;
+        card.append(header, description);
+        const detailFactors = (option.selection_factors || []).filter(
+          (factor) => !/^status:|^accessibility rating:/i.test(factor)
+        );
+        if (detailFactors.length) {
+          const factorsLabel = document.createElement("div");
+          factorsLabel.className = "accessibility-evidence-label";
+          factorsLabel.textContent = "Evidence details";
+          const factors = document.createElement("p");
+          factors.className = "small text-body-secondary mb-3";
+          factors.textContent = detailFactors.join(" · ");
+          card.append(factorsLabel, factors);
+        }
+        if (option.source_urls?.length) {
+          const sourceLabel = document.createElement("div");
+          sourceLabel.className = "accessibility-evidence-label";
+          sourceLabel.textContent = "Web references used";
+          const links = document.createElement("ul");
+          links.className = "accessibility-source-list";
+          option.source_urls.forEach((value) => {
+            try {
+              const url = new URL(value);
+              if (!["http:", "https:"].includes(url.protocol)) return;
+              const item = document.createElement("li");
+              const link = document.createElement("a");
+              link.href = url.href;
+              link.textContent = `Verify on ${url.hostname}`;
+              link.setAttribute("aria-label", `Verify accessibility evidence on ${url.hostname} (opens in a new tab)`);
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              const address = document.createElement("span");
+              address.className = "accessibility-source-address";
+              address.textContent = url.href;
+              item.append(link, address);
+              links.append(item);
+            } catch (_error) { /* Guardrails already remove malformed evidence URLs. */ }
+          });
+          card.append(sourceLabel, links);
+        }
+        if (option.limitations?.length) {
+          const limitations = document.createElement("div");
+          limitations.className = "accessibility-evidence-limitations";
+          limitations.textContent = option.limitations.join(" ");
+          card.append(limitations);
+        }
+        evidenceList.append(card);
+      });
+      result.append(evidenceHeading, evidenceList);
+    }
     appendListSection("Assumptions", plan.assumptions);
     appendListSection("Limitations", plan.limitations);
     if (plan.safety) {
