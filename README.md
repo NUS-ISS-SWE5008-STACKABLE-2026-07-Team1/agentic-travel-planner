@@ -8,10 +8,11 @@ Accessibility Agent, and Risk & Advisory Agent.
 
 The four specialists run concurrently from a typed shared state. LangGraph waits
 at a fan-in barrier, then the orchestrator synthesizes their structured findings.
-No agent performs a booking. The starter also has no live supplier/search tools,
-so generated prices, availability, advisories, and accessibility claims are
-explicitly estimates or verification tasks. Add approved data-provider tools before
-using it for real-time decisions.
+No agent performs a booking. Flight inventory can optionally come from Duffel,
+and the Accessibility Agent can retrieve live web evidence through Serper. Other
+generated prices, availability, and advisories remain estimates or verification
+tasks until an approved provider is connected. Retrieved accessibility evidence is
+still advisory and must be verified with the relevant supplier before booking.
 
 Each response includes agent findings, concise selection factors, alternatives,
 sources, assumptions, limitations, confidence, and safety warnings. This is useful
@@ -27,7 +28,7 @@ in `prompt.py`, reducing merge conflicts between team members.
 | --- | --- | --- |
 | Flight Agent | `agents/flight_agent/` | Flight search and reasoning under arrival-time, schedule, connection, baggage, and budget constraints. |
 | Hotel & Transport Agent | `agents/hotel_transport_agent/` | Accommodation and local transit selection compatible with flights and traveller requirements. |
-| Accessibility Agent | `agents/accessibility_agent/` | End-to-end accessibility validation, explicit veto warnings, and future bias-audit tooling. |
+| Accessibility Agent | `agents/accessibility_agent/` | Privacy-safe requirement planning, Serper web evidence, provenance enforcement, deterministic ratings/vetoes, and supplier-verification questions. |
 | Risk & Advisory Agent | `agents/risk_advisory_a1gent/` | Visa, seasonal, disruption, event, health, and safety risks with high-severity escalation. |
 | Orchestrator Agent | `agents/orchestrator_agent/` | Coordination, governance, conflict/escalation handling, and final itinerary synthesis. |
 
@@ -56,8 +57,12 @@ flaskapp/travel_ai/
 |   |   |-- agent.py
 |   |   `-- prompt.py
 |   |-- accessibility_agent/
-|   |   |-- agent.py
-|   |   `-- prompt.py
+|   |   |-- agent.py               # guarded LangGraph specialist node
+|   |   |-- prompt.py              # evidence, rating and reflection policy
+|   |   |-- models.py              # typed requirements, search plans and evidence
+|   |   |-- planning.py            # requirement extraction + privacy-safe queries
+|   |   |-- retrieval.py           # Serper search, retries and source metadata
+|   |   `-- guardrails.py          # input/output screening, citations and vetoes
 |   |-- risk_advisory_agent/
 |   |   |-- agent.py
 |   |   `-- prompt.py
@@ -82,6 +87,54 @@ graph runs the four specialists in parallel and then runs the orchestrator. The
 orchestrator prompt identifies unresolved conflicts for a future negotiation cycle;
 an actual retry/negotiation loop must be added in `graph.py` when that feature is
 developed.
+
+### Accessibility Agent
+
+The Accessibility Agent turns each traveller's accessibility needs into a bounded,
+privacy-conscious evidence review. It does not diagnose a disability, make a booking,
+or treat a general accessibility label as proof that an option is suitable.
+
+Its runtime flow is:
+
+1. `planning.py` reads per-traveller and legacy aggregate accessibility needs,
+   deduplicates them, and classifies them as mobility, vision, hearing, cognitive,
+   service-animal, medical-equipment, dietary, or other requirements.
+2. It builds up to four searches using the destination and normalized functional
+   category. Raw medical details and free-text requirements are not sent to Serper.
+3. `retrieval.py` calls `https://google.serper.dev/search`, requesting at most four
+   results per query and eight results for the complete agent run. Transient network
+   failures are retried once.
+4. Each accepted HTTPS result receives an evidence ID (`E1`, `E2`, ...), title,
+   excerpt, URL, query scope, retrieval time, and provenance classification:
+   official, specialist, crowdsourced, or unknown.
+5. `guardrails.py` screens retrieved titles/excerpts as untrusted content. Generated
+   claims must cite an evidence ID and its exact retrieved URL. Fabricated, malformed,
+   insecure, or unmatched links are removed.
+6. Unknown sources and unsupported claims are marked unverified and cannot receive a
+   high deterministic accessibility rating. Factual content is withheld when it
+   claims web support but has no valid reference link.
+7. Options marked `Status: unmet` are removed by the agent and recorded in an
+   `ACCESSIBILITY VETO` warning. Missing evidence produces precise questions for the
+   airport, transport operator, hotel, venue, or other supplier.
+8. Vetted URLs are copied into the final plan even if the orchestrator omits them.
+   The chatbot presents each Accessibility Agent option with status, rating, evidence
+   details, limitations, website hostname, full URL, and a safe clickable verification
+   link.
+
+The agent reviews five journey segments: arrival/airport, local transport,
+accommodation, activities/public spaces, and departure/connections. A source can
+support a general policy without proving that a particular hotel room, vehicle,
+station, or venue satisfies the traveller's requirements; those gaps remain explicitly
+unverified.
+
+Focused verification:
+
+```powershell
+python -m pytest -q tests/test_accessibility_planning.py `
+  tests/test_accessibility_retrieval.py `
+  tests/test_accessibility_guardrails.py `
+  tests/test_accessibility_evidence_delivery.py
+```
 
 ### Flight Agent's deterministic layer
 
