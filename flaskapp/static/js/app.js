@@ -263,6 +263,65 @@ if (planner) {
   });
   renderTravelerFields();
 
+  // "Go back" on the chat page returns here with the trip intact. buildPayload()
+  // flattens per-traveller preferences into "Traveler N: ..." entries in one
+  // list, so restoring splits them back out by that same prefix — the two
+  // functions are inverses and must stay that way.
+  //
+  // Defensive throughout: a stored payload is data from a previous session and
+  // may predate any field added since. Anything missing or unparseable leaves
+  // the form exactly as it loaded rather than half-filled.
+  const restoreStoredTrip = () => {
+    let payload;
+    try {
+      payload = JSON.parse(sessionStorage.getItem("atlas-plan-payload") || "null");
+    } catch (error) {
+      return;
+    }
+    if (!payload) return;
+    const setValue = (name, value) => {
+      const field = planner.querySelector(`[name='${name}']`);
+      if (field && value !== undefined && value !== null && value !== "") field.value = value;
+    };
+    setValue("origin", payload.origin);
+    setValue("destination", payload.destination);
+    // Cities are populated from the country, so the country must be set first.
+    cityPairs.forEach(([countrySelect, citySelect]) => populateCities(countrySelect, citySelect));
+    setValue("origin_city", payload.origin_city);
+    setValue("destination_city", payload.destination_city);
+    setValue("departure_date", payload.departure_date);
+    if (payload.departure_date) returnDate.min = payload.departure_date;
+    setValue("return_date", payload.return_date);
+    setValue("budget", payload.budget);
+
+    const perTraveller = /^Traveler (\d+): (.*)$/;
+    const general = [];
+    const byTraveller = {};
+    (payload.preferences || []).forEach((entry) => {
+      const match = perTraveller.exec(String(entry));
+      if (match) {
+        const index = Number(match[1]) - 1;
+        byTraveller[index] = byTraveller[index] ? `${byTraveller[index]}, ${match[2]}` : match[2];
+      } else {
+        general.push(entry);
+      }
+    });
+    setValue("preferences", general.join(", "));
+
+    if (payload.travellers) {
+      travelersInput.value = String(payload.travellers);
+      renderTravelerFields();
+      const ages = travelerDetails.querySelectorAll("[name='traveller_age']");
+      const genders = travelerDetails.querySelectorAll("[name='traveller_gender']");
+      const notes = travelerDetails.querySelectorAll("[name='traveller_preference']");
+      ages.forEach((field, index) => { field.value = (payload.traveller_ages || [])[index] ?? ""; });
+      genders.forEach((field, index) => { field.value = (payload.traveller_genders || [])[index] || ""; });
+      notes.forEach((field, index) => { field.value = byTraveller[index] || ""; });
+    }
+  };
+
+  restoreStoredTrip();
+
   planner.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!planner.reportValidity()) return;
@@ -300,6 +359,9 @@ if (agentChat) {
   const statusLabel = document.querySelector("#job-status");
   const result = document.querySelector("#plan-content");
   const refinementForm = document.querySelector("#chat-refinement-form");
+  const planNavigation = document.querySelector("#plan-navigation");
+  const goBackButton = document.querySelector("#go-back");
+  const startOverButton = document.querySelector("#start-over");
   const feedbackSection = document.querySelector("#plan-feedback");
   const negativeFeedbackForm = document.querySelector("#negative-feedback-form");
   const feedbackComment = document.querySelector("#negative-feedback-comment");
@@ -443,6 +505,7 @@ if (agentChat) {
     result.append(ready);
     result.append(feedbackSection);
     refinementForm.classList.remove("d-none");
+    planNavigation.classList.remove("d-none");
     feedbackSection.classList.remove("d-none");
     refinementForm.querySelector("#chat-message").focus();
   };
@@ -541,6 +604,12 @@ if (agentChat) {
     const stored = sessionStorage.getItem("atlas-plan-payload");
     if (!stored) return;
     const payload = JSON.parse(stored);
+    // `_request_id` links ONE intake conversation to ONE plan submission, and
+    // the first submission moves that row out of `intake` status. Replaying it
+    // makes owns_intake_request() fail and the endpoint answer 404, which is
+    // why refinement stopped working after the first plan. Refining is a new
+    // submission of the same trip, not a second use of the intake.
+    delete payload._request_id;
     const message = refinementForm.querySelector("#chat-message").value.trim();
     payload.refinement_notes = [...(payload.refinement_notes || []), message];
     const button = refinementForm.querySelector("button");
@@ -558,6 +627,23 @@ if (agentChat) {
       button.disabled = false;
       statusLabel.textContent = body.error || "Unable to refine the plan.";
     }
+  });
+
+  // Both of these are deliberately non-destructive to the server. The plan is
+  // already finished by the time they appear, so there is nothing to cancel —
+  // unlike Home, which stops an in-flight run and warns before doing it.
+  goBackButton.addEventListener("click", () => {
+    // The stored payload is left intact on purpose: /main reads it back so the
+    // traveller lands on their own trip details and can edit rather than retype.
+    window.location.assign(goBackButton.dataset.mainUrl);
+  });
+
+  startOverButton.addEventListener("click", () => {
+    // Starting from first means the next intake must not inherit this trip.
+    // Clearing the payload is what makes it a fresh conversation rather than
+    // one pre-filled with the old answers.
+    sessionStorage.removeItem("atlas-plan-payload");
+    window.location.assign(startOverButton.dataset.intakeUrl);
   });
 
   homeButton.addEventListener("click", () => {
