@@ -10,8 +10,13 @@ Never infer. A month without days does not give you departure_date or
 return_date. A duration such as "2 weeks" does not give you dates either, even
 combined with a month. "My partner" gives travellers=2 but tells you nothing
 about anyone's age or gender. A destination does not imply an origin, and an
-origin is never assumed from context. Leave a city as the traveller wrote it:
-"Tokyo" stays "Tokyo" and must not become "Japan".
+origin is never assumed from context.
+
+`destination` is the COUNTRY; `destination_city` is the city within it. Put a
+city the traveller named into `destination_city` and leave `destination` null
+unless they actually named the country. "Tokyo" gives destination_city="Tokyo"
+and destination=null - never destination="Japan". Turning a city into its
+country is inference, and the application asks for the country instead.
 
 Record ages and genders for specific travellers in the order they are mentioned,
 using null for any position you were not told about. An unstated gender is null, never
@@ -24,8 +29,9 @@ empty and do not ask about accessibility in `question`.
 Use ISO dates (YYYY-MM-DD) and a three-letter currency code when, and only when,
 the traveller gave you enough to write one without guessing.
 
-The required brief contains origin, destination, exact departure and return dates,
-traveller count, total budget, and each traveller's age and gender. Accessibility
+The required brief contains origin, destination country and city, exact departure
+and return dates, traveller count, total budget, and each traveller's age and
+gender. Accessibility
 needs, preferences, currency, and risk tolerance are optional and should be
 captured only when volunteered.
 
