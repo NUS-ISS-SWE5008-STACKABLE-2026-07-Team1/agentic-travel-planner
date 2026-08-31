@@ -13,8 +13,7 @@ from copy import deepcopy
 from typing import Any
 
 from flaskapp.travel_ai.agents.flight_agent.guardrails import (
-    screen_input_text as screen_free_text,
-    screen_output_text,
+    detect_bias, detect_toxicity, screen_input_text as screen_free_text,
     screen_preferences,
 )
 from flaskapp.travel_ai.guardrails.fields import collect_free_text
@@ -23,6 +22,22 @@ from flaskapp.travel_ai.schemas import AgentFinding, TravelGraphState
 RATING_PATTERN = re.compile(r"(?i)(accessibility rating:\s*)([1-5](?:\.\d+)?)(/5)")
 EVIDENCE_ID_PATTERN = re.compile(r"\[(E\d+)\]", re.I)
 STATUS_PATTERN = re.compile(r"(?i)\bstatus\s*:\s*(verified|unverified|unmet|conflicting)\b")
+GENERAL_EXCLUSION_PATTERNS = [
+    re.compile(
+        r"(?i)\b(disabled (?:people|travell?ers?)|people with disabilities|wheelchair users?)"
+        r".{0,80}\b(should not|cannot|can't|not suitable (?:to|for)).{0,50}\b"
+        r"(travel|fly|visit|participate)\b"
+    ),
+    re.compile(
+        r"(?i)\b(disabled (?:people|travell?ers?)|people with disabilities|wheelchair users?)"
+        r".{0,50}\b(naturally|always|inferior|superior)\b"
+    ),
+]
+CONSTRAINT_CONTEXT_PATTERN = re.compile(
+    r"(?i)\b(option|hotel|room|venue|flight|aircraft|airport|station|route|transport|"
+    r"vehicle|entrance|lift|elevator|bathroom|service|supplier|requirement|door|ramp|"
+    r"boarding|step[- ]free|wheelchair|accessible|accessibility)\b"
+)
 
 
 def screen_accessibility_input(state: TravelGraphState) -> dict[str, Any]:
@@ -88,6 +103,37 @@ def _all_output_text(finding: AgentFinding) -> str:
     return "\n".join(values)
 
 
+def screen_accessibility_output_text(text: str) -> dict[str, Any]:
+    """Screen harmful generalizations without blocking factual access barriers.
+
+    The shared detector intentionally treats a disability term combined with
+    "cannot" or "should not" as high risk. Applied to one concatenated finding,
+    that creates false positives when one field names a disabled traveller and
+    another says a specific hotel cannot meet a door-width requirement. Here we
+    evaluate individual statements and retain high-risk findings only when they
+    are general exclusions or lack a concrete option/barrier context.
+    """
+    statements = [
+        item.strip() for item in re.split(r"[\r\n]+|(?<=[.!?])\s+", text) if item.strip()
+    ]
+    blocked_bias: list[dict[str, Any]] = []
+    toxicity: list[dict[str, Any]] = []
+    for statement in statements:
+        toxic = detect_toxicity(statement)
+        if toxic["flagged"]:
+            toxicity.append({"text": statement, "result": toxic})
+        general_exclusion = any(pattern.search(statement) for pattern in GENERAL_EXCLUSION_PATTERNS)
+        bias = detect_bias(statement)
+        concrete_constraint = bool(CONSTRAINT_CONTEXT_PATTERN.search(statement))
+        if general_exclusion or (bias["risk_level"] == "high" and not concrete_constraint):
+            blocked_bias.append({"text": statement, "result": bias})
+    return {
+        "flagged": bool(blocked_bias or toxicity),
+        "bias": blocked_bias,
+        "toxicity": toxicity,
+    }
+
+
 def _set_rating(factors: list[str], rating: int) -> list[str]:
     replacement = f"Accessibility rating: {rating}/5"
     updated = []
@@ -127,7 +173,7 @@ def enforce_accessibility_output(finding: AgentFinding, evidence: Any) -> AgentF
     """Fail closed on unsafe prose and remove claims not grounded by evidence URLs."""
     output = finding.model_copy(deep=True)
     text = _all_output_text(output)
-    policy = screen_output_text(text)
+    policy = screen_accessibility_output_text(text)
     injection = bool(screen_preferences([text]))
     if policy["flagged"] or injection:
         return AgentFinding(
