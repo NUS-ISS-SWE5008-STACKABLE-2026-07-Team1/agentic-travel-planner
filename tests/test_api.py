@@ -356,9 +356,11 @@ def test_admin_page_and_activity_require_configured_admin(tmp_path):
     }
     assert dashboard["platform"]["total_requests"] == 0
     assert dashboard["logs"] == []
-    # Five agents, the deterministic gates, and the L2 classifier.
-    assert len(dashboard["prompts"]) == 7
-    assert "LLM guardrail classifier (L2)" in {item["agent"] for item in dashboard["prompts"]}
+    # Five agents, the deterministic gates, PII redaction, and the L2 classifier.
+    assert len(dashboard["prompts"]) == 8
+    agents = {item["agent"] for item in dashboard["prompts"]}
+    assert "LLM guardrail classifier (L2)" in agents
+    assert "PII redaction (L1)" in agents
 
     with client.session_transaction() as session:
         session["user_email"] = "SECOND-ADMIN@example.com"
@@ -470,3 +472,21 @@ def test_cross_field_validation_error_returns_json_not_an_html_error_page(monkey
     assert response.is_json
     body = response.get_json()
     assert "return_date must be on or after departure_date" in str(body["details"])
+
+
+def test_chat_page_offers_start_over_and_go_back():
+    """Reported: after a plan is generated there is no way back except Home,
+    which cancels. "Start over" clears the stored trip and returns to a fresh
+    intake; "Go back" returns to the trip details with them intact.
+    """
+    request_id = "11111111-1111-4111-8111-111111111111"
+    client = create_app(TestConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_name"] = "Alicia"
+    response = client.get(f"/chat/{request_id}")
+    assert response.status_code == 200
+    assert b'id="start-over"' in response.data
+    assert b'id="go-back"' in response.data
+    # Start over must know where a fresh intake lives; go back must not cancel.
+    assert b'data-intake-url="/chat/intake"' in response.data
