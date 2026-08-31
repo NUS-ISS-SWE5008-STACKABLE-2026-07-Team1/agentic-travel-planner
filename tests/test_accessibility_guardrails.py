@@ -2,6 +2,7 @@ from flaskapp.travel_ai.agents.accessibility_agent.guardrails import (
     blocked_input_finding,
     enforce_accessibility_output,
     sanitize_evidence,
+    screen_accessibility_output_text,
     screen_accessibility_input,
 )
 from flaskapp.travel_ai.schemas import AgentFinding, Option
@@ -134,3 +135,33 @@ def test_unsafe_generated_output_is_withheld():
     assert guarded.options == []
     assert guarded.confidence == 0
     assert "withheld" in guarded.summary
+
+
+def test_specific_accessibility_barrier_is_not_misclassified_as_bias():
+    result = screen_accessibility_output_text(
+        "The hotel cannot accommodate the disabled traveller because its entrance "
+        "has steps and no ramp. Do not book this option."
+    )
+    assert result["flagged"] is False
+
+
+def test_discriminatory_general_exclusion_remains_blocked():
+    result = screen_accessibility_output_text(
+        "Disabled travellers should not travel internationally."
+    )
+    assert result["flagged"] is True
+
+
+def test_wheelchair_user_general_exclusion_remains_blocked():
+    result = screen_accessibility_output_text(
+        "Wheelchair users are not suitable for international travel."
+    )
+    assert result["flagged"] is True
+
+
+def test_disability_and_constraint_in_separate_fields_do_not_cross_trigger():
+    result = screen_accessibility_output_text(
+        "Accessibility review for a disabled traveller.\n"
+        "This hotel cannot meet the required doorway width."
+    )
+    assert result["flagged"] is False
