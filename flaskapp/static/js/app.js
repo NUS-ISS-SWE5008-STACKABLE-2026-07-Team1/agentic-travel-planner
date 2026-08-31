@@ -393,7 +393,7 @@ if (agentChat) {
   const renderPlan = (response) => {
     const plan = response.plan;
     result.replaceChildren();
-    const appendListSection = (label, items) => {
+    const appendListSection = (label, items, linkItems = false) => {
       if (!items || items.length === 0) return;
       const sectionHeading = document.createElement("h4");
       sectionHeading.className = "h6 mt-4";
@@ -401,7 +401,22 @@ if (agentChat) {
       const list = document.createElement("ul");
       items.forEach((value) => {
         const item = document.createElement("li");
-        item.textContent = value;
+        if (linkItems) {
+          try {
+            const url = new URL(value);
+            if (!["http:", "https:"].includes(url.protocol)) throw new Error("unsupported URL");
+            const link = document.createElement("a");
+            link.href = url.href;
+            link.textContent = url.href;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            item.append(link);
+          } catch (_error) {
+            item.textContent = value;
+          }
+        } else {
+          item.textContent = value;
+        }
         list.append(item);
       });
       result.append(sectionHeading, list);
@@ -431,7 +446,87 @@ if (agentChat) {
     }
     appendListSection("Why this plan was recommended", plan.rationale);
     appendListSection("Alternatives", plan.alternatives);
-    appendListSection("Sources to verify", plan.sources);
+    appendListSection("Accessibility evidence and other sources", plan.sources, true);
+    const accessibilityFinding = (response.agent_findings || []).find(
+      (finding) => finding.agent === "accessibility_agent"
+    );
+    if (accessibilityFinding?.options?.length) {
+      const evidenceHeading = document.createElement("h4");
+      evidenceHeading.className = "h6 mt-4";
+      evidenceHeading.textContent = "Accessibility evidence";
+      const evidenceList = document.createElement("div");
+      evidenceList.className = "vstack gap-3 accessibility-evidence-list";
+      accessibilityFinding.options.forEach((option) => {
+        const card = document.createElement("div");
+        card.className = "accessibility-evidence-card";
+        const header = document.createElement("div");
+        header.className = "accessibility-evidence-header";
+        const name = document.createElement("h5");
+        name.className = "h6 mb-0";
+        name.textContent = option.name;
+        const badges = document.createElement("div");
+        badges.className = "accessibility-evidence-badges";
+        const statusFactor = (option.selection_factors || []).find((factor) => /^status:/i.test(factor));
+        const ratingFactor = (option.selection_factors || []).find((factor) => /^accessibility rating:/i.test(factor));
+        [statusFactor, ratingFactor].filter(Boolean).forEach((factor) => {
+          const badge = document.createElement("span");
+          badge.className = `accessibility-evidence-badge ${/verified/i.test(factor) && !/unverified/i.test(factor) ? "is-verified" : ""}`;
+          badge.textContent = factor;
+          badges.append(badge);
+        });
+        header.append(name, badges);
+        const description = document.createElement("p");
+        description.className = "accessibility-evidence-description";
+        description.textContent = option.description;
+        card.append(header, description);
+        const detailFactors = (option.selection_factors || []).filter(
+          (factor) => !/^status:|^accessibility rating:/i.test(factor)
+        );
+        if (detailFactors.length) {
+          const factorsLabel = document.createElement("div");
+          factorsLabel.className = "accessibility-evidence-label";
+          factorsLabel.textContent = "Evidence details";
+          const factors = document.createElement("p");
+          factors.className = "small text-body-secondary mb-3";
+          factors.textContent = detailFactors.join(" · ");
+          card.append(factorsLabel, factors);
+        }
+        if (option.source_urls?.length) {
+          const sourceLabel = document.createElement("div");
+          sourceLabel.className = "accessibility-evidence-label";
+          sourceLabel.textContent = "Web references used";
+          const links = document.createElement("ul");
+          links.className = "accessibility-source-list";
+          option.source_urls.forEach((value) => {
+            try {
+              const url = new URL(value);
+              if (!["http:", "https:"].includes(url.protocol)) return;
+              const item = document.createElement("li");
+              const link = document.createElement("a");
+              link.href = url.href;
+              link.textContent = `Verify on ${url.hostname}`;
+              link.setAttribute("aria-label", `Verify accessibility evidence on ${url.hostname} (opens in a new tab)`);
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              const address = document.createElement("span");
+              address.className = "accessibility-source-address";
+              address.textContent = url.href;
+              item.append(link, address);
+              links.append(item);
+            } catch (_error) { /* Guardrails already remove malformed evidence URLs. */ }
+          });
+          card.append(sourceLabel, links);
+        }
+        if (option.limitations?.length) {
+          const limitations = document.createElement("div");
+          limitations.className = "accessibility-evidence-limitations";
+          limitations.textContent = option.limitations.join(" ");
+          card.append(limitations);
+        }
+        evidenceList.append(card);
+      });
+      result.append(evidenceHeading, evidenceList);
+    }
     appendListSection("Assumptions", plan.assumptions);
     appendListSection("Limitations", plan.limitations);
     if (plan.safety) {
@@ -601,6 +696,8 @@ if (adminMonitor) {
   const liveAgentStages = document.querySelector("#live-agent-stages");
   const liveProcessingLog = document.querySelector("#live-processing-log");
   const processingTimelineDialog = document.querySelector("#processing-timeline-dialog");
+  const agentWorkflowGraph = document.querySelector("#agent-workflow-graph");
+  const agentWorkflowLegend = document.querySelector("#agent-workflow-legend");
   let selectedRequestId = null;
   let requests = [];
   let consumption = {totals: {}, users: []};
@@ -634,6 +731,76 @@ if (adminMonitor) {
     failed: "text-bg-danger", cancelled: "text-bg-warning"
   }[status] || "text-bg-secondary");
 
+  const renderAgentWorkflow = (request) => {
+    const svgNamespace = "http://www.w3.org/2000/svg";
+    const retainedAccessibility = [...agentWorkflowGraph.children].filter((child) => ["title", "desc"].includes(child.tagName));
+    agentWorkflowGraph.replaceChildren(...retainedAccessibility);
+
+    const definition = document.createElementNS(svgNamespace, "defs");
+    const marker = document.createElementNS(svgNamespace, "marker");
+    marker.setAttribute("id", "workflow-arrow");
+    marker.setAttribute("viewBox", "0 0 10 10");
+    marker.setAttribute("refX", "9"); marker.setAttribute("refY", "5");
+    marker.setAttribute("markerWidth", "7"); marker.setAttribute("markerHeight", "7");
+    marker.setAttribute("orient", "auto-start-reverse");
+    const arrow = document.createElementNS(svgNamespace, "path");
+    arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z"); arrow.setAttribute("fill", "context-stroke");
+    marker.append(arrow); definition.append(marker); agentWorkflowGraph.append(definition);
+
+    const runStatus = new Map((request.agents || []).map((agent) => [agent.agent, agent.status]));
+    const requestEvents = logs.filter((entry) => entry.request_id === request.request_id);
+    const eventNames = new Set(requestEvents.map((entry) => entry.event));
+    const hasStarted = (request.agents || []).length > 0;
+    const intakeCompleted = hasStarted || eventNames.has("orchestrator_validation_completed");
+    const nodes = [
+      {id: "submitted", label: "User submission", x: 15, y: 188, status: "completed"},
+      {id: "intake", label: "Orchestrator intake", x: 185, y: 188, status: intakeCompleted ? "completed" : "processing"},
+      {id: "start", label: "Request validated", x: 355, y: 188, status: hasStarted ? "completed" : "queued"},
+      {id: "flight_agent", label: "Flight", x: 545, y: 28, status: runStatus.get("flight_agent") || "queued"},
+      {id: "hotel_transport_agent", label: "Hotel & transport", x: 545, y: 128, status: runStatus.get("hotel_transport_agent") || "queued"},
+      {id: "accessibility_agent", label: "Accessibility", x: 545, y: 228, status: runStatus.get("accessibility_agent") || "queued"},
+      {id: "risk_advisory_agent", label: "Risk & advisory", x: 545, y: 328, status: runStatus.get("risk_advisory_agent") || "queued"},
+      {id: "orchestrator_agent", label: "Orchestrator", x: 900, y: 188, status: runStatus.get("orchestrator_agent") || "queued"},
+      {id: "end", label: "Final itinerary", x: 1095, y: 188, status: request.status === "completed" ? "completed" : request.status === "failed" ? "failed" : "queued"}
+    ];
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const specialists = ["flight_agent", "hotel_transport_agent", "accessibility_agent", "risk_advisory_agent"];
+    const edges = [["submitted", "intake"], ["intake", "start"]]
+      .concat(specialists.flatMap((agent) => [["start", agent], [agent, "orchestrator_agent"]]))
+      .concat([["orchestrator_agent", "end"]]);
+    edges.forEach(([sourceId, targetId]) => {
+      const source = byId.get(sourceId); const target = byId.get(targetId);
+      const path = document.createElementNS(svgNamespace, "path");
+      const startX = source.x + 140; const startY = source.y + 27; const endX = target.x; const endY = target.y + 27;
+      const bend = (startX + endX) / 2;
+      path.setAttribute("d", `M ${startX} ${startY} C ${bend} ${startY}, ${bend} ${endY}, ${endX} ${endY}`);
+      const edgeStatus = source.status === "completed" && target.status === "completed" ? "completed"
+        : [source.status, target.status].includes("processing") ? "processing" : "queued";
+      path.setAttribute("class", `agent-workflow-edge ${edgeStatus}`);
+      path.setAttribute("marker-end", "url(#workflow-arrow)");
+      agentWorkflowGraph.append(path);
+    });
+    nodes.forEach((node) => {
+      const group = document.createElementNS(svgNamespace, "g");
+      group.setAttribute("class", `agent-workflow-node ${node.status}`);
+      group.setAttribute("transform", `translate(${node.x} ${node.y})`);
+      const rect = document.createElementNS(svgNamespace, "rect");
+      rect.setAttribute("width", "140"); rect.setAttribute("height", "54"); rect.setAttribute("rx", "13");
+      const name = document.createElementNS(svgNamespace, "text");
+      name.setAttribute("class", "node-name"); name.setAttribute("x", "70"); name.setAttribute("y", "23"); name.textContent = node.label;
+      const status = document.createElementNS(svgNamespace, "text");
+      status.setAttribute("class", "node-status"); status.setAttribute("x", "70"); status.setAttribute("y", "41"); status.textContent = node.status;
+      group.append(rect, name, status); agentWorkflowGraph.append(group);
+    });
+
+    agentWorkflowLegend.replaceChildren();
+    [["completed", "Completed"], ["processing", "Processing"], ["failed", "Failed"], ["queued", "Queued"]].forEach(([status, label]) => {
+      const item = document.createElement("span"); item.className = status;
+      const dot = document.createElement("i"); dot.setAttribute("aria-hidden", "true");
+      item.append(dot, label); agentWorkflowLegend.append(item);
+    });
+  };
+
   const renderLiveProcessing = () => {
     const selected = requests.find((item) => item.request_id === selectedRequestId);
     liveAgentStages.replaceChildren();
@@ -645,6 +812,7 @@ if (adminMonitor) {
       liveRequestStatus.textContent = "Waiting";
       return;
     }
+    renderAgentWorkflow(selected);
     const liveRoute = selected.request.origin && selected.request.destination
       ? `${selected.request.origin} → ${selected.request.destination}` : "Trip details being collected";
     liveRequestLabel.textContent = `${liveRoute} · ${selected.request_id}`;
@@ -919,7 +1087,17 @@ if (adminMonitor) {
       values.splice(4, 0, sessionState);
       values.forEach((value, index) => {
         const cell = document.createElement("td");
-        cell.textContent = index >= 6 ? value.toLocaleString() : value;
+        if (index === 3 && item.status === "completed") {
+          const statusButton = document.createElement("button");
+          statusButton.type = "button";
+          statusButton.className = "badge text-bg-success admin-status-button";
+          statusButton.textContent = value;
+          statusButton.setAttribute("aria-label", `View completed agent workflow for ${routeLabel(item.request)}`);
+          statusButton.addEventListener("click", (event) => { event.stopPropagation(); selectRequest(); });
+          cell.append(statusButton);
+        } else {
+          cell.textContent = index >= 6 ? value.toLocaleString() : value;
+        }
         if (index === 4) cell.className = sessionState === "Active" ? "text-success fw-semibold" : "text-body-secondary";
         row.append(cell);
       });
