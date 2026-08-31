@@ -20,7 +20,8 @@ def state(**overrides):
     return {"request": request}
 
 
-def finding(*, source_urls=None, rating="Accessibility rating: 5/5", summary="Grounded review"):
+def finding(*, source_urls=None, rating="Accessibility rating: 5/5", summary="Grounded review",
+            factors=None):
     return AgentFinding(
         agent="accessibility_agent",
         summary=summary,
@@ -28,7 +29,7 @@ def finding(*, source_urls=None, rating="Accessibility rating: 5/5", summary="Gr
             name="Venue",
             description="Step-free entrance",
             source_urls=source_urls or [],
-            selection_factors=[rating],
+            selection_factors=factors or [rating],
         )],
         confidence=0.9,
     )
@@ -69,9 +70,12 @@ def test_poisoned_retrieval_excerpt_is_removed():
 
 def test_output_removes_fabricated_urls_but_keeps_retrieved_urls():
     trusted = "https://accessable.co.uk/venue"
-    output = finding(source_urls=[trusted, "https://invented.example/venue"])
+    output = finding(
+        source_urls=[trusted, "https://invented.example/venue"],
+        factors=["[E1] Status: verified"],
+    )
     guarded = enforce_accessibility_output(output, {
-        "status": "available", "results": [{"url": trusted}],
+        "status": "available", "results": [{"evidence_id": "E1", "url": trusted}],
     })
     assert guarded.options[0].source_urls == [trusted]
     assert "removed 1 source URL" in " ".join(guarded.warnings)
@@ -82,6 +86,44 @@ def test_unverified_rating_is_capped_and_confidence_lowered():
     assert guarded.options[0].selection_factors == ["Accessibility rating: 2/5"]
     assert "UNVERIFIED" in guarded.options[0].limitations[0]
     assert guarded.confidence == 0.25
+
+
+def test_url_without_claim_level_evidence_id_is_not_grounded():
+    trusted = "https://accessable.co.uk/venue"
+    guarded = enforce_accessibility_output(finding(source_urls=[trusted]), {
+        "status": "available",
+        "results": [{"evidence_id": "E1", "url": trusted}],
+    })
+    assert guarded.options[0].source_urls == []
+    assert "withheld" in guarded.options[0].description
+    assert "Step-free entrance" not in guarded.options[0].description
+    assert "Accessibility rating: 2/5" in guarded.options[0].selection_factors
+    assert "Status: unverified" in guarded.options[0].selection_factors
+
+
+def test_unmet_status_creates_deterministic_veto_and_rating_one():
+    trusted = "https://accessable.co.uk/venue"
+    guarded = enforce_accessibility_output(finding(
+        source_urls=[trusted], factors=["[E1] Status: unmet", "Accessibility rating: 5/5"],
+    ), {
+        "status": "available",
+        "results": [{"evidence_id": "E1", "url": trusted}],
+        "search_plan": {"requirements": [{"description": "step-free entrance"}]},
+    })
+    assert guarded.options == []
+    assert any("ACCESSIBILITY VETO" in warning for warning in guarded.warnings)
+
+
+def test_partial_retrieval_caps_confidence():
+    trusted = "https://accessable.co.uk/venue"
+    guarded = enforce_accessibility_output(finding(
+        source_urls=[trusted], factors=["[E1] Status: verified"],
+    ), {
+        "status": "partial",
+        "results": [{"evidence_id": "E1", "url": trusted}],
+    })
+    assert guarded.confidence == 0.5
+    assert any("partial" in warning for warning in guarded.warnings)
 
 
 def test_unsafe_generated_output_is_withheld():

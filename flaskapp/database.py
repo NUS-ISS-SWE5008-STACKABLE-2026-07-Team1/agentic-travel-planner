@@ -506,7 +506,7 @@ def initialize(target: Path | str) -> None:
                 return {
                     row["column_name"] for row in connection.execute(
                         "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = 'public' AND table_name = ?", (table,)
+                        "WHERE table_schema = current_schema() AND table_name = ?", (table,)
                     ).fetchall()
                 }
             return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}

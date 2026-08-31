@@ -104,7 +104,16 @@ def test_top_n_limits_candidates_per_leg():
 
 
 def test_no_candidates_for_unmatched_date_is_empty_not_error():
-    request = _request(context={"depart_date": "2026-12-25"})
+    """A date the dataset does not cover yields no candidates, not an exception.
+
+    The date has to sit past the end of the seed calendar, not merely in a gap
+    between stocked dates. It used to be 2026-12-25, which was outside the data
+    entirely until the calendar was extended through 31 December 2026 — after
+    that it passed only because the SIN-NRT cadence happened to skip Christmas
+    Day, so a change to the step cycle would have quietly stopped this test
+    proving anything.
+    """
+    request = _request(context={"depart_date": "2027-06-15", "return_date": "2027-06-22"})
     proposal = propose_flights(request, SEED_FLIGHT_INVENTORY)
     assert not any(c.direction == "OUTBOUND" for c in proposal.candidates)
 
