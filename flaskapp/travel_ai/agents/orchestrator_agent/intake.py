@@ -22,7 +22,8 @@ DEFAULT_CURRENCY = "SGD"
 # The required set of TravelRequest, as questions. Order is the order asked.
 SCALAR_FIELDS: tuple[tuple[str, str, str, str | None], ...] = (
     ("origin", "Flying from", "country", None),
-    ("destination", "Destination", "text", "A city or country"),
+    ("destination", "Destination country", "country", None),
+    ("destination_city", "Destination city", "text", "The city you will be staying in"),
     ("departure_date", "Departure date", "date", None),
     ("return_date", "Return date", "date", None),
     ("travellers", "Number of travellers", "number", None),
@@ -171,6 +172,7 @@ def to_request_payload(extracted: ExtractedIntent) -> dict:
     return {
         "origin": extracted.origin,
         "destination": extracted.destination,
+        "destination_city": extracted.destination_city,
         "departure_date": extracted.departure_date.isoformat(),
         "return_date": extracted.return_date.isoformat(),
         "travellers": extracted.travellers,

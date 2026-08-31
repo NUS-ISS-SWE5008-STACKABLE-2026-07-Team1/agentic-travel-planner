@@ -1,11 +1,15 @@
 """Layered guardrails.
 
-    L0  pydantic schemas          `schemas.py`               structural
-    L1  regex / keyword detectors `agents/*/guardrails.py`   syntactic
-    L2  LLM classifier            this package               semantic
+    L0  pydantic schemas         `schemas.py`              structural
+    L1  injection detectors      `injection.py` and        syntactic
+                                 `agents/*/guardrails.py`
+    L1  PII redaction            `pii.py`                  syntactic
+    L2  LLM classifier           `classifier.py`           semantic
 
-Each layer can block on its own and L2 runs last, so a request only reaches the
-classifier once the cheap deterministic checks have already cleared it. That
+Each layer can block on its own except PII redaction, which never denies a
+request — it rewrites the text and lets planning continue. L2 runs last, so a
+request only reaches the classifier once the cheap deterministic checks have
+cleared it and no identifier the traveller typed is still in the text. That
 ordering is the point: it keeps L0/L1's guarantees intact and independently
 arguable, bounds L2's false-negative rate from below, and means obviously-bad
 input is rejected without an API call.
@@ -18,15 +22,21 @@ from flaskapp.travel_ai.guardrails.classifier import (
     LlmGuardrail, build_guardrail, guardrail_settings,
 )
 from flaskapp.travel_ai.guardrails.fields import collect_free_text
+from flaskapp.travel_ai.guardrails.injection import PROMPT_INJECTION, PromptInjectionGuard
+from flaskapp.travel_ai.guardrails.pii import PiiRedactor, RedactionResult
 from flaskapp.travel_ai.guardrails.schema import GUARDRAIL_PROMPT_VERSION, GuardrailVerdict
 from flaskapp.travel_ai.guardrails.types import Category, Decision, Verdict
 
 __all__ = [
     "GUARDRAIL_PROMPT_VERSION",
+    "PROMPT_INJECTION",
     "Category",
     "Decision",
     "GuardrailVerdict",
     "LlmGuardrail",
+    "PiiRedactor",
+    "PromptInjectionGuard",
+    "RedactionResult",
     "Verdict",
     "build_guardrail",
     "collect_free_text",
