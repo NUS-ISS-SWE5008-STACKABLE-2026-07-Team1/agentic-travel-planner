@@ -184,12 +184,14 @@ python scripts/demo_multi_gap_relaxation.py   # does relaxation choice track par
 deterministically — same output every run, so a regeneration that produces a
 diff means an input changed.
 
-## Agent-to-agent (A2A) communication standard
+## Internal agent handoff envelope
 
 Every agent handoff uses the versioned `A2AMessage` envelope defined in
 `flaskapp/travel_ai/a2a.py`. Agents must not invent their own dictionaries or pass
-unstructured text as a cross-agent interface. The envelope is transport-neutral, so
-the same contract can later be used with LangGraph, a queue, or an HTTP service.
+unstructured text as a cross-agent interface. This is the application's local,
+transport-neutral LangGraph contract; it is not itself the official Agent2Agent
+wire protocol. `flaskapp/travel_ai/a2a_standard.py` adapts this local contract to
+official A2A 1.x messages, tasks, artifacts, Agent Cards, and JSON-RPC endpoints.
 
 Required envelope fields:
 
@@ -313,9 +315,12 @@ manager instead of creating files. Process environment variables take precedence
 local files. The old misspelled `crediential.env` remains readable for backward
 compatibility but should not be used for new setups.
 
-Run `python app.py` after configuration. The local address is
-`http://127.0.0.1:5000`. Never paste credentials into prompts, logs, source code, or
-Git. If a key is exposed, revoke and replace it with the provider immediately.
+Run `python -m scripts.run_all` after configuration to start both the website and
+the official A2A endpoints at `http://127.0.0.1:5000`. `python app.py` remains
+available when only the Flask website is needed, but it does not expose Agent
+Cards or A2A JSON-RPC routes. Never paste credentials into prompts, logs, source
+code, or Git. If a key is exposed, revoke and replace it with the provider
+immediately.
 
 ### Accessibility Agent web evidence
 
@@ -446,43 +451,84 @@ Protect trace access with authorization and a retention policy in production.
 
 ## Agent2Agent (A2A) interoperability
 
-The application retains its local LangGraph fan-out/fan-in workflow and also
-provides an official A2A 1.x adapter for each specialist. This makes the agent
-logic reusable by external A2A orchestrators without weakening the existing
-Pydantic validation, guardrails, evidence handling, or audit tracing.
+The application supports the official A2A 1.x protocol through the official
+Python SDK. The existing LangGraph fan-out/fan-in workflow remains the default
+internal execution path, while an adapter makes each specialist independently
+discoverable and callable by a standards-compliant external orchestrator. The
+same agent implementation, Pydantic validation, guardrails, evidence handling,
+database recording, and audit tracing are reused on both paths.
 
-Install dependencies and start the A2A sidecar in a second terminal:
+The implementation consists of:
+
+- `flaskapp/travel_ai/a2a_standard.py`: Agent Cards, request conversion,
+  `SpecialistAgentExecutor`, task status, artifacts, failures, and cancellation.
+- `scripts/a2a_server.py`: standalone A2A-only ASGI service.
+- `flaskapp/combined.py` and `asgi.py`: one ASGI application containing the
+  Flask website and all A2A routes.
+- `scripts/run_all.py`: local one-command launcher with the correct advertised
+  Agent Card URL.
+
+### Recommended local startup
+
+Install the dependencies once, then start the complete application:
 
 ```powershell
-pip install -r requirements.txt
-python -m scripts.a2a_server
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m scripts.run_all
 ```
 
-For local development, start both the Flask website and every A2A endpoint on
-port 5000 with one command:
+This single process serves both interfaces on port 5000:
+
+| Interface | URL |
+| --- | --- |
+| Web application | `http://127.0.0.1:5000/` |
+| Flight Agent Card | `http://127.0.0.1:5000/a2a/flight_agent/.well-known/agent-card.json` |
+| Hotel & Transport Agent Card | `http://127.0.0.1:5000/a2a/hotel_transport_agent/.well-known/agent-card.json` |
+| Accessibility Agent Card | `http://127.0.0.1:5000/a2a/accessibility_agent/.well-known/agent-card.json` |
+| Risk Advisory Agent Card | `http://127.0.0.1:5000/a2a/risk_advisory_agent/.well-known/agent-card.json` |
+
+Do not run `python app.py` at the same time. If the Agent Card returns Flask's
+“Not Found” page, stop the Flask-only process with `Ctrl+C` and start
+`scripts.run_all` instead. Stop the combined server with `Ctrl+C`.
+
+### Standalone A2A service
+
+To run only the A2A agents, without the website, use:
 
 ```powershell
-python -m scripts.run_all
+.\.venv\Scripts\python.exe -m scripts.a2a_server
 ```
 
-The website is then available at `http://127.0.0.1:5000/`, and Agent Cards use
-the same origin under `/a2a/<agent-name>/.well-known/agent-card.json`.
+The standalone service also defaults to `http://127.0.0.1:5000`. Configure
+`A2A_HOST`, `A2A_PORT`, and the externally reachable `A2A_BASE_URL` when those
+defaults are unsuitable.
 
-Each specialist publishes an Agent Card and accepts A2A JSON-RPC requests:
+### A2A request and response contract
+
+Each Agent Card advertises A2A 1.0 over the `JSONRPC` protocol binding with
+`application/json` input and output modes. Requests contain exactly one JSON
+data Part holding a validated `TravelRequest`, either directly or under a
+`travel_request` property. A successful task produces an `agent-finding`
+artifact containing the validated `AgentFinding`, followed by a completed task
+status. Invalid requests and execution errors produce a failed task status;
+cancellation produces a cancelled task status.
+
+### Single-process deployment
+
+`asgi.py` is the production entry point for a single deployment. It registers
+the A2A routes before mounting the Flask WSGI application as the fallback. A
+compatible start command is:
 
 ```text
-http://127.0.0.1:8001/a2a/flight_agent/.well-known/agent-card.json
-http://127.0.0.1:8001/a2a/hotel_transport_agent/.well-known/agent-card.json
-http://127.0.0.1:8001/a2a/accessibility_agent/.well-known/agent-card.json
-http://127.0.0.1:8001/a2a/risk_advisory_agent/.well-known/agent-card.json
+uvicorn asgi:application --host 0.0.0.0 --port $PORT --workers 1
 ```
 
-Requests use one `application/json` data Part containing the validated
-`TravelRequest` object (or `{ "travel_request": { ... } }`). Successful tasks
-return an `agent-finding` artifact containing the existing `AgentFinding`
-schema. Configure the advertised public address with `A2A_BASE_URL`; do not
-expose these endpoints publicly until authentication, TLS, and rate limiting
-are configured at the deployment boundary.
+Set `A2A_BASE_URL` to the deployment's public HTTPS origin so Agent Cards do not
+advertise a local address. Keep one worker until the in-memory planning-job
+registry is moved to shared storage. The A2A endpoints do not yet implement
+application authentication, so add TLS, authentication, authorization, rate
+limiting, and request-size controls at the deployment boundary before exposing
+them publicly.
 
 ## Responsible-AI controls
 
