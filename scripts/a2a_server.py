@@ -15,9 +15,9 @@ from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.tracing import AuditTracer
 
 
-def create_application():
+def create_application(flask_app=None):
     """Construct the ASGI sidecar using the same configuration as Flask."""
-    flask_app = create_app()
+    flask_app = flask_app or create_app()
     llm_settings, configuration_error = get_llm_settings(flask_app.config)
     if configuration_error or llm_settings is None:
         raise RuntimeError(configuration_error or "LLM configuration is unavailable")
@@ -42,7 +42,7 @@ def main() -> None:
     args = parser.parse_args()
     flask_app = create_app()
     uvicorn.run(
-        create_application(),
+        create_application(flask_app),
         host=args.host or flask_app.config["A2A_HOST"],
         port=args.port or flask_app.config["A2A_PORT"],
     )

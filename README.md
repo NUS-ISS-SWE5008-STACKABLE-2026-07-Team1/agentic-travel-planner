@@ -458,6 +458,16 @@ pip install -r requirements.txt
 python -m scripts.a2a_server
 ```
 
+For local development, start both the Flask website and every A2A endpoint on
+port 5000 with one command:
+
+```powershell
+python -m scripts.run_all
+```
+
+The website is then available at `http://127.0.0.1:5000/`, and Agent Cards use
+the same origin under `/a2a/<agent-name>/.well-known/agent-card.json`.
+
 Each specialist publishes an Agent Card and accepts A2A JSON-RPC requests:
 
 ```text
