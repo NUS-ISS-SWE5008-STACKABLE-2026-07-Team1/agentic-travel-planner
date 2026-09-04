@@ -50,6 +50,12 @@ class Config:
     LLM_API_KEY = os.getenv("LLM_API_KEY")
     LLM_BASE_URL = os.getenv("LLM_BASE_URL")
     AI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "180"))
+    # Official A2A 1.x specialist endpoints. The Flask application keeps its
+    # browser API; specialists are exposed by a small ASGI sidecar so standard
+    # A2A clients can discover and invoke them independently.
+    A2A_BASE_URL = os.getenv("A2A_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
+    A2A_HOST = os.getenv("A2A_HOST", "127.0.0.1")
+    A2A_PORT = int(os.getenv("A2A_PORT", "8001"))
     # L2 guardrails: the LLM classifier that screens traveller free text and
     # generated plans for what the regex layer cannot see (obfuscated injection,
     # role-play jailbreaks, out-of-scope requests). Set enabled=false to develop

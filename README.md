@@ -444,6 +444,36 @@ The response's `trace_url` retrieves a tamper-evident JSONL event chain. It stor
 agent lifecycle metadata and assurance outcomes, not raw prompts or personal data.
 Protect trace access with authorization and a retention policy in production.
 
+## Agent2Agent (A2A) interoperability
+
+The application retains its local LangGraph fan-out/fan-in workflow and also
+provides an official A2A 1.x adapter for each specialist. This makes the agent
+logic reusable by external A2A orchestrators without weakening the existing
+Pydantic validation, guardrails, evidence handling, or audit tracing.
+
+Install dependencies and start the A2A sidecar in a second terminal:
+
+```powershell
+pip install -r requirements.txt
+python -m scripts.a2a_server
+```
+
+Each specialist publishes an Agent Card and accepts A2A JSON-RPC requests:
+
+```text
+http://127.0.0.1:8001/a2a/flight_agent/.well-known/agent-card.json
+http://127.0.0.1:8001/a2a/hotel_transport_agent/.well-known/agent-card.json
+http://127.0.0.1:8001/a2a/accessibility_agent/.well-known/agent-card.json
+http://127.0.0.1:8001/a2a/risk_advisory_agent/.well-known/agent-card.json
+```
+
+Requests use one `application/json` data Part containing the validated
+`TravelRequest` object (or `{ "travel_request": { ... } }`). Successful tasks
+return an `agent-finding` artifact containing the existing `AgentFinding`
+schema. Configure the advertised public address with `A2A_BASE_URL`; do not
+expose these endpoints publicly until authentication, TLS, and rate limiting
+are configured at the deployment boundary.
+
 ## Responsible-AI controls
 
 - Input schemas exclude sensitive traits; unknown fields are rejected.
