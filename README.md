@@ -453,15 +453,17 @@ Protect trace access with authorization and a retention policy in production.
 
 The application supports the official A2A 1.x protocol through the official
 Python SDK. The existing LangGraph fan-out/fan-in workflow remains the default
-internal execution path, while an adapter makes each specialist independently
-discoverable and callable by a standards-compliant external orchestrator. The
-same agent implementation, Pydantic validation, guardrails, evidence handling,
-database recording, and audit tracing are reused on both paths.
+internal execution path, while adapters make the orchestrator and every
+specialist independently discoverable and callable by standards-compliant A2A
+clients. The same agent implementations, Pydantic validation, guardrails,
+evidence handling, database recording, and audit tracing are reused on both
+paths.
 
 The implementation consists of:
 
 - `flaskapp/travel_ai/a2a_standard.py`: Agent Cards, request conversion,
-  `SpecialistAgentExecutor`, task status, artifacts, failures, and cancellation.
+  specialist and orchestrator executors, task status, artifacts, failures, and
+  cancellation.
 - `scripts/a2a_server.py`: standalone A2A-only ASGI service.
 - `flaskapp/combined.py` and `asgi.py`: one ASGI application containing the
   Flask website and all A2A routes.
@@ -482,6 +484,7 @@ This single process serves both interfaces on port 5000:
 | Interface | URL |
 | --- | --- |
 | Web application | `http://127.0.0.1:5000/` |
+| Orchestrator Agent Card | `http://127.0.0.1:5000/a2a/orchestrator_agent/.well-known/agent-card.json` |
 | Flight Agent Card | `http://127.0.0.1:5000/a2a/flight_agent/.well-known/agent-card.json` |
 | Hotel & Transport Agent Card | `http://127.0.0.1:5000/a2a/hotel_transport_agent/.well-known/agent-card.json` |
 | Accessibility Agent Card | `http://127.0.0.1:5000/a2a/accessibility_agent/.well-known/agent-card.json` |
@@ -508,9 +511,12 @@ defaults are unsuitable.
 Each Agent Card advertises A2A 1.0 over the `JSONRPC` protocol binding with
 `application/json` input and output modes. Requests contain exactly one JSON
 data Part holding a validated `TravelRequest`, either directly or under a
-`travel_request` property. A successful task produces an `agent-finding`
-artifact containing the validated `AgentFinding`, followed by a completed task
-status. Invalid requests and execution errors produce a failed task status;
+`travel_request` property. A successful specialist task produces an
+`agent-finding` artifact containing a validated `AgentFinding`. A successful
+orchestrator task runs the complete planning workflow and produces a
+`travel-plan-response` artifact containing a validated `PlanResponse`, including
+the synthesized plan, specialist findings, safety assessment, sources, and trace
+URL. Invalid requests and execution errors produce a failed task status;
 cancellation produces a cancelled task status.
 
 ### Single-process deployment

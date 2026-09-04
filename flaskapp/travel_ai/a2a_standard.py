@@ -29,12 +29,20 @@ from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 from starlette.applications import Starlette
 
 from flaskapp.travel_ai.a2a import request_message
-from flaskapp.travel_ai.schemas import AgentFinding, TravelRequest
+from flaskapp.travel_ai.schemas import AgentFinding, PlanResponse, TravelRequest
 
 A2A_PROTOCOL_VERSION = "1.0"
 JSON_MEDIA_TYPE = "application/json"
 
-SPECIALIST_SKILLS: dict[str, dict[str, Any]] = {
+AGENT_SKILLS: dict[str, dict[str, Any]] = {
+    "orchestrator_agent": {
+        "id": "end-to-end-travel-planning",
+        "name": "Travel Planning Orchestrator",
+        "description": (
+            "Coordinate specialist agents and produce an assured end-to-end travel plan."
+        ),
+        "tags": ["travel", "orchestration", "multi-agent", "planning"],
+    },
     "flight_agent": {
         "id": "flight-planning",
         "name": "Flight planning",
@@ -61,13 +69,15 @@ SPECIALIST_SKILLS: dict[str, dict[str, Any]] = {
     },
 }
 
+SPECIALIST_AGENT_NAMES = frozenset(AGENT_SKILLS) - {"orchestrator_agent"}
+
 
 def build_agent_card(agent_name: str, base_url: str) -> AgentCard:
-    """Return an official, discoverable Agent Card for one specialist."""
+    """Return an official, discoverable Agent Card for one agent."""
     try:
-        skill = SPECIALIST_SKILLS[agent_name]
+        skill = AGENT_SKILLS[agent_name]
     except KeyError as exc:
-        raise ValueError(f"Unknown A2A specialist: {agent_name}") from exc
+        raise ValueError(f"Unknown A2A agent: {agent_name}") from exc
     display_name = skill["name"].replace(" planning", " Agent")
     endpoint = f"{base_url.rstrip('/')}/a2a/{agent_name}"
     return AgentCard(
@@ -114,7 +124,7 @@ class SpecialistAgentExecutor(AgentExecutor):
         agent_name: str,
         node_factory: Callable[[str], Callable[[dict[str, Any]], dict[str, Any]]],
     ) -> None:
-        if agent_name not in SPECIALIST_SKILLS:
+        if agent_name not in SPECIALIST_AGENT_NAMES:
             raise ValueError(f"Unknown A2A specialist: {agent_name}")
         self.agent_name = agent_name
         self.node_factory = node_factory
@@ -181,25 +191,95 @@ class SpecialistAgentExecutor(AgentExecutor):
         await TaskUpdater(event_queue, task.id, task.context_id).cancel()
 
 
+class OrchestratorAgentExecutor(AgentExecutor):
+    """Expose end-to-end travel planning as an official A2A task."""
+
+    def __init__(
+        self,
+        planning_runner: Callable[[TravelRequest, str], PlanResponse],
+    ) -> None:
+        self.planning_runner = planning_runner
+
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        if context.message is None:
+            raise ValueError("A2A request must contain a message")
+        task = context.current_task or new_task_from_user_message(context.message)
+        if context.current_task is None:
+            await event_queue.enqueue_event(task)
+        updater = TaskUpdater(event_queue, task.id, task.context_id)
+        await updater.start_work()
+
+        try:
+            request = _travel_request_from_context(context)
+            # TravelPlanningService uses a UUID request id. A2A task/context ids
+            # are opaque strings, so normalize the context id at this boundary.
+            request_id = str(SpecialistAgentExecutor._correlation_id(task.context_id))
+            response = await asyncio.to_thread(
+                self.planning_runner, request, request_id
+            )
+            response = PlanResponse.model_validate(response)
+            await updater.add_artifact(
+                [new_data_part(response.model_dump(mode="json"), JSON_MEDIA_TYPE)],
+                name="travel-plan-response",
+                metadata={"agent": "orchestrator_agent", "schema": "PlanResponse"},
+                last_chunk=True,
+            )
+            await updater.complete(new_text_message(
+                "orchestrator_agent completed the travel plan.",
+                context_id=task.context_id,
+                task_id=task.id,
+            ))
+        except Exception as exc:
+            await updater.failed(new_text_message(
+                "orchestrator_agent could not complete the request "
+                f"({type(exc).__name__}).",
+                context_id=task.context_id,
+                task_id=task.id,
+            ))
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        task = context.current_task
+        if task is None:
+            raise ValueError("Cannot cancel an A2A request without a task")
+        await TaskUpdater(event_queue, task.id, task.context_id).cancel()
+
+
+def _add_agent_routes(routes, agent_name, executor, base_url) -> None:
+    card = build_agent_card(agent_name, base_url)
+    handler = DefaultRequestHandler(
+        agent_executor=executor,
+        task_store=InMemoryTaskStore(),
+        agent_card=card,
+    )
+    endpoint = f"/a2a/{agent_name}"
+    routes.extend(create_jsonrpc_routes(handler, rpc_url=endpoint))
+    routes.extend(create_agent_card_routes(
+        card,
+        card_url=f"{endpoint}/.well-known/agent-card.json",
+    ))
+
+
 def build_a2a_application(
     node_factories: Mapping[
         str, Callable[[str], Callable[[dict[str, Any]], dict[str, Any]]]
     ],
     base_url: str,
+    orchestrator_runner: Callable[[TravelRequest, str], PlanResponse] | None = None,
 ) -> Starlette:
-    """Build one ASGI application hosting all specialist A2A endpoints."""
+    """Build one ASGI application hosting specialist and orchestrator endpoints."""
     routes = []
     for agent_name, node_factory in node_factories.items():
-        card = build_agent_card(agent_name, base_url)
-        handler = DefaultRequestHandler(
-            agent_executor=SpecialistAgentExecutor(agent_name, node_factory),
-            task_store=InMemoryTaskStore(),
-            agent_card=card,
+        _add_agent_routes(
+            routes,
+            agent_name,
+            SpecialistAgentExecutor(agent_name, node_factory),
+            base_url,
         )
-        endpoint = f"/a2a/{agent_name}"
-        routes.extend(create_jsonrpc_routes(handler, rpc_url=endpoint))
-        routes.extend(create_agent_card_routes(
-            card,
-            card_url=f"{endpoint}/.well-known/agent-card.json",
-        ))
+    if orchestrator_runner is not None:
+        _add_agent_routes(
+            routes,
+            "orchestrator_agent",
+            OrchestratorAgentExecutor(orchestrator_runner),
+            base_url,
+        )
     return Starlette(routes=routes)
