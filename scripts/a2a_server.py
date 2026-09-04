@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 
@@ -15,24 +17,37 @@ from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.tracing import AuditTracer
 
 
-def create_application(flask_app=None):
-    """Construct the ASGI sidecar using the same configuration as Flask."""
+def create_application(
+    flask_app=None,
+    node_factories: Mapping[str, Any] | None = None,
+):
+    """Construct the ASGI sidecar using real or injected specialist nodes.
+
+    Production callers omit ``node_factories`` and therefore retain fail-fast
+    LLM configuration validation. Tests may inject deterministic nodes so CI
+    does not need provider credentials merely to verify HTTP route composition.
+    """
     flask_app = flask_app or create_app()
-    llm_settings, configuration_error = get_llm_settings(flask_app.config)
-    if configuration_error or llm_settings is None:
-        raise RuntimeError(configuration_error or "LLM configuration is unavailable")
-    llm = build_llm(**llm_settings)
-    trace_dir = Path(flask_app.config["TRACE_DIR"])
-    database_path = flask_app.config["DATABASE"]
+    if node_factories is None:
+        llm_settings, configuration_error = get_llm_settings(flask_app.config)
+        if configuration_error or llm_settings is None:
+            raise RuntimeError(configuration_error or "LLM configuration is unavailable")
+        llm = build_llm(**llm_settings)
+        trace_dir = Path(flask_app.config["TRACE_DIR"])
+        database_path = flask_app.config["DATABASE"]
 
-    node_factories = {}
-    for name, create_node in SPECIALIST_NODE_FACTORIES.items():
-        def node_factory(request_id, create_node=create_node):
-            tracer = AuditTracer(trace_dir, request_id, database_path)
-            return create_node(llm, tracer)
-        node_factories[name] = node_factory
+        resolved_node_factories = {}
+        for name, create_node in SPECIALIST_NODE_FACTORIES.items():
+            def node_factory(request_id, create_node=create_node):
+                tracer = AuditTracer(trace_dir, request_id, database_path)
+                return create_node(llm, tracer)
+            resolved_node_factories[name] = node_factory
+    else:
+        resolved_node_factories = dict(node_factories)
 
-    return build_a2a_application(node_factories, flask_app.config["A2A_BASE_URL"])
+    return build_a2a_application(
+        resolved_node_factories, flask_app.config["A2A_BASE_URL"]
+    )
 
 
 def main() -> None:
