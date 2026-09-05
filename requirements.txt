@@ -18,6 +18,11 @@ langchain-google-genai>=2,<5
 openai>=1.68,<3
 pydantic>=2.10,<3
 typing-extensions>=4.12,<5
+# Official Agent2Agent protocol SDK (A2A 1.x): Agent Cards, tasks, messages,
+# artifacts, JSON/HTTP transport, and server execution adapters.
+a2a-sdk[http-server]>=1.1,<2
+uvicorn>=0.30,<1
+a2wsgi>=1.10,<2
 
 # Production server (Linux/macOS deployment)
 gunicorn>=23,<24

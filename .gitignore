@@ -8,6 +8,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 instance/traces/
+# Database dumps: real traveller rows, never in git.
+instance/backups/
 instance/*.sqlite3
 instance/*.sqlite3-*
 docs/progress.md

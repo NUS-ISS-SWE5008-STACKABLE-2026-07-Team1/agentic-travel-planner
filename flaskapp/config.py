@@ -50,6 +50,12 @@ class Config:
     LLM_API_KEY = os.getenv("LLM_API_KEY")
     LLM_BASE_URL = os.getenv("LLM_BASE_URL")
     AI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "180"))
+    # Official A2A 1.x specialist endpoints. The Flask application keeps its
+    # browser API; specialists are exposed by a small ASGI sidecar so standard
+    # A2A clients can discover and invoke them independently.
+    A2A_BASE_URL = os.getenv("A2A_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
+    A2A_HOST = os.getenv("A2A_HOST", "127.0.0.1")
+    A2A_PORT = int(os.getenv("A2A_PORT", "5000"))
     # L2 guardrails: the LLM classifier that screens traveller free text and
     # generated plans for what the regex layer cannot see (obfuscated injection,
     # role-play jailbreaks, out-of-scope requests). Set enabled=false to develop
@@ -98,6 +104,13 @@ class Config:
     # flags and proceeds, relying on L0/L1 alone. Fail-open is a deliberate,
     # visible choice, never a silent fallback.
     GUARDRAIL_FAIL_MODE = os.getenv("GUARDRAIL_FAIL_MODE", "closed").strip().lower()
+    # L1 PII redaction on the intake prompt, ahead of the L2 call. Unlike every
+    # other guardrail this one never blocks: it removes the identifier and lets
+    # planning continue, because a traveller who volunteers a phone number is
+    # not an attacker and the trip does not need it. Off is a development
+    # convenience only — with it off, identifiers a traveller types reach the
+    # classifier, the extraction model, and the intake_messages table.
+    PII_REDACTION_ENABLED = os.getenv("PII_REDACTION_ENABLED", "true").lower() == "true"
     # Where Flight Agent's inventory comes from: "seed" (the project's static
     # dataset, the default and what every golden scenario is pinned to) or
     # "duffel" (live supplier search). Selecting duffel without a token falls

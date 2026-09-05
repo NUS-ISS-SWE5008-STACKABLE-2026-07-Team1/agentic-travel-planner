@@ -27,7 +27,12 @@ class ExtractedIntent(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     origin: str | None = None
+    # `destination` is the COUNTRY and `destination_city` the city within it.
+    # The hotel adapter reads them that way (`adapter.py:73-74`) and `find_city`
+    # is scoped by country, so a city here resolves to nothing and the agent
+    # falls back to its prompt-only path with every option stripped.
     destination: str | None = None
+    destination_city: str | None = None
     departure_date: date | None = None
     return_date: date | None = None
     travellers: int | None = Field(default=None, ge=1, le=20)
