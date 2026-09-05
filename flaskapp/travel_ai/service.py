@@ -14,6 +14,18 @@ from flaskapp.travel_ai.schemas import PlanResponse, TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.terminal import log_payload
 
+
+def merge_accessibility_sources(plan, findings) -> None:
+    """Guarantee vetted Accessibility Agent evidence is visible to the user."""
+    accessibility_sources = [
+        url
+        for finding in findings if finding.agent == "accessibility_agent"
+        for option in finding.options
+        for url in option.source_urls
+    ]
+    plan.sources = list(dict.fromkeys([*plan.sources, *accessibility_sources]))
+
+
 class TravelPlanningService:
     def __init__(self, *, provider: str, api_key: str, model: str,
                  temperature: float | None, timeout: float, trace_dir: Path,
@@ -83,6 +95,10 @@ class TravelPlanningService:
         })
         findings = result["findings"]
         plan = result["plan"]
+        # The orchestrator is asked to preserve sources, but accessibility
+        # evidence must not depend on generative compliance. Copy its vetted
+        # URLs into the user-visible plan deterministically.
+        merge_accessibility_sources(plan, findings)
         plan.safety = assess_plan(request, plan, findings)
         tracer.record("assurance_completed", "system", {
             "passed": plan.safety.passed,

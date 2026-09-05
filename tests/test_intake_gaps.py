@@ -11,7 +11,7 @@ from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import Extracte
 from flaskapp.travel_ai.schemas import TravelRequest
 
 COMPLETE = {
-    "origin": "Singapore", "destination": "Tokyo",
+    "origin": "Singapore", "destination": "Japan", "destination_city": "Tokyo",
     "departure_date": "2026-10-10", "return_date": "2026-10-24",
     "travellers": 2, "budget": 6000.0, "currency": "SGD",
     "traveller_ages": [34, 32], "traveller_genders": ["male", "female"],
@@ -26,7 +26,8 @@ def keys(missing):
 def test_empty_intent_asks_for_every_scalar_field():
     missing = compute_gaps(ExtractedIntent())
     assert keys(missing) == [
-        "origin", "destination", "departure_date", "return_date", "travellers", "budget",
+        "origin", "destination", "destination_city",
+        "departure_date", "return_date", "travellers", "budget",
     ]
 
 
@@ -119,7 +120,8 @@ def test_complete_intent_has_no_gaps_and_builds_an_accepted_request():
     assert compute_gaps(extracted) == []
     payload = to_request_payload(extracted)
     request = TravelRequest.model_validate(payload)
-    assert request.destination == "Tokyo"
+    assert request.destination == "Japan"
+    assert request.destination_city == "Tokyo"
     assert request.travellers == 2
     assert "Traveler 2: step-free access" in request.accessibility_needs
 

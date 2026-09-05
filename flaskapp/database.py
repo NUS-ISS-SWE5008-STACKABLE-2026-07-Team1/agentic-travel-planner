@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from datetime import date, timedelta
@@ -448,6 +449,18 @@ CONNECTION_HELP = (
 )
 
 
+# Which Postgres schema the tables live in. Empty means the server default,
+# which is what every SQLite deployment and the stock Supabase layout use.
+#
+# Applied per connection rather than left to `ALTER ROLE ... SET search_path`,
+# because Supabase fronts the database with pgbouncer: a role default is read
+# when a *backend* session starts, so pooled connections opened before the
+# change keep serving the old path and the tables appear to vanish. Issuing it
+# on the connection we just took out of the pool is the only version that is
+# true for every connection immediately.
+DATABASE_SCHEMA = os.getenv("DATABASE_SCHEMA", "").strip()
+
+
 def connect(target: Path | str) -> _Connection:
     """Open a connection to a SQLite path or a Postgres DSN."""
     if is_postgres(target):
@@ -456,6 +469,15 @@ def connect(target: Path | str) -> _Connection:
 
         try:
             raw = psycopg.connect(target, row_factory=dict_row)
+            if DATABASE_SCHEMA:
+                from psycopg import sql
+
+                # Identifier() quotes it correctly; the schema name is
+                # case-sensitive and unquoted Postgres folds it to lowercase.
+                raw.execute(sql.SQL("SET search_path TO {}, public, extensions").format(
+                    sql.Identifier(DATABASE_SCHEMA)
+                ))
+                raw.commit()
             # AVG() and ROUND() return `numeric` on Postgres and `float` on
             # SQLite. psycopg maps numeric to Decimal, and Flask's JSON
             # provider renders Decimal as a *string*, so the admin charts
@@ -505,6 +527,10 @@ def initialize(target: Path | str) -> None:
             if connection.dialect == "postgres":
                 return {
                     row["column_name"] for row in connection.execute(
+                        # `current_schema()`, not a literal: the tables live in
+                        # whichever schema `search_path` selects, and pinning this
+                        # to `public` makes every column look missing the moment
+                        # they are anywhere else.
                         "SELECT column_name FROM information_schema.columns "
                         "WHERE table_schema = current_schema() AND table_name = ?", (table,)
                     ).fetchall()

@@ -78,3 +78,18 @@ def test_without_database_url_the_sqlite_path_is_used(monkeypatch):
     reloaded = importlib.reload(flaskapp.config)
     assert not is_postgres(reloaded.Config.DATABASE)
     assert str(reloaded.Config.DATABASE).endswith(".sqlite3")
+
+
+def test_pii_redaction_is_on_by_default_and_can_be_turned_off(monkeypatch):
+    """Declared on Config so `unread_environment_settings` knows the name.
+
+    A variable set in `.env` that nothing reads is exactly the silent-fallback
+    class of bug that warning exists to catch.
+    """
+    import flaskapp.config
+
+    assert flaskapp.config.Config.PII_REDACTION_ENABLED is True
+    monkeypatch.setenv("PII_REDACTION_ENABLED", "false")
+    assert importlib.reload(flaskapp.config).Config.PII_REDACTION_ENABLED is False
+    monkeypatch.delenv("PII_REDACTION_ENABLED")
+    importlib.reload(flaskapp.config)

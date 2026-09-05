@@ -48,10 +48,21 @@ services:
       # sync: false = set by hand in the dashboard, never stored in this file.
       - key: OPENAI_API_KEY
         sync: false
+      # Used only by Accessibility Agent evidence retrieval.
+      - key: SERPER_API_KEY
+        sync: false
       - key: ADMIN_EMAILS
         sync: false
       # Supabase session pooler DSN. Set by hand in the dashboard; never here.
       - key: DATABASE_URL
+        sync: false
+      # The tables live outside `public`. Case-sensitive: `connect()` quotes it.
+      # Leave unset to use the server default search_path.
+      - key: DATABASE_SCHEMA
+        value: Travelplanner_schema
+      # The DSN carries no password; libpq reads PGPASSWORD from the environment.
+      # Set by hand in the dashboard, like the DSN itself.
+      - key: PGPASSWORD
         sync: false
 
       # --- L2 guardrails (the LLM classifier) ---------------------------------

@@ -8,10 +8,11 @@ Accessibility Agent, and Risk & Advisory Agent.
 
 The four specialists run concurrently from a typed shared state. LangGraph waits
 at a fan-in barrier, then the orchestrator synthesizes their structured findings.
-No agent performs a booking. The starter also has no live supplier/search tools,
-so generated prices, availability, advisories, and accessibility claims are
-explicitly estimates or verification tasks. Add approved data-provider tools before
-using it for real-time decisions.
+No agent performs a booking. Flight inventory can optionally come from Duffel,
+and the Accessibility Agent can retrieve live web evidence through Serper. Other
+generated prices, availability, and advisories remain estimates or verification
+tasks until an approved provider is connected. Retrieved accessibility evidence is
+still advisory and must be verified with the relevant supplier before booking.
 
 Each response includes agent findings, concise selection factors, alternatives,
 sources, assumptions, limitations, confidence, and safety warnings. This is useful
@@ -27,7 +28,7 @@ in `prompt.py`, reducing merge conflicts between team members.
 | --- | --- | --- |
 | Flight Agent | `agents/flight_agent/` | Flight search and reasoning under arrival-time, schedule, connection, baggage, and budget constraints. |
 | Hotel & Transport Agent | `agents/hotel_transport_agent/` | Accommodation and local transit selection compatible with flights and traveller requirements. |
-| Accessibility Agent | `agents/accessibility_agent/` | End-to-end accessibility validation, explicit veto warnings, and future bias-audit tooling. |
+| Accessibility Agent | `agents/accessibility_agent/` | Privacy-safe requirement planning, Serper web evidence, provenance enforcement, deterministic ratings/vetoes, and supplier-verification questions. |
 | Risk & Advisory Agent | `agents/risk_advisory_a1gent/` | Visa, seasonal, disruption, event, health, and safety risks with high-severity escalation. |
 | Orchestrator Agent | `agents/orchestrator_agent/` | Coordination, governance, conflict/escalation handling, and final itinerary synthesis. |
 
@@ -56,8 +57,12 @@ flaskapp/travel_ai/
 |   |   |-- agent.py
 |   |   `-- prompt.py
 |   |-- accessibility_agent/
-|   |   |-- agent.py
-|   |   `-- prompt.py
+|   |   |-- agent.py               # guarded LangGraph specialist node
+|   |   |-- prompt.py              # evidence, rating and reflection policy
+|   |   |-- models.py              # typed requirements, search plans and evidence
+|   |   |-- planning.py            # requirement extraction + privacy-safe queries
+|   |   |-- retrieval.py           # Serper search, retries and source metadata
+|   |   `-- guardrails.py          # input/output screening, citations and vetoes
 |   |-- risk_advisory_agent/
 |   |   |-- agent.py
 |   |   `-- prompt.py
@@ -82,6 +87,54 @@ graph runs the four specialists in parallel and then runs the orchestrator. The
 orchestrator prompt identifies unresolved conflicts for a future negotiation cycle;
 an actual retry/negotiation loop must be added in `graph.py` when that feature is
 developed.
+
+### Accessibility Agent
+
+The Accessibility Agent turns each traveller's accessibility needs into a bounded,
+privacy-conscious evidence review. It does not diagnose a disability, make a booking,
+or treat a general accessibility label as proof that an option is suitable.
+
+Its runtime flow is:
+
+1. `planning.py` reads per-traveller and legacy aggregate accessibility needs,
+   deduplicates them, and classifies them as mobility, vision, hearing, cognitive,
+   service-animal, medical-equipment, dietary, or other requirements.
+2. It builds up to four searches using the destination and normalized functional
+   category. Raw medical details and free-text requirements are not sent to Serper.
+3. `retrieval.py` calls `https://google.serper.dev/search`, requesting at most four
+   results per query and eight results for the complete agent run. Transient network
+   failures are retried once.
+4. Each accepted HTTPS result receives an evidence ID (`E1`, `E2`, ...), title,
+   excerpt, URL, query scope, retrieval time, and provenance classification:
+   official, specialist, crowdsourced, or unknown.
+5. `guardrails.py` screens retrieved titles/excerpts as untrusted content. Generated
+   claims must cite an evidence ID and its exact retrieved URL. Fabricated, malformed,
+   insecure, or unmatched links are removed.
+6. Unknown sources and unsupported claims are marked unverified and cannot receive a
+   high deterministic accessibility rating. Factual content is withheld when it
+   claims web support but has no valid reference link.
+7. Options marked `Status: unmet` are removed by the agent and recorded in an
+   `ACCESSIBILITY VETO` warning. Missing evidence produces precise questions for the
+   airport, transport operator, hotel, venue, or other supplier.
+8. Vetted URLs are copied into the final plan even if the orchestrator omits them.
+   The chatbot presents each Accessibility Agent option with status, rating, evidence
+   details, limitations, website hostname, full URL, and a safe clickable verification
+   link.
+
+The agent reviews five journey segments: arrival/airport, local transport,
+accommodation, activities/public spaces, and departure/connections. A source can
+support a general policy without proving that a particular hotel room, vehicle,
+station, or venue satisfies the traveller's requirements; those gaps remain explicitly
+unverified.
+
+Focused verification:
+
+```powershell
+python -m pytest -q tests/test_accessibility_planning.py `
+  tests/test_accessibility_retrieval.py `
+  tests/test_accessibility_guardrails.py `
+  tests/test_accessibility_evidence_delivery.py
+```
 
 ### Flight Agent's deterministic layer
 
@@ -131,12 +184,14 @@ python scripts/demo_multi_gap_relaxation.py   # does relaxation choice track par
 deterministically — same output every run, so a regeneration that produces a
 diff means an input changed.
 
-## Agent-to-agent (A2A) communication standard
+## Internal agent handoff envelope
 
 Every agent handoff uses the versioned `A2AMessage` envelope defined in
 `flaskapp/travel_ai/a2a.py`. Agents must not invent their own dictionaries or pass
-unstructured text as a cross-agent interface. The envelope is transport-neutral, so
-the same contract can later be used with LangGraph, a queue, or an HTTP service.
+unstructured text as a cross-agent interface. This is the application's local,
+transport-neutral LangGraph contract; it is not itself the official Agent2Agent
+wire protocol. `flaskapp/travel_ai/a2a_standard.py` adapts this local contract to
+official A2A 1.x messages, tasks, artifacts, Agent Cards, and JSON-RPC endpoints.
 
 Required envelope fields:
 
@@ -260,9 +315,31 @@ manager instead of creating files. Process environment variables take precedence
 local files. The old misspelled `crediential.env` remains readable for backward
 compatibility but should not be used for new setups.
 
-Run `python app.py` after configuration. The local address is
-`http://127.0.0.1:5000`. Never paste credentials into prompts, logs, source code, or
-Git. If a key is exposed, revoke and replace it with the provider immediately.
+Run `python -m scripts.run_all` after configuration to start both the website and
+the official A2A endpoints at `http://127.0.0.1:5000`. `python app.py` remains
+available when only the Flask website is needed, but it does not expose Agent
+Cards or A2A JSON-RPC routes. Never paste credentials into prompts, logs, source
+code, or Git. If a key is exposed, revoke and replace it with the provider
+immediately.
+
+### Accessibility Agent web evidence
+
+The Accessibility Agent can use Serper to find current evidence related to each
+traveller's functional accessibility requirements. Create a key at `serper.dev`,
+then place it in the ignored `.env.secrets` file:
+
+```dotenv
+SERPER_API_KEY=your-serper-key
+```
+
+The key is read only by `accessibility_agent/retrieval.py` and is sent in the
+Serper `X-API-KEY` request header; it is never included in search text, model
+prompts, stored evidence, or chatbot output. Without the key, planning continues
+with an explicit “accessibility evidence unavailable” warning. Search queries use
+the destination and normalized functional categories rather than raw medical
+details. Returned HTTPS pages are treated as untrusted evidence, screened by the
+agent guardrails, cited by URL, and labelled as official, specialist,
+crowdsourced, or unknown provenance.
 
 For local development, set `FLASK_DEBUG=true` in the ignored `.env` file. Running
 `python app.py` then automatically restarts the server when application code or
@@ -371,6 +448,93 @@ Send `POST /api/v1/travel-plans`:
 The response's `trace_url` retrieves a tamper-evident JSONL event chain. It stores
 agent lifecycle metadata and assurance outcomes, not raw prompts or personal data.
 Protect trace access with authorization and a retention policy in production.
+
+## Agent2Agent (A2A) interoperability
+
+The application supports the official A2A 1.x protocol through the official
+Python SDK. The existing LangGraph fan-out/fan-in workflow remains the default
+internal execution path, while adapters make the orchestrator and every
+specialist independently discoverable and callable by standards-compliant A2A
+clients. The same agent implementations, Pydantic validation, guardrails,
+evidence handling, database recording, and audit tracing are reused on both
+paths.
+
+The implementation consists of:
+
+- `flaskapp/travel_ai/a2a_standard.py`: Agent Cards, request conversion,
+  specialist and orchestrator executors, task status, artifacts, failures, and
+  cancellation.
+- `scripts/a2a_server.py`: standalone A2A-only ASGI service.
+- `flaskapp/combined.py` and `asgi.py`: one ASGI application containing the
+  Flask website and all A2A routes.
+- `scripts/run_all.py`: local one-command launcher with the correct advertised
+  Agent Card URL.
+
+### Recommended local startup
+
+Install the dependencies once, then start the complete application:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m scripts.run_all
+```
+
+This single process serves both interfaces on port 5000:
+
+| Interface | URL |
+| --- | --- |
+| Web application | `http://127.0.0.1:5000/` |
+| Orchestrator Agent Card | `http://127.0.0.1:5000/a2a/orchestrator_agent/.well-known/agent-card.json` |
+| Flight Agent Card | `http://127.0.0.1:5000/a2a/flight_agent/.well-known/agent-card.json` |
+| Hotel & Transport Agent Card | `http://127.0.0.1:5000/a2a/hotel_transport_agent/.well-known/agent-card.json` |
+| Accessibility Agent Card | `http://127.0.0.1:5000/a2a/accessibility_agent/.well-known/agent-card.json` |
+| Risk Advisory Agent Card | `http://127.0.0.1:5000/a2a/risk_advisory_agent/.well-known/agent-card.json` |
+
+Do not run `python app.py` at the same time. If the Agent Card returns Flask's
+“Not Found” page, stop the Flask-only process with `Ctrl+C` and start
+`scripts.run_all` instead. Stop the combined server with `Ctrl+C`.
+
+### Standalone A2A service
+
+To run only the A2A agents, without the website, use:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.a2a_server
+```
+
+The standalone service also defaults to `http://127.0.0.1:5000`. Configure
+`A2A_HOST`, `A2A_PORT`, and the externally reachable `A2A_BASE_URL` when those
+defaults are unsuitable.
+
+### A2A request and response contract
+
+Each Agent Card advertises A2A 1.0 over the `JSONRPC` protocol binding with
+`application/json` input and output modes. Requests contain exactly one JSON
+data Part holding a validated `TravelRequest`, either directly or under a
+`travel_request` property. A successful specialist task produces an
+`agent-finding` artifact containing a validated `AgentFinding`. A successful
+orchestrator task runs the complete planning workflow and produces a
+`travel-plan-response` artifact containing a validated `PlanResponse`, including
+the synthesized plan, specialist findings, safety assessment, sources, and trace
+URL. Invalid requests and execution errors produce a failed task status;
+cancellation produces a cancelled task status.
+
+### Single-process deployment
+
+`asgi.py` is the production entry point for a single deployment. It registers
+the A2A routes before mounting the Flask WSGI application as the fallback. A
+compatible start command is:
+
+```text
+uvicorn asgi:application --host 0.0.0.0 --port $PORT --workers 1
+```
+
+Set `A2A_BASE_URL` to the deployment's public HTTPS origin so Agent Cards do not
+advertise a local address. Keep one worker until the in-memory planning-job
+registry is moved to shared storage. The A2A endpoints do not yet implement
+application authentication, so add TLS, authentication, authorization, rate
+limiting, and request-size controls at the deployment boundary before exposing
+them publicly.
 
 ## Responsible-AI controls
 
