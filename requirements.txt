@@ -30,3 +30,7 @@ gunicorn>=23,<24
 # Development and verification
 pytest>=8.3,<10
 pytest-mock>=3.14,<4
+
+# Browser E2E tests (tests/e2e/) — needs `playwright install chromium` once,
+# locally or in CI. Never required for `pytest -q` (see pytest.ini).
+pytest-playwright>=0.5,<1
