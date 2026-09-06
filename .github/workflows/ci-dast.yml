@@ -1,6 +1,6 @@
 # =============================================================================
 # Replaces the dast job of .github/workflows/security.yml.
-# Split from the fast tier per item 17 — this one is slow and expensive.
+# Split from ci-checks.yml per item 17 — this one is slow and expensive.
 # Addresses items 7, 13 (partial), 14, 15, 17.
 #
 # READ THIS BEFORE REVIEWING:
@@ -38,8 +38,8 @@ on:
   # because the authenticated scan costs ~5m40s and running it on both events
   # pays that twice for every merge.
   #
-  # ci-fast.yml deliberately keeps BOTH triggers. It is ~2 minutes, and failing
-  # tests are worth knowing about before you merge, not after.
+  # ci-checks.yml deliberately keeps BOTH triggers. It is ~2 minutes, and
+  # failing tests are worth knowing about before you merge, not after.
   push:
     branches: [main, release]
 

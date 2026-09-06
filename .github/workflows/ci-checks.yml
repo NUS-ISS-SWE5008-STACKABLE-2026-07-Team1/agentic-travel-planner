@@ -1,9 +1,17 @@
 # =============================================================================
 # Replaces the secrets + tests + sast jobs of .github/workflows/security.yml.
-# Split from DAST per backlog item 17: this tier is ~2 minutes, DAST is not.
-# Addresses items 6, 7, 9, 12, 15, 17.
+# Split from DAST per backlog item 17: this tier runs on every push/PR, DAST
+# does not (push-only, see ci-dast.yml). Addresses items 6, 7, 9, 12, 15, 17.
+#
+# Renamed from "CI — fast checks" (2026-09-06): "fast" was relative to DAST's
+# runtime, not a claim about thoroughness, but read out of context — e.g. by
+# someone reviewing the Actions tab with no prior context on why there are two
+# workflows — as "the quick/shortcut tier," implying a more thorough one exists
+# elsewhere. It doesn't; this file (secrets scan, tests, SAST, E2E) and
+# ci-dast.yml (the dynamic scan) are the whole pipeline. Named for contents
+# instead.
 # =============================================================================
-name: CI — fast checks
+name: CI — Static & Functional Checks
 
 on:
   # Item 6, and the team decision of 2026-08-17: the pipeline runs on pull
