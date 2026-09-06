@@ -147,7 +147,7 @@ develop against.**
 
 | | `seed` (default) | `duffel` |
 |---|---|---|
-| Data | 284 static rows | live supplier search |
+| Data | 1568 static rows | live supplier search |
 | Turned on by | nothing — it's the default | `FLIGHT_INVENTORY_SOURCE=duffel` + a token |
 | Prices | fixed, repeatable | change every call |
 | Cost | free | billed per search |
@@ -164,7 +164,7 @@ hotels here and a demo runs end to end with no gaps:
 Seoul, Kuala Lumpur, Bali, Jakarta, Phuket, Taipei, Dubai, Paris**
 
 Note that flights only exist on **specific dates** between 2026-08-24 and
-2026-10-08. Picking a city with no flight on the chosen date correctly returns
+2027-01-06. Picking a city with no flight on the chosen date correctly returns
 no candidates — that's the dataset being small, not a bug.
 
 To see what exists:
