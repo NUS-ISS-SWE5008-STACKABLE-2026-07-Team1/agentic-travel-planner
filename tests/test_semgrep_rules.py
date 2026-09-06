@@ -16,8 +16,8 @@ bounded shapes that must stay silent. Neither is imported or executed; they exis
 to be scanned.
 
 Skipped when semgrep is not installed, so a contributor without it can still run
-the suite. CI installs it (`.github/workflows/ci-fast.yml`), so the gate is real
-there.
+the suite. CI installs it (`.github/workflows/ci-checks.yml`), so the gate is
+real there.
 """
 
 import json
