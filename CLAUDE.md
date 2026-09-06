@@ -1,6 +1,8 @@
 # Claude Code Development Guide
 
-This is an agentic travel-planning system with five specialist agents that run in parallel. Each agent owner maintains their own folder and can edit independently without merging conflicts.
+Flask + LangGraph travel planner with five specialist agents. `graph.py` fans out four
+specialists in parallel from a typed shared state, joins them at a fan-in barrier, then
+runs the orchestrator to synthesize. No agent books anything.
 
 ## Quick start
 
@@ -10,172 +12,224 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 Copy-Item .env.secrets.example .env.secrets
-python app.py  # runs on http://127.0.0.1:5000
+python app.py  # http://127.0.0.1:5000
 ```
 
-Run tests with `pytest -q` before pushing.
+`pytest -q` before pushing. Tests never call a live model.
 
 ## Agent ownership
 
-Each specialist has its own folder under `flaskapp/travel_ai/agents/`. You can edit `agent.py` and `prompt.py` in your folder without coordinating with others.
+One folder per owner under `flaskapp/travel_ai/agents/`. Each has `agent.py` (the
+LangGraph node) and `prompt.py` (model instructions).
 
-| Agent | Folder | Responsibility |
-| --- | --- | --- |
-| Flight | `agents/flight_agent/` | Flight search and ranking under time, connection, baggage, and budget constraints |
-| Hotel & Transport | `agents/hotel_transport_agent/` | Accommodation and local transit compatible with flights |
-| Accessibility | `agents/accessibility_agent/` | End-to-end accessibility validation and bias-audit tooling |
-| Risk & Advisory | `agents/risk_advisory_agent/` | Visa, seasonal, disruption, health, and safety risks |
-| Orchestrator | `agents/orchestrator_agent/` | Coordination and final itinerary synthesis |
+| Agent | Folder |
+| --- | --- |
+| Flight | `agents/flight_agent/` |
+| Hotel & Transport | `agents/hotel_transport_agent/` |
+| Accessibility | `agents/accessibility_agent/` |
+| Risk & Advisory | `agents/risk_advisory_agent/` |
+| Orchestrator | `agents/orchestrator_agent/` |
 
-Do not edit `agents/base.py`, `agents/shared.py`, `graph.py`, `schemas.py`, or `safeguards.py` without team review — they affect all agents.
+Shared, review before changing: `agents/base.py`, `agents/shared.py`, `agents/loop.py`,
+`graph.py`, `schemas.py`, `safeguards.py`, `tracing.py`, `a2a.py`, and the
+`guardrails/` package.
 
-## Flight Agent structure
+## Flight Agent
 
-The Flight Agent has a production-ready deterministic layer alongside its prompt-only graph node:
+The largest agent by far, and the one whose structure is worth understanding before
+editing anything in it.
 
-- `domain.py` — searches and ranks real inventory in code; records why each flight was rejected
-- `reasoning.py` — asks the LLM only to explain what the code already decided
-- `guardrails.py` — validates that the LLM's choices ground to real flights (rejects invented flight IDs)
-- `adapter.py` — translates TravelRequest to flight-agent contracts (single point of schema change)
+**The governing idea: code decides which flights, the model only explains the
+decision.** `domain.py` searches, filters and ranks real inventory in Python; the model
+is handed that finished proposal and asked for prose. Removing the model degrades the
+wording, not the candidate list.
 
-**The graph does not use this layer yet.** `agent.py` still runs prompt-only, so runtime behavior is unchanged. Connecting them is a deliberate reviewed step (change only `create_node`, then add tests).
+### Request flow (`agent.py:292` `flight_node`)
 
-Inventory: 284 static flights, SIN-origin hub-and-spoke across 18 airports, 2026-08-24 to 2026-10-08. Swap to live Duffel with `FLIGHT_INVENTORY_SOURCE=duffel` and a `DUFFEL_API_TOKEN`.
+```
+A2A request
+  -> adapter.to_flight_request        shared TravelRequest -> flight contracts
+  -> provider.covers(request)?
+       no  -> prompt-only fallback (Path 2, see below)
+       yes -> ToolContext / InventoryCache fetches rows (exactly once per request)
+              -> mode gate:
+                   structured -> reasoning.run_flight_agent
+                   agentic    -> agentic.run_agentic_flight_agent
+                   auto       -> the loop only if _has_empty_leg (DEFAULT)
+              -> propose_flights ranks in code
+              -> LLM writes rationale; grounding + output screening enforced
+  -> _build_finding -> AgentFinding -> response_message back onto the bus
+```
 
-## Key files to understand
+### Modules
 
-- `flaskapp/travel_ai/a2a.py` — agent-to-agent messaging protocol (v1.0). All handoffs use `A2AMessage` envelopes; never invent your own dictionaries or pass raw text.
-- `flaskapp/travel_ai/schemas.py` — shared input/output contracts (Pydantic, `extra="forbid"`). New prompt fields need a schema change here first.
-- `flaskapp/travel_ai/graph.py` — cross-agent workflow and fan-in barrier. Currently runs specialists in parallel, then orchestrator. Retry/negotiation loops are future work.
-- `flaskapp/travel_ai/safeguards.py` — deterministic assurance rules applied to all agents.
-- `flaskapp/travel_ai/tracing.py` — tamper-evident audit events (JSONL + database).
-- `flaskapp/places.py` — city → airports mapping (shared with hotel and transport).
+| File | Role |
+| --- | --- |
+| `agent.py` | The graph node. Owns the mode gate, the fallback, and `Option` construction |
+| `domain.py` | Pure functions, no I/O, no langchain. Hard filters, ranking, relaxation gaps |
+| `schemas.py` | Flight contracts. Read the `FlightInventoryItem` and `PreferenceRelaxation` docstrings |
+| `adapter.py` | The only file that knows both the shared and flight schemas |
+| `airports.py` | country + city -> every airport serving that city |
+| `guardrails.py` | Input/output screening and flight-ID grounding |
+| `reasoning.py` | Single-shot path: tool runs, model explains, retry-then-fallback |
+| `tools.py` | `domain.py` exposed as three tools, plus the argument envelope |
+| `agentic.py` | The tool-calling subgraph. **The only module here allowed to import langchain** |
+| `providers/` | Where inventory comes from — `seed` (default) or `duffel` |
+| `seed_data.py` | Static inventory + `seed_data_extended.csv` |
 
-Do not touch: `flaskapp/travel_ai/llm.py` (provider abstraction), `flaskapp/travel_ai/cancellation.py` (risk-evaluation helper).
+### Things that look like details but are load-bearing
 
-## Common workflows
+- **`wheelchair_assist_available` and `step_free_boarding` are `bool | None`, and `None`
+  means "this supplier does not publish it" — not "unavailable."** Seed rows state a real
+  true/false; Duffel has no such field. Never collapse `None` into either boolean.
+  `domain.py` treats it as a genuine third case and `agent.py` surfaces it as an explicit
+  *unverified* limitation.
+- **Hard filters exclude; soft preferences only reorder.** `_screen_item` returns a list
+  of reasons (empty = included). `prefer_direct`, `avoid_red_eye` and a non-hard
+  `ArrivalPreference` never exclude anything.
+- **The rank key is a lexicographic tuple, not a blended score** (`domain.py:173`). Each
+  position is individually nameable, which is what lets `_candidate_to_option` restate
+  them honestly as `selection_factors`. `cost` is forced terminal so ties always resolve
+  deterministically.
+- **`PreferenceRelaxation.field` is a three-value `Literal`, and that is the actual
+  fence.** The model cannot express a request to relax `max_stops`, budget, a hard
+  arrival deadline, or accessibility — Pydantic rejects it before `domain.py` sees it.
+  `domain.relaxation_is_valid()` then re-verifies against a real gap; never trust the
+  model's own claim that relaxing something would help.
+- **`traveller_genders` reaches the model deliberately**, so the XRAI bias audit can vary
+  it. Nothing in ranking reads it and nothing should — `test_flight_bias_audit.py`
+  asserts deterministic ranking is byte-identical across genders.
 
-### Edit your agent's prompt
+### `FLIGHT_AGENT_MODE`
 
-1. Open `agents/your_agent/prompt.py`
-2. Update the instructions
-3. Add tests if the new prompt requires new output fields (see schema contract in `schemas.py`)
-4. Run `pytest -q`
-5. Push
+Resolved once at node construction (`agent.py:290`) so the mode cannot change under a
+traveller mid-plan.
 
-### Add a new output field to your agent
+- `structured` — always single-shot. The one-variable revert.
+- `agentic` — always open the tool loop.
+- `auto` — **default.** Single-shot, escalating to the loop only when the deterministic
+  search leaves a leg with no candidates.
 
-1. Update the Pydantic model in `schemas.py` (e.g., `AgentFinding` or a specialized schema)
-2. Add tests covering the new field
-3. Update your prompt to produce it
-4. Update `agent.py` to extract it
-5. Run `pytest -q` before pushing
+`auto` exists because of the measurement in `docs/flight_agent/mode-eval.md`: the loop
+turned one unstocked-date scenario from 0 options into 6, and produced identical option
+counts everywhere else for 2-4 extra seconds. The escalation test (`_has_empty_leg`) is
+pure Python over rows already in memory, so the common path keeps single-shot latency.
 
-### Use the Flight Agent's deterministic layer
+Loop limits come from `FLIGHT_AGENT_MAX_LLM_TURNS`, `MAX_TOOL_CALLS`,
+`MAX_PROVIDER_CALLS`, `LOOP_DEADLINE_SECONDS`, `MAX_DATE_SHIFT_DAYS` (`tools.py:102`).
 
-Replace the prompt-only node with the deterministic one:
+### What keeps the loop safe (none of it is the prompt)
 
-1. Open `agents/flight_agent/agent.py`
-2. In `create_node`, change the return from `agent.run_flight_agent(...)` to `reasoning.run_flight_agent(adapter.to_flight_request(state, ...))` 
-3. Add tests to verify ranking matches your expectations
-4. Run `pytest -q` and review the diff
-5. Push as a separate commit (it changes what every downstream agent receives)
+1. **The argument envelope** (`tools._validate_search_args`) — a searched date must be
+   within `MAX_DATE_SHIFT_DAYS` of the **base** request's leg date, measured against the
+   base so successive shifts cannot walk outward; searched airports must be a subset of
+   what `airports.resolve_route` already resolved. A violating call returns a refusal *to
+   the model*, so it can correct itself and the loop survives.
+2. **`LoopBudget`** (`agents/loop.py`) — caps model turns, tool calls, provider calls and
+   wall clock.
+3. **`domain.py` owns ranking.** `rank_flights` permutes precedence between named
+   components; it cannot invent one or drop a tiebreaker.
+4. **`agent.py` builds every `Option` from `proposal.candidates`**, produced by
+   `propose_flights` over rows the cache actually returned. The model's message never
+   becomes a flight.
+
+### Path 2: the no-inventory fallback
+
+When nothing covers the route, there is nothing to ground against, so the node falls back
+to the shared prompt-only specialist — and `_forbid_concrete_options` (`agent.py:120`)
+then **strips every option**, keeping route-level guidance plus a warning.
+`validate_grounded_explanation` cannot run on this path (the candidate set it checks
+membership against does not exist), and a fabricated option in `options` is what the UI
+renders most prominently. `docs/flight_agent/design.md` §3 has the full argument.
+
+Do not reword `ESTIMATE_WARNING` casually: it carries the substring
+`safeguards.UNVERIFIED_OPTIONS_MARKER` matches on, and changing it silently stops
+`enforce_provenance_disclosure` from firing.
+
+### Inventory
+
+Seed is the default and stays the default — the golden scenarios, the bias audit and
+~100 tests are pinned to its exact ranking output, so `FLIGHT_INVENTORY_SOURCE=duffel`
+is an explicit opt-in that a stray credential cannot trigger. A missing
+`DUFFEL_API_TOKEN` degrades to seed *with a visible note* rather than failing.
+
+Current seed dataset: 1568 rows across 30 airports, departures 2026-08-24 to 2027-01-06.
+Regenerate with `scripts/generate_flight_seed_csv.py` — it is deterministic, so a diff
+means an input changed. Verify these numbers before quoting them; they move.
+
+## A2A messaging
+
+Every handoff uses the versioned `A2AMessage` envelope from `flaskapp/travel_ai/a2a.py`.
+Never assemble one by hand, and never pass a raw dict or free text as a cross-agent
+interface. Use `request_message`, `response_message`, or `error_message` — read their
+signatures in `a2a.py:71-98` rather than copying a snippet, since all three are
+keyword-only and `response_message`/`error_message` take the original `request` (they
+derive `correlation_id` from it and reject a sender that was not its recipient).
+
+Adding an agent: register the ID in `AgentId` (`a2a.py`), in `AgentFinding.agent`
+(`schemas.py`), and in the registry in `agents/__init__.py`. Define input and output as
+strict Pydantic models (`extra="forbid"`). Never put prompts, secrets, credentials,
+chain-of-thought, or unnecessary personal data in `payload`, `error`, or traces.
+
+## Guardrails: two layers, don't confuse them
+
+- `flaskapp/travel_ai/guardrails/` — the shared L2 package (`specialist.py` provides
+  `make_preflight` / `make_postprocess` used by prompt-only nodes).
+- `flaskapp/travel_ai/agents/flight_agent/guardrails.py` — Flight Agent's own screening:
+  injection/bias/toxicity on input *before the model sees it*, the same two detectors on
+  the model's rationale, and `validate_grounded_ids` for flight-ID grounding.
+
+Bias screening is deliberately two-tier: a protected-attribute mention alone is `medium`
+and passes; attribute **plus** a stereotype trigger is `high` and blocks. Travel content
+legitimately mentions nationality, religion and culture — only stereotyping is the
+problem. Toxicity terms are word-bounded, not substring: a bare `in` test fires "kill" on
+Kilimanjaro and "die" on Dieppe.
 
 ## Testing
 
-- Tests live in `tests/` and do not call OpenAI (stubbed or seeded).
-- Flight tests are extensive: guardrails, accessibility, seat availability, bias audit, golden scenarios.
-- Always run `pytest -q` before pushing.
-- If a test needs live data, mark it `@pytest.mark.skip("requires live API")` and document why.
+Tests live in `tests/`. Flight coverage is extensive: `test_flight_guardrails.py`,
+`test_flight_golden.py` (pinned scenario replays), `test_flight_adapter.py`,
+`test_flight_bias_audit.py`, `test_flight_node_providers.py` (pins the single-fetch
+invariant), `test_flight_imports.py` (enforces that only `agentic.py` imports langchain).
 
-Key test files:
-- `tests/test_flight_guardrails.py` — verify output validation
-- `tests/test_flight_golden.py` — replay known scenarios
-- `tests/test_flight_adapter.py` — schema translation
-- `tests/test_accessibility_guardrails.py` — accessibility validation
+Golden scenarios are pinned to seed output — a change to ranking or seed data will move
+them, and that is the point. Re-pin deliberately, never reflexively.
 
-## A2A messaging (agent-to-agent handoff)
+## Environment
 
-All inter-agent communication uses `A2AMessage` envelopes from `a2a.py`. Never pass raw JSON or dicts.
-
-Request:
-```python
-from flaskapp.travel_ai.a2a import request_message
-msg = request_message(
-    sender="your_agent",
-    recipient="flight_agent",
-    correlation_id=request_id,
-    payload=travel_request
-)
-```
-
-Response:
-```python
-from flaskapp.travel_ai.a2a import response_message
-msg = response_message(
-    sender="your_agent",
-    recipient="orchestrator_agent",
-    correlation_id=request.correlation_id,  # copy from request
-    payload=finding
-)
-```
-
-The orchestrator routes these through the graph's `messages` state. Do not invent your own envelope format.
-
-## Environment and secrets
-
-- `.env` — non-secret settings (provider, model, debug flags)
-- `.env.secrets` — API keys only (never committed; use `.env.secrets.example` as template)
-- `FLASK_DEBUG=true` restarts the server on code changes
-- `LLM_PROVIDER` and `LLM_MODEL` select the LLM; all agents use the same provider and model
-- Supported providers: `openai`, `azure_openai`, `anthropic`, `google`, `deepseek`, `xai`, `meta`, `openai_compatible`
-
-For local development, use the stubbed flight inventory and skip live API keys.
+- `.env` — non-secret settings (provider, model, `FLIGHT_AGENT_MODE`, `FLASK_DEBUG`)
+- `.env.secrets` — credentials only; both are gitignored, the `.example` files are not
+- `LLM_PROVIDER` / `LLM_MODEL` select one provider for all five agents. Supported:
+  `openai`, `azure_openai`, `anthropic`, `google`, `deepseek`, `xai`, `meta`,
+  `openai_compatible`
 
 ## Database
 
-- Local: SQLite at `instance/travel_planner.sqlite3` (auto-initialized on startup)
-- Production: Postgres via `DATABASE_URL` env var (Supabase: use session pooler, not direct connection)
-- Schema: users, travel requests, plans, findings, options, A2A messages (versioned), audit events (hash-chained)
-- Migrations: `scripts/migrate_sqlite_to_postgres.py` for one-time moves to Postgres
+SQLite at `instance/travel_planner.sqlite3` (auto-initialized), or Postgres via
+`DATABASE_URL`. Supabase needs the **session pooler** connection string — the direct host
+resolves only to IPv6, which Render cannot reach.
 
-Note: `instance/travel_planner.sqlite3` is tracked in git but should eventually be untracked. If you modify it locally and a cloud session modifies it remotely, you'll get a merge conflict git can't resolve.
+`instance/travel_planner.sqlite3` is tracked in git. It is a binary, so a local
+modification plus a remote one is a conflict git cannot resolve. Worth untracking.
 
-## Deployment
-
-- Render: free tier, ephemeral disk (trace files lost on redeploy)
-- DAST scan: only against the live deployment URL, not the staging branch (see `docs/dast-against-the-render-deployment.md`)
-- CI pipeline: runs pytest and type checks; no live API calls
+Trace JSONL files under `TRACE_DIR` sit on Render's ephemeral disk, so
+`GET /api/v1/traces/<request_id>` 404s after a redeploy even though the same events
+remain in `audit_events`.
 
 ## Docs
 
-- `README.md` — overview and setup
-- `docs/flight_agent/report.md` — team-facing eval results
-- `docs/places_contract.md` — city → airports mapping
+- `docs/flight_agent/design.md` — the design argument, including Path 2 §3 and the loop §4b
+- `docs/flight_agent/mode-eval.md` — the measurement behind `auto`
 - `docs/flight_agent/inventory_sources.md` — seed vs. Duffel trade-offs
-- `docs/progress.md` — personal notes (untracked)
-
-## Responsible AI
-
-- Inputs validate schema and reject unknowns
-- Accessibility needs are hard constraints, not soft preferences
-- Outputs include options, factors, uncertainty, sources, and limitations
-- Deterministic checks flag missing sources and alternatives
-- Agent handoffs are request-ID scoped and hash-chained
-- Temperature is zero; model name is captured in audit events
-
-Before production, add outcome-parity tests, human escalation, incident handling, rate limiting, encrypted trace storage, and a named system owner.
+- `docs/flight_agent/report.md` — team-facing results
+- `docs/handoff/` — in-flight handoffs
+- `docs/security/` — security drafts and scan notes
+- `docs/places_contract.md` — the shared city dataset
 
 ## Debugging
 
-- Admin page at `/admin` (requires `ADMIN_EMAILS` in `.env`) shows live agent status and token usage
-- Trace URL in response body is a tamper-evident JSONL event chain
-- LangGraph state includes `findings` (synthesis) and `messages` (A2A envelopes)
-- Flight agent can swap inventory sources via env var for testing Duffel vs. seed
-
-## Quick links
-
-- Flight Agent test scenarios: `scripts/demo_golden_scenario.py`, `scripts/demo_multi_gap_relaxation.py`
-- Flight inventory regeneration: `scripts/generate_flight_seed_csv.py` (deterministic, diffs mean inputs changed)
-- Schema validation: `flaskapp/travel_ai/schemas.py`
-- Guardrails: `flaskapp/travel_ai/agents/flight_agent/guardrails.py` and `safeguards.py`
+`/admin` (gated by `ADMIN_EMAILS`) shows live agent status, latest structured responses
+and token usage. Every plan returns a `trace_url` for its tamper-evident JSONL chain.
+Useful trace events: `agent_fallback`, `agent_path2_options_stripped`,
+`agent_relaxation_applied` / `_rejected`, `agent_llm_attempt_failed`,
+`agent_tool_rejected`, `agent_budget_exhausted`, `agent_loop_completed`.

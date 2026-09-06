@@ -147,15 +147,28 @@ invents. `adapter.py` translates the shared `TravelRequest` into these contracts
 and is the single place that knows both schemas — point changes there when the
 shared schema or the intake form moves.
 
-**The graph does not use this layer yet.** `agent.py` still runs the prompt-only
-node, so runtime behaviour is unchanged. Connecting them is one change to
-`create_node` (`adapter.to_flight_request` produces what
-`reasoning.run_flight_agent` needs), deliberately left as its own reviewed step
-because it changes what every downstream agent receives.
+**The graph runs this layer.** `agent.py` adapts the shared request, fetches
+inventory once, ranks it deterministically, and asks the model only for the
+narrative — on every request the provider covers.
 
-One limit to know before wiring it in: by default inventory is 284 static rows,
-SIN-origin hub-and-spoke across 18 airports between 2026-08-24 and 2026-10-08,
-so anything else correctly returns no candidates.
+The prompt-only node survives as the fallback for routes the loaded inventory
+does not cover, where there is nothing to ground an answer in. That path is
+screened on the way in and out, and `_forbid_concrete_options` strips every
+option from its result: with no candidate set to check membership against,
+`validate_grounded_explanation` cannot run, so the design keeps the route-level
+guidance and drops the specifics rather than risking invented flight numbers in
+the part of the UI users read most. See
+[docs/flight_agent/design.md](docs/flight_agent/design.md) §3.
+
+`FLIGHT_AGENT_MODE` selects how the covered path reasons: `structured`
+(single-shot), `agentic` (always open the tool-calling loop in `agentic.py`), or
+`auto` — the default, which is single-shot and escalates to the loop only when
+the deterministic search leaves a leg empty. `docs/flight_agent/mode-eval.md`
+records the measurement behind that default.
+
+One limit to know: the seed dataset is illustrative, not exhaustive — currently
+1568 rows across 30 airports with departures between 2026-08-24 and 2027-01-06.
+A route or date outside it correctly returns no candidates and falls back.
 
 The intake form collects a country **and a city**, and a city resolves to every
 airport serving it — picking Tokyo ranks Haneda and Narita together rather than

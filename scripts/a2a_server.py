@@ -12,7 +12,7 @@ import uvicorn
 from flaskapp import create_app
 from flaskapp.config import get_llm_settings
 from flaskapp.travel_ai.guardrails import LlmGuardrail, guardrail_settings
-from flaskapp.travel_ai.a2a_standard import build_a2a_application
+from flaskapp.travel_ai.a2a_standard import ExecutorContext, build_a2a_application
 from flaskapp.travel_ai.agents import SPECIALIST_NODE_FACTORIES
 from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.safeguards import screen_request_l2, validate_request
@@ -75,6 +75,8 @@ def create_application(
         resolved_node_factories,
         flask_app.config["A2A_BASE_URL"],
         orchestrator_runner=orchestrator_runner,
+        context=ExecutorContext.from_flask_config(flask_app.config),
+        root_agent=flask_app.config.get("A2A_ROOT_AGENT"),
     )
 
 
