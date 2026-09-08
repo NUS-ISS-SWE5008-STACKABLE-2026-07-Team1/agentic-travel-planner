@@ -104,6 +104,11 @@ def to_hotel_trip_context(travel_request, *, arrival_airport: str | None = None)
         need for need in travel_request.accessibility_needs
         if need.strip()
     ]
+    for traveller_needs in travel_request.traveller_accessibility_needs:
+        for need in traveller_needs:
+            need = need.strip()
+            if need and need not in accessibility_needs:
+                accessibility_needs.append(need)
 
     context = HotelTripContext(
         dest_country=dest_country,

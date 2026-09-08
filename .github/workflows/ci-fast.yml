@@ -218,6 +218,73 @@ jobs:
           path: pytest-report.xml
           retention-days: 14
 
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Every push+PR, same as `tests` above, on the team's own call: the
+    # smoke test needs no live model (it runs against the same in-process
+    # stub `ci-dast.yml` uses) and no Postgres service, so it costs a
+    # `playwright install` plus a couple of seconds of test time — a few
+    # extra billed minutes per run, judged worth it here for catching a
+    # broken login/plan-render path before merge rather than after.
+    #
+    # Self-contained on purpose: no GH secrets, no service containers. Both
+    # tests spin up their own Flask server (`tests/e2e/conftest.py`'s
+    # `live_server`) against a throwaway SQLite file under pytest's own
+    # tmp_path, never `instance/travel_planner.sqlite3`.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.lock ]; then
+            python -m pip install -r requirements.lock
+          else
+            python -m pip install -r requirements.txt
+          fi
+
+      # Cached on Playwright's own version: the browser binary doesn't
+      # change between runs unless requirements.txt bumps pytest-playwright,
+      # so a cache hit skips the ~300MB Chromium download entirely.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --with-deps chromium
+
+      # --with-deps only installs the shared libraries the browser needs; on
+      # a cache hit the browser binary itself is restored but those OS
+      # packages are not, since they live outside ~/.cache/ms-playwright.
+      - name: Install Chromium OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: python -m playwright install-deps chromium
+
+      # BLOCKING, same tier as `tests` above — see pytest.ini for why
+      # `tests/e2e` needs `-m e2e` and its own path rather than living inside
+      # the default `pytest -q` collection.
+      - name: Run Playwright E2E tests
+        run: python -m pytest tests/e2e -m e2e --browser chromium -q --junitxml=e2e-report.xml
+
+      - name: Upload E2E report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-report
+          path: e2e-report.xml
+          retention-days: 14
+
   sast:
     name: SAST
     runs-on: ubuntu-latest

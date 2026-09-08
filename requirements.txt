@@ -20,7 +20,13 @@ pydantic>=2.10,<3
 typing-extensions>=4.12,<5
 # Official Agent2Agent protocol SDK (A2A 1.x): Agent Cards, tasks, messages,
 # artifacts, JSON/HTTP transport, and server execution adapters.
-a2a-sdk[http-server]>=1.1,<2
+#
+# Pinned exactly, unlike the ranges above. The 1.x line is young and the
+# protocol types it generates (Agent Card shape, task states, error codes) are
+# what our conformance tests assert against, so a silent minor bump would move
+# the thing being measured. 1.1.2 is the version the suite passes on. Raise it
+# deliberately, re-running `tests/test_a2a_standard.py` when you do.
+a2a-sdk[http-server]==1.1.2
 uvicorn>=0.30,<1
 a2wsgi>=1.10,<2
 
@@ -30,3 +36,7 @@ gunicorn>=23,<24
 # Development and verification
 pytest>=8.3,<10
 pytest-mock>=3.14,<4
+
+# Browser E2E tests (tests/e2e/) — needs `playwright install chromium` once,
+# locally or in CI. Never required for `pytest -q` (see pytest.ini).
+pytest-playwright>=0.5,<1
