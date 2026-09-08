@@ -89,11 +89,10 @@ then returns all 284 rows unconditionally, and date filtering happens later in
 `domain._screen_item`. So a stocked route with an unstocked date takes **Path 1
 with an empty candidate list**, which `_coverage_warnings` labels honestly — not
 Path 2, and with nothing fabricated. Path 2 on seed fires if and only if the
-airport pair is unstocked, which (since every seed row has SIN at one end) means
-any trip that does not touch Singapore.
+airport pair is unstocked, which means any trip touching neither hub.
 
-The seed dataset is **476 rows across two hubs** (Singapore and London), dates
-2026-08-24 → 2026-10-08 — see `report.md` §6. Until 2026-08-23 it was 284 rows with
+The seed dataset is **1568 rows across two hubs** (Singapore and London), departures
+2026-08-24 → 2027-01-06 — see `report.md` §6. Until 2026-08-23 it was 284 rows with
 Singapore at one end of every route, which made Path 2 the *normal* path for a demo
 driven from anywhere else. The second hub narrows that, and does not close it: 60 of
 `places.py`'s 64,262 ordered city pairs are stocked, so any trip outside them still

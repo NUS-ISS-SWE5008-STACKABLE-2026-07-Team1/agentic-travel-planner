@@ -11,15 +11,19 @@ import uvicorn
 
 from flaskapp import create_app
 from flaskapp.config import get_llm_settings
-from flaskapp.travel_ai.a2a_standard import build_a2a_application
+from flaskapp.travel_ai.guardrails import LlmGuardrail, guardrail_settings
+from flaskapp.travel_ai.a2a_standard import ExecutorContext, build_a2a_application
 from flaskapp.travel_ai.agents import SPECIALIST_NODE_FACTORIES
 from flaskapp.travel_ai.llm import build_llm
+from flaskapp.travel_ai.safeguards import screen_request_l2, validate_request
+from flaskapp.travel_ai.service import TravelPlanningService
 from flaskapp.travel_ai.tracing import AuditTracer
 
 
 def create_application(
     flask_app=None,
     node_factories: Mapping[str, Any] | None = None,
+    orchestrator_runner=None,
 ):
     """Construct the ASGI sidecar using real or injected specialist nodes.
 
@@ -42,11 +46,37 @@ def create_application(
                 tracer = AuditTracer(trace_dir, request_id, database_path)
                 return create_node(llm, tracer)
             resolved_node_factories[name] = node_factory
+
+        if orchestrator_runner is None:
+            def orchestrator_runner(request, request_id):
+                validated_request = validate_request(
+                    request.model_dump(mode="json"),
+                    flask_app.config["MAX_INPUT_CHARS"],
+                )
+                guard_settings = guardrail_settings(flask_app.config)
+                input_verdict = screen_request_l2(
+                    validated_request,
+                    LlmGuardrail.from_settings(guard_settings),
+                )
+                service = TravelPlanningService(
+                    **llm_settings,
+                    trace_dir=trace_dir,
+                    database_path=database_path,
+                    guardrail_settings=guard_settings,
+                    input_guardrail=(
+                        input_verdict.as_audit_details() if input_verdict else None
+                    ),
+                )
+                return service.create_plan(validated_request, request_id=request_id)
     else:
         resolved_node_factories = dict(node_factories)
 
     return build_a2a_application(
-        resolved_node_factories, flask_app.config["A2A_BASE_URL"]
+        resolved_node_factories,
+        flask_app.config["A2A_BASE_URL"],
+        orchestrator_runner=orchestrator_runner,
+        context=ExecutorContext.from_flask_config(flask_app.config),
+        root_agent=flask_app.config.get("A2A_ROOT_AGENT"),
     )
 
 

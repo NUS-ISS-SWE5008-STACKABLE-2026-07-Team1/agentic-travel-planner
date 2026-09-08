@@ -147,15 +147,28 @@ invents. `adapter.py` translates the shared `TravelRequest` into these contracts
 and is the single place that knows both schemas — point changes there when the
 shared schema or the intake form moves.
 
-**The graph does not use this layer yet.** `agent.py` still runs the prompt-only
-node, so runtime behaviour is unchanged. Connecting them is one change to
-`create_node` (`adapter.to_flight_request` produces what
-`reasoning.run_flight_agent` needs), deliberately left as its own reviewed step
-because it changes what every downstream agent receives.
+**The graph runs this layer.** `agent.py` adapts the shared request, fetches
+inventory once, ranks it deterministically, and asks the model only for the
+narrative — on every request the provider covers.
 
-One limit to know before wiring it in: by default inventory is 284 static rows,
-SIN-origin hub-and-spoke across 18 airports between 2026-08-24 and 2026-10-08,
-so anything else correctly returns no candidates.
+The prompt-only node survives as the fallback for routes the loaded inventory
+does not cover, where there is nothing to ground an answer in. That path is
+screened on the way in and out, and `_forbid_concrete_options` strips every
+option from its result: with no candidate set to check membership against,
+`validate_grounded_explanation` cannot run, so the design keeps the route-level
+guidance and drops the specifics rather than risking invented flight numbers in
+the part of the UI users read most. See
+[docs/flight_agent/design.md](docs/flight_agent/design.md) §3.
+
+`FLIGHT_AGENT_MODE` selects how the covered path reasons: `structured`
+(single-shot), `agentic` (always open the tool-calling loop in `agentic.py`), or
+`auto` — the default, which is single-shot and escalates to the loop only when
+the deterministic search leaves a leg empty. `docs/flight_agent/mode-eval.md`
+records the measurement behind that default.
+
+One limit to know: the seed dataset is illustrative, not exhaustive — currently
+1568 rows across 30 airports with departures between 2026-08-24 and 2027-01-06.
+A route or date outside it correctly returns no candidates and falls back.
 
 The intake form collects a country **and a city**, and a city resolves to every
 airport serving it — picking Tokyo ranks Haneda and Narita together rather than
@@ -453,15 +466,17 @@ Protect trace access with authorization and a retention policy in production.
 
 The application supports the official A2A 1.x protocol through the official
 Python SDK. The existing LangGraph fan-out/fan-in workflow remains the default
-internal execution path, while an adapter makes each specialist independently
-discoverable and callable by a standards-compliant external orchestrator. The
-same agent implementation, Pydantic validation, guardrails, evidence handling,
-database recording, and audit tracing are reused on both paths.
+internal execution path, while adapters make the orchestrator and every
+specialist independently discoverable and callable by standards-compliant A2A
+clients. The same agent implementations, Pydantic validation, guardrails,
+evidence handling, database recording, and audit tracing are reused on both
+paths.
 
 The implementation consists of:
 
 - `flaskapp/travel_ai/a2a_standard.py`: Agent Cards, request conversion,
-  `SpecialistAgentExecutor`, task status, artifacts, failures, and cancellation.
+  specialist and orchestrator executors, task status, artifacts, failures, and
+  cancellation.
 - `scripts/a2a_server.py`: standalone A2A-only ASGI service.
 - `flaskapp/combined.py` and `asgi.py`: one ASGI application containing the
   Flask website and all A2A routes.
@@ -482,6 +497,7 @@ This single process serves both interfaces on port 5000:
 | Interface | URL |
 | --- | --- |
 | Web application | `http://127.0.0.1:5000/` |
+| Orchestrator Agent Card | `http://127.0.0.1:5000/a2a/orchestrator_agent/.well-known/agent-card.json` |
 | Flight Agent Card | `http://127.0.0.1:5000/a2a/flight_agent/.well-known/agent-card.json` |
 | Hotel & Transport Agent Card | `http://127.0.0.1:5000/a2a/hotel_transport_agent/.well-known/agent-card.json` |
 | Accessibility Agent Card | `http://127.0.0.1:5000/a2a/accessibility_agent/.well-known/agent-card.json` |
@@ -508,9 +524,12 @@ defaults are unsuitable.
 Each Agent Card advertises A2A 1.0 over the `JSONRPC` protocol binding with
 `application/json` input and output modes. Requests contain exactly one JSON
 data Part holding a validated `TravelRequest`, either directly or under a
-`travel_request` property. A successful task produces an `agent-finding`
-artifact containing the validated `AgentFinding`, followed by a completed task
-status. Invalid requests and execution errors produce a failed task status;
+`travel_request` property. A successful specialist task produces an
+`agent-finding` artifact containing a validated `AgentFinding`. A successful
+orchestrator task runs the complete planning workflow and produces a
+`travel-plan-response` artifact containing a validated `PlanResponse`, including
+the synthesized plan, specialist findings, safety assessment, sources, and trace
+URL. Invalid requests and execution errors produce a failed task status;
 cancellation produces a cancelled task status.
 
 ### Single-process deployment

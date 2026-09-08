@@ -6,11 +6,11 @@ dataset. Two providers exist.
 
 | | `seed` (default) | `duffel` |
 |---|---|---|
-| Data | 284 static rows: 4 golden + 280 generated CSV | Live supplier search |
+| Data | 1568 static rows: 4 golden + 1564 generated CSV | Live supplier search |
 | Selected by | nothing — it is the default | `FLIGHT_INVENTORY_SOURCE=duffel` + `DUFFEL_API_TOKEN` |
 | Determinism | Total. Golden scenarios and the bias audit are pinned to it | None — results change between calls |
 | Accessibility fields | Real `True`/`False` on every row | **Not published — always `None`** |
-| Seat inventory | Modelled on the 100 extended rows | **Not available** |
+| Seat inventory | Modelled on every generated CSV row | **Not available** |
 
 Seed remains the default deliberately. The golden scenarios, `test_flight_golden.py`
 and `test_flight_bias_audit.py` assert exact ranking output, which a live feed

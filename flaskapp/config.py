@@ -56,6 +56,27 @@ class Config:
     A2A_BASE_URL = os.getenv("A2A_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
     A2A_HOST = os.getenv("A2A_HOST", "127.0.0.1")
     A2A_PORT = int(os.getenv("A2A_PORT", "5000"))
+    # Which agent answers at `/.well-known/agent-card.json`. The orchestrator is
+    # the sensible front door for a caller who wants a trip planned; point this
+    # at `flight_agent` to put that agent alone in front of a conformance run.
+    A2A_ROOT_AGENT = os.getenv("A2A_ROOT_AGENT", "orchestrator_agent")
+    # Whether an A2A caller may name the request id its work is recorded under.
+    # Safe only when the endpoint is not reachable by strangers, because that id
+    # is a write key into an existing audit trail. Enable it together with the
+    # in-house orchestrator transport below.
+    A2A_TRUST_CALLER_REQUEST_ID = os.getenv(
+        "A2A_TRUST_CALLER_REQUEST_ID", "false"
+    ).lower() == "true"
+
+    # How the orchestrator reaches the flight agent. `inprocess` (default) calls
+    # the node directly; `a2a` routes it over the real Agent2Agent protocol.
+    # Resolved once when the graph is built, never per request — the same
+    # one-variable-revert shape as FLIGHT_AGENT_MODE.
+    FLIGHT_AGENT_TRANSPORT = os.getenv("FLIGHT_AGENT_TRANSPORT", "inprocess").strip().lower()
+    FLIGHT_AGENT_A2A_URL = os.getenv("FLIGHT_AGENT_A2A_URL", "")
+    FLIGHT_AGENT_A2A_TIMEOUT_SECONDS = float(
+        os.getenv("FLIGHT_AGENT_A2A_TIMEOUT_SECONDS", "60")
+    )
     # L2 guardrails: the LLM classifier that screens traveller free text and
     # generated plans for what the regex layer cannot see (obfuscated injection,
     # role-play jailbreaks, out-of-scope requests). Set enabled=false to develop
