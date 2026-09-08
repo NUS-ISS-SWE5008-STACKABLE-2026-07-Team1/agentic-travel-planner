@@ -7,6 +7,7 @@ from typing import Any
 
 from flaskapp.travel_ai.guardrails.fields import collect_free_text
 from flaskapp.travel_ai.guardrails.injection import PROMPT_INJECTION, PromptInjectionGuard
+from flaskapp.travel_ai.guardrails.normalization import normalize_for_screening
 from flaskapp.travel_ai.guardrails.pii import PiiRedactor, RedactionResult
 from flaskapp.travel_ai.guardrails.types import Category, Decision, Verdict
 from flaskapp.travel_ai.schemas import AgentFinding, SafetyAssessment, TravelPlan, TravelRequest
@@ -115,7 +116,13 @@ def screen_prompt(
         raise SafetyError("A travel request message is required")
     if len(text) > max_chars:
         raise SafetyError("Request is too large")
-    if _INJECTION_GUARD.detect(text):
+    # Detection runs against a normalized copy — homoglyphs and zero-width
+    # characters folded to what they visually read as — so an attacker who
+    # types "іgnore previous instructions" with a Cyrillic і cannot dodge the
+    # regex that way. The original `text`, not the normalized copy, is what
+    # gets redacted and stored below: normalization is for detection only and
+    # must never change what a traveller's own free text actually says.
+    if _INJECTION_GUARD.detect(normalize_for_screening(text)):
         raise SafetyError("Instruction-like text was detected in the message")
     # Redaction sits here, between the free local check and the network one, so
     # no identifier the traveller typed ever reaches a model provider.
@@ -175,8 +182,10 @@ def validate_request(payload: dict[str, Any], max_chars: int) -> TravelRequest:
     request = TravelRequest.model_validate(payload)
     # `collect_free_text` covers the city names and per-traveller accessibility
     # needs too, which the old inline concatenation missed — see the note in
-    # `guardrails/fields.py`.
-    if any(PROMPT_INJECTION.search(value) for value in collect_free_text(
+    # `guardrails/fields.py`. Each value is normalized before matching, for the
+    # same reason as `screen_prompt` above — this only widens what the existing
+    # regex catches, it does not change what is validated or stored.
+    if any(PROMPT_INJECTION.search(normalize_for_screening(value)) for value in collect_free_text(
         request.model_dump(mode="json")
     )):
         raise SafetyError("Instruction-like text was detected in request fields")

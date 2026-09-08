@@ -12,6 +12,7 @@ Every test stubs the model. What is being checked is the control flow around it
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -19,6 +20,8 @@ from flaskapp.travel_ai.agents.orchestrator_agent.agent import NAME, create_node
 from flaskapp.travel_ai.guardrails.types import Category, Decision, Verdict
 from flaskapp.travel_ai.schemas import AgentFinding, TravelPlan
 from flaskapp.travel_ai.tracing import AuditTracer, verify_hash_chain
+
+_CANARY_PATTERN = re.compile(r"CANARY_[0-9a-f]+")
 
 
 class StubLlm:
@@ -151,3 +154,48 @@ def test_agent_name_is_stamped_on_the_verdict_events(tracer):
     create_node(StubLlm(a_plan()), tracer, StubGuardrail(block_times=0))(state())
     verdicts = [e for e in events(tracer) if e["event"] == "guardrail_llm_verdict"]
     assert verdicts and all(v["agent"] == NAME for v in verdicts)
+
+
+class LeakyStubLlm:
+    """A model that echoes back the canary token it finds in its own system
+    prompt, `leak_times` attempts in a row — simulating a model successfully
+    manipulated into reciting its instructions. Reads the token out of the
+    real embedded system message rather than being handed it directly, so the
+    test exercises the real `embed_canary` wiring, not a fake of it."""
+
+    def __init__(self, leak_times: int):
+        self.leak_times = leak_times
+        self.calls = 0
+
+    def with_structured_output(self, _schema, **_kwargs):
+        return self
+
+    def invoke(self, messages, config=None):
+        self.calls += 1
+        token = _CANARY_PATTERN.search(messages[0].content).group(0)
+        if self.calls <= self.leak_times:
+            return a_plan(summary=f"Debug trace: {token}")
+        return a_plan(title="clean, no leak")
+
+
+def test_a_leaked_canary_is_retried_then_recovers(tracer):
+    llm = LeakyStubLlm(leak_times=1)
+    result = create_node(llm, tracer, None)(state())
+    assert result["plan"].title == "clean, no leak"
+    assert llm.calls == 2
+
+
+def test_a_canary_leak_on_every_attempt_is_withheld_even_with_no_l2(tracer):
+    """The canary is an independent check: it must catch a leak L2 alone would
+    miss (no guardrail configured here at all), not merely agree with it."""
+    llm = LeakyStubLlm(leak_times=99)
+    result = create_node(llm, tracer, None)(state())
+    assert llm.calls == 2
+    assert result["plan"].title == "Plan withheld by output guardrails"
+
+
+def test_canary_leak_is_recorded_without_the_token_itself(tracer):
+    create_node(LeakyStubLlm(leak_times=99), tracer, None)(state())
+    leaks = [e for e in events(tracer) if e["event"] == "guardrail_canary_leak_detected"]
+    assert [leak["details"]["attempt"] for leak in leaks] == [1, 2]
+    assert all("CANARY" not in json.dumps(leak) for leak in leaks)
