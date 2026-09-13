@@ -16,6 +16,15 @@ if (intentForm) {
     ["female", "Female"], ["male", "Male"],
     ["non_binary", "Non-binary"], ["prefer_not_to_say", "Prefer not to say"]
   ];
+  // The three dispatch choices, in the order offered. "Flights and hotel" is
+  // first because it is the default and the common case: a traveller who does
+  // not care picks the first option and still gets every specialist.
+  const scopes = [
+    ["both", "Flights and hotel"], ["flights", "Flights only"],
+    // "and transport": this agent books airport transfers and local transport
+    // as well as accommodation, and "Hotel only" understates what is included.
+    ["hotel", "Hotel and transport only"]
+  ];
   let intakeState = null;
   let sessionHandoff = false;
 
@@ -96,6 +105,36 @@ if (intentForm) {
     wrapper.append(label);
 
     let input;
+    if (field.input === "scope") {
+      // Three mutually exclusive choices read better as buttons than as a
+      // dropdown: all the options are visible without opening anything.
+      const group = document.createElement("div");
+      group.className = "btn-group flex-wrap";
+      group.setAttribute("role", "group");
+      scopes.forEach(([value, text], position) => {
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.className = "btn-check";
+        radio.name = id;
+        radio.id = `${id}-${value}`;
+        radio.value = value;
+        radio.checked = position === 0;
+        radio.dataset.key = field.name;
+        const label = document.createElement("label");
+        label.className = "btn btn-outline-primary";
+        label.setAttribute("for", radio.id);
+        label.textContent = text;
+        group.append(radio, label);
+      });
+      wrapper.append(group);
+      if (field.hint) {
+        const scopeHint = document.createElement("div");
+        scopeHint.className = "form-text";
+        scopeHint.textContent = field.hint;
+        wrapper.append(scopeHint);
+      }
+      return wrapper;
+    }
     if (field.input === "country" || field.input === "gender") {
       input = document.createElement("select");
       input.className = "form-select";
@@ -174,6 +213,9 @@ if (intentForm) {
       for (const input of card.querySelectorAll("[data-key]")) {
         /* Presence is what marks a field answered. Accessibility needs are sent
            even when blank, which is how "no needs" reaches the server. */
+        /* Every control carries data-key, so an unchecked radio would answer
+           too and the last one in the group would win. */
+        if (input.type === "radio" && !input.checked) continue;
         if (input.value !== "" || input.dataset.key.startsWith("traveller_accessibility_needs")) {
           answers[input.dataset.key] = input.value;
         }

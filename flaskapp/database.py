@@ -41,12 +41,13 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS travel_requests (
     id TEXT PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    origin TEXT NOT NULL,
+    origin TEXT,
     destination TEXT NOT NULL,
     -- Countries above, cities here. NULLable because city intake postdates
     -- these rows and a country-only request stays valid.
     origin_city TEXT,
     destination_city TEXT,
+    plan_scope TEXT NOT NULL DEFAULT 'both',
     departure_date TEXT NOT NULL,
     return_date TEXT NOT NULL,
     travellers INTEGER NOT NULL CHECK (travellers BETWEEN 1 AND 20),
@@ -100,7 +101,11 @@ CREATE TABLE IF NOT EXISTS options (
     source_urls_json TEXT NOT NULL DEFAULT '[]',
     assumptions_json TEXT NOT NULL DEFAULT '[]',
     limitations_json TEXT NOT NULL DEFAULT '[]',
-    selection_factors_json TEXT NOT NULL DEFAULT '[]'
+    selection_factors_json TEXT NOT NULL DEFAULT '[]',
+    -- What kind of option this is, as asserted by the builder that made it.
+    -- Nullable: rows written before builders classified themselves genuinely
+    -- have no category, and NULL says that rather than guessing one.
+    category TEXT
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -182,6 +187,63 @@ CREATE INDEX IF NOT EXISTS idx_jobs_submitted ON planning_jobs(submitted_at DESC
 CREATE INDEX IF NOT EXISTS idx_intake_messages_request ON intake_messages(request_id, id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_request ON agent_runs(request_id, agent);
 CREATE INDEX IF NOT EXISTS idx_feedback_created ON plan_feedback(created_at DESC);
+
+-- Risk & Advisory Agent's reference data. Three tables grouped by SHAPE, not
+-- by the ~18 advisory categories they hold, because the query pattern differs
+-- by shape, not by category name: a standing fact is looked up by destination
+-- alone, a seasonal window by destination + month overlap, a dated event by
+-- destination + date-range overlap. `category` stays a free TEXT value on
+-- purpose, not an enum or a per-category table, so a new advisory category is
+-- an inserted row, never a migration. Every row's `source` default states
+-- this data is synthetic — see docs/risk_advisory_agent/design.md.
+CREATE TABLE IF NOT EXISTS risk_standing_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    destination_slug TEXT NOT NULL,
+    category TEXT NOT NULL,
+    severity TEXT,
+    -- Only meaningful for category = 'traveler_group_risk' (e.g.
+    -- 'lgbtq_travellers', 'solo_female_travellers'); NULL for every other
+    -- category rather than a separate table, since it is the one category
+    -- here that varies by traveller profile rather than by destination alone.
+    applies_to TEXT,
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    mitigation TEXT,
+    source TEXT NOT NULL DEFAULT 'synthetic reference data — illustrative only'
+);
+
+CREATE TABLE IF NOT EXISTS risk_seasonal_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    destination_slug TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'seasonal_weather',
+    label TEXT NOT NULL,
+    start_month INTEGER NOT NULL CHECK (start_month BETWEEN 1 AND 12),
+    -- May be less than start_month: a window that wraps the year end (e.g.
+    -- Nov-Mar) is stored as-is: (11, 3), not split into two rows. The overlap
+    -- query in domain.py accounts for the wrap.
+    end_month INTEGER NOT NULL CHECK (end_month BETWEEN 1 AND 12),
+    severity TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    mitigation TEXT,
+    source TEXT NOT NULL DEFAULT 'synthetic reference data — illustrative only'
+);
+
+CREATE TABLE IF NOT EXISTS risk_dated_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    destination_slug TEXT NOT NULL,
+    category TEXT NOT NULL,
+    name TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    impact TEXT,
+    detail TEXT,
+    source TEXT NOT NULL DEFAULT 'synthetic reference data — illustrative only'
+);
+
+CREATE INDEX IF NOT EXISTS idx_risk_standing_facts_dest ON risk_standing_facts(destination_slug);
+CREATE INDEX IF NOT EXISTS idx_risk_seasonal_windows_dest ON risk_seasonal_windows(destination_slug);
+CREATE INDEX IF NOT EXISTS idx_risk_dated_events_dest_dates
+    ON risk_dated_events(destination_slug, start_date, end_date);
 """
 
 _NOW = "to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')"
@@ -203,10 +265,11 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS travel_requests (
     id TEXT PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    origin TEXT NOT NULL,
+    origin TEXT,
     destination TEXT NOT NULL,
     origin_city TEXT,
     destination_city TEXT,
+    plan_scope TEXT NOT NULL DEFAULT 'both',
     departure_date TEXT NOT NULL,
     return_date TEXT NOT NULL,
     travellers INTEGER NOT NULL CHECK (travellers BETWEEN 1 AND 20),
@@ -260,7 +323,11 @@ CREATE TABLE IF NOT EXISTS options (
     source_urls_json TEXT NOT NULL DEFAULT '[]',
     assumptions_json TEXT NOT NULL DEFAULT '[]',
     limitations_json TEXT NOT NULL DEFAULT '[]',
-    selection_factors_json TEXT NOT NULL DEFAULT '[]'
+    selection_factors_json TEXT NOT NULL DEFAULT '[]',
+    -- What kind of option this is, as asserted by the builder that made it.
+    -- Nullable: rows written before builders classified themselves genuinely
+    -- have no category, and NULL says that rather than guessing one.
+    category TEXT
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -342,6 +409,50 @@ CREATE INDEX IF NOT EXISTS idx_jobs_submitted ON planning_jobs(submitted_at DESC
 CREATE INDEX IF NOT EXISTS idx_intake_messages_request ON intake_messages(request_id, id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_request ON agent_runs(request_id, agent);
 CREATE INDEX IF NOT EXISTS idx_feedback_created ON plan_feedback(created_at DESC);
+
+-- Risk & Advisory Agent's reference data — see the matching block in
+-- SCHEMA_SQLITE for why three tables grouped by shape, not by category.
+CREATE TABLE IF NOT EXISTS risk_standing_facts (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    destination_slug TEXT NOT NULL,
+    category TEXT NOT NULL,
+    severity TEXT,
+    applies_to TEXT,
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    mitigation TEXT,
+    source TEXT NOT NULL DEFAULT 'synthetic reference data — illustrative only'
+);
+
+CREATE TABLE IF NOT EXISTS risk_seasonal_windows (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    destination_slug TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'seasonal_weather',
+    label TEXT NOT NULL,
+    start_month INTEGER NOT NULL CHECK (start_month BETWEEN 1 AND 12),
+    end_month INTEGER NOT NULL CHECK (end_month BETWEEN 1 AND 12),
+    severity TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    mitigation TEXT,
+    source TEXT NOT NULL DEFAULT 'synthetic reference data — illustrative only'
+);
+
+CREATE TABLE IF NOT EXISTS risk_dated_events (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    destination_slug TEXT NOT NULL,
+    category TEXT NOT NULL,
+    name TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    impact TEXT,
+    detail TEXT,
+    source TEXT NOT NULL DEFAULT 'synthetic reference data — illustrative only'
+);
+
+CREATE INDEX IF NOT EXISTS idx_risk_standing_facts_dest ON risk_standing_facts(destination_slug);
+CREATE INDEX IF NOT EXISTS idx_risk_seasonal_windows_dest ON risk_seasonal_windows(destination_slug);
+CREATE INDEX IF NOT EXISTS idx_risk_dated_events_dest_dates
+    ON risk_dated_events(destination_slug, start_date, end_date);
 """
 
 
@@ -517,6 +628,40 @@ def close_db(_error: BaseException | None = None) -> None:
         connection.close()
 
 
+def _allow_null_origin(connection) -> None:
+    """Drop the NOT NULL constraint on `travel_requests.origin`.
+
+    A hotel-only request has no departure country, so the column must accept
+    NULL. Postgres alters in place. SQLite has no `ALTER COLUMN`, so the
+    documented workaround applies: create the relaxed table, copy every row
+    across by name, drop the original and rename. Copying BY NAME rather than
+    positionally matters — this table has gained columns over time and the two
+    shapes need not agree.
+    """
+    if connection.dialect == "postgres":
+        connection.execute(
+            "ALTER TABLE travel_requests ALTER COLUMN origin DROP NOT NULL"
+        )
+        return
+    columns = connection.execute("PRAGMA table_info(travel_requests)").fetchall()
+    if not columns or not any(row[1] == "origin" and row[3] for row in columns):
+        return  # Already nullable, or the table does not exist yet.
+    names = ", ".join(row[1] for row in columns)
+    definitions = ", ".join(
+        f"{row[1]} {row[2]}"
+        + (" PRIMARY KEY" if row[5] else "")
+        + (" NOT NULL" if row[3] and row[1] != "origin" else "")
+        + (f" DEFAULT {row[4]}" if row[4] is not None else "")
+        for row in columns
+    )
+    connection.execute(f"CREATE TABLE travel_requests_migrated ({definitions})")
+    connection.execute(
+        f"INSERT INTO travel_requests_migrated ({names}) SELECT {names} FROM travel_requests"
+    )
+    connection.execute("DROP TABLE travel_requests")
+    connection.execute("ALTER TABLE travel_requests_migrated RENAME TO travel_requests")
+
+
 def initialize(target: Path | str) -> None:
     with connect(target) as connection:
         connection.executescript(
@@ -557,6 +702,20 @@ def initialize(target: Path | str) -> None:
         # city intake existed have no city and must stay readable. A NULL here
         # means "country granularity", which the flight adapter handles by
         # falling back to the country's main gateway.
+        if "category" not in existing_columns("options"):
+            connection.execute("ALTER TABLE options ADD COLUMN category TEXT")
+        # `origin` was NOT NULL until hotel-only scope existed: a stay has no
+        # departure country. Postgres can relax the constraint in place;
+        # SQLite cannot, so the table is rebuilt with its rows copied across.
+        _allow_null_origin(connection)
+        # Which specialists the request asked for. NOT NULL with a default
+        # rather than nullable: a row written before selective dispatch existed
+        # ran every specialist, and `both` is exactly what that means. A NULL
+        # here would be indistinguishable from "nobody recorded it".
+        if "plan_scope" not in request_columns:
+            connection.execute(
+                "ALTER TABLE travel_requests ADD COLUMN plan_scope TEXT NOT NULL DEFAULT 'both'"
+            )
         for name in ("origin_city", "destination_city"):
             if name not in request_columns:
                 connection.execute(f"ALTER TABLE travel_requests ADD COLUMN {name} TEXT")
@@ -659,14 +818,14 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
         db.execute(
             """INSERT INTO travel_requests
                (id, user_id, origin, destination, origin_city, destination_city,
-                departure_date, return_date, travellers,
+                plan_scope, departure_date, return_date, travellers,
                 traveller_ages_json, traveller_genders_json, budget, currency, preferences_json,
                 traveller_accessibility_needs_json, accessibility_needs_json,
                 refinement_notes_json, risk_tolerance)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (request_id, user_id, request.origin, request.destination,
              getattr(request, "origin_city", None), getattr(request, "destination_city", None),
-             str(request.departure_date),
+             getattr(request, "plan_scope", "both"), str(request.departure_date),
              str(request.return_date), request.travellers, _json(request.traveller_ages),
              _json(request.traveller_genders), request.budget, request.currency,
              _json(request.preferences), _json(request.traveller_accessibility_needs),
@@ -691,11 +850,12 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
                 db.execute(
                     """INSERT INTO options
                        (finding_id, name, description, estimated_cost, currency, source_urls_json,
-                        assumptions_json, limitations_json, selection_factors_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        assumptions_json, limitations_json, selection_factors_json, category)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (finding_id, option.name, option.description, option.estimated_cost,
                      option.currency, _json(option.source_urls), _json(option.assumptions),
-                     _json(option.limitations), _json(option.selection_factors)),
+                     _json(option.limitations), _json(option.selection_factors),
+                     getattr(option, "category", None)),
                 )
         for message in messages:
             item = message.model_dump(mode="json") if hasattr(message, "model_dump") else message
@@ -1179,6 +1339,85 @@ def get_system_logs(path: Path | str, limit: int = 200) -> list[dict[str, Any]]:
             item["agent_response"] = json.loads(response_json) if response_json else None
             output.append(item)
         return output
+
+
+def seed_risk_reference_data(
+    path: Path | str,
+    standing_facts: Iterable[dict[str, Any]],
+    seasonal_windows: Iterable[dict[str, Any]],
+    dated_events: Iterable[dict[str, Any]],
+) -> None:
+    """Replace all Risk & Advisory reference rows with the given seed set.
+
+    A full replace, not an upsert: this data is curated wholesale by whoever
+    maintains `risk_advisory_agent`'s seed content, not edited row-by-row, so
+    "delete everything, insert the current set" is simpler and cannot leave a
+    stale row behind that the new seed no longer mentions.
+    """
+    with connect(path) as db:
+        db.execute("DELETE FROM risk_standing_facts")
+        db.execute("DELETE FROM risk_seasonal_windows")
+        db.execute("DELETE FROM risk_dated_events")
+        for fact in standing_facts:
+            db.execute(
+                """INSERT INTO risk_standing_facts
+                   (destination_slug, category, severity, applies_to, title, detail, mitigation)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (fact["destination_slug"], fact["category"], fact.get("severity"),
+                 fact.get("applies_to"), fact["title"], fact["detail"], fact.get("mitigation")),
+            )
+        for window in seasonal_windows:
+            db.execute(
+                """INSERT INTO risk_seasonal_windows
+                   (destination_slug, category, label, start_month, end_month, severity, detail, mitigation)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (window["destination_slug"], window.get("category", "seasonal_weather"),
+                 window["label"], window["start_month"], window["end_month"],
+                 window["severity"], window["detail"], window.get("mitigation")),
+            )
+        for event in dated_events:
+            db.execute(
+                """INSERT INTO risk_dated_events
+                   (destination_slug, category, name, start_date, end_date, impact, detail)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (event["destination_slug"], event["category"], event["name"],
+                 str(event["start_date"]), str(event["end_date"]),
+                 event.get("impact"), event.get("detail")),
+            )
+
+
+def get_risk_standing_facts(path: Path | str, destination_slug: str) -> list[dict[str, Any]]:
+    with connect(path) as db:
+        return [dict(row) for row in db.execute(
+            "SELECT * FROM risk_standing_facts WHERE destination_slug = ? ORDER BY category, id",
+            (destination_slug,),
+        ).fetchall()]
+
+
+def get_risk_seasonal_windows(path: Path | str, destination_slug: str) -> list[dict[str, Any]]:
+    with connect(path) as db:
+        return [dict(row) for row in db.execute(
+            "SELECT * FROM risk_seasonal_windows WHERE destination_slug = ? ORDER BY start_month",
+            (destination_slug,),
+        ).fetchall()]
+
+
+def get_risk_dated_events(
+    path: Path | str, destination_slug: str, start_date: str, end_date: str
+) -> list[dict[str, Any]]:
+    """Dated events whose own range overlaps `[start_date, end_date]`.
+
+    Standard interval-overlap test: two ranges overlap unless one ends before
+    the other starts. `start_date`/`end_date` are ISO strings, which compare
+    correctly as text in both SQLite and Postgres without a date cast.
+    """
+    with connect(path) as db:
+        return [dict(row) for row in db.execute(
+            """SELECT * FROM risk_dated_events
+               WHERE destination_slug = ? AND start_date <= ? AND end_date >= ?
+               ORDER BY start_date""",
+            (destination_slug, end_date, start_date),
+        ).fetchall()]
 
 
 @click.command("init-db")

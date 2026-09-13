@@ -5,12 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from flaskapp.travel_ai.graph import SPECIALISTS, build_travel_graph
+from dataclasses import asdict
+
+from flaskapp.travel_ai.dispatch import specialists_for
+from flaskapp.travel_ai.sections import plan_sections
+from flaskapp.travel_ai.graph import build_travel_graph
 from flaskapp.travel_ai.guardrails import LlmGuardrail
 from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.a2a import request_message
-from flaskapp.travel_ai.safeguards import assess_plan
-from flaskapp.travel_ai.schemas import PlanResponse, TravelRequest
+from flaskapp.travel_ai.safeguards import assess_plan, disclose_unconsulted
+from flaskapp.travel_ai.schemas import PlanResponse, PlanSection, TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.terminal import log_payload
 
@@ -78,6 +82,15 @@ class TravelPlanningService:
             LlmGuardrail.from_settings(self.guardrail_settings)
             if self.guardrail_settings else None
         )
+        # Select once and reuse for graph composition and message addressing.
+        # This preserves selective dispatch without allowing the graph and A2A
+        # envelopes to disagree about which specialists should run.
+        selected = specialists_for(request)
+        tracer.record("specialists_dispatched", "orchestrator_agent", {
+            "plan_scope": request.plan_scope,
+            "dispatched": list(selected),
+            "count": len(selected),
+        })
         graph_config = {
             "A2A_INTERNAL_ENABLED": bool(self.a2a_base_url),
             "A2A_BASE_URL": self.a2a_base_url or "",
@@ -85,7 +98,8 @@ class TravelPlanningService:
             "FLIGHT_AGENT_A2A_TIMEOUT_SECONDS": self.timeout,
         }
         graph = build_travel_graph(
-            llm, tracer, self.cancel_event, guardrail, config=graph_config
+            llm, tracer, self.cancel_event, guardrail,
+            config=graph_config, specialists=selected,
         )
         messages = [
             request_message(
@@ -95,7 +109,7 @@ class TravelPlanningService:
                 payload_type="TravelRequest",
                 payload=request,
             )
-            for name in SPECIALISTS
+            for name in selected
         ]
         result = graph.invoke({
             "request_id": request_id,
@@ -109,6 +123,10 @@ class TravelPlanningService:
         # evidence must not depend on generative compliance. Copy its vetted
         # URLs into the user-visible plan deterministically.
         merge_accessibility_sources(plan, findings)
+        # Stated, not left to be inferred from absence: a plan that never
+        # mentions flights reads the same whether none were found or none were
+        # sought, and only one of those is a reason to look elsewhere.
+        disclose_unconsulted(plan, selected)
         plan.safety = assess_plan(request, plan, findings)
         tracer.record("assurance_completed", "system", {
             "passed": plan.safety.passed,
@@ -118,6 +136,12 @@ class TravelPlanningService:
             request_id=request_id,
             plan=plan,
             agent_findings=findings,
+            # A projection of the findings above, not a second source of truth:
+            # the Option objects are the same objects the specialists returned,
+            # so a figure shown cannot drift from a figure found.
+            sections=[
+                PlanSection(**asdict(section)) for section in plan_sections(findings)
+            ],
             trace_url=f"/api/v1/traces/{request_id}",
         )
         log_payload(f"REQUEST {request_id} | FINAL RECOMMENDATION", response)
