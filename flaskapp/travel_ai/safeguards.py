@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
-import re
+from dataclasses import dataclass, replace
 from typing import Any
 
 from flaskapp.travel_ai.guardrails.fields import collect_free_text
-from flaskapp.travel_ai.guardrails.types import Decision, Verdict
+from flaskapp.travel_ai.guardrails.injection import PROMPT_INJECTION, PromptInjectionGuard
+from flaskapp.travel_ai.guardrails.normalization import normalize_for_screening
+from flaskapp.travel_ai.guardrails.pii import PiiRedactor, RedactionResult
+from flaskapp.travel_ai.guardrails.types import Category, Decision, Verdict
 from flaskapp.travel_ai.schemas import AgentFinding, SafetyAssessment, TravelPlan, TravelRequest
 
-PROMPT_INJECTION = re.compile(
-    r"(?i)(ignore (all|any|previous)|system prompt|developer message|reveal .*prompt|act as)"
-)
+# Re-exported, not defined here. The rules moved to `guardrails/injection.py`
+# when the set outgrew one regex, but three readers still reach for this name:
+# `validate_request` below, the admin prompt catalog (`api.py`, which renders
+# `.pattern`), and the eval harness's L1 attribution.
+_INJECTION_GUARD = PromptInjectionGuard()
+_DEFAULT_REDACTOR = PiiRedactor()
+
 SENSITIVE_KEYS = {
     "race", "ethnicity", "religion", "gender", "sexual_orientation",
     "disability_status", "political_affiliation",
@@ -68,7 +75,23 @@ def _apply_l2(texts: list[str], guardrail: Any) -> Verdict | None:
     return verdict
 
 
-def screen_prompt(text: Any, max_chars: int, guardrail: Any = None) -> str:
+@dataclass(frozen=True)
+class ScreenedPrompt:
+    """What survived screening, and the evidence of what each layer did.
+
+    `text` is the redacted prompt and is the only version anything downstream
+    should use — it is what gets persisted, what the extraction model sees, and
+    what the traveller reads back in the transcript.
+    """
+
+    text: str
+    pii: RedactionResult
+    verdict: Verdict | None = None
+
+
+def screen_prompt(
+    text: Any, max_chars: int, guardrail: Any = None, redactor: Any = None
+) -> ScreenedPrompt:
     """Screen free-text intake before it reaches the model.
 
     `validate_request` only sees preferences, accessibility needs and refinement
@@ -76,19 +99,62 @@ def screen_prompt(text: Any, max_chars: int, guardrail: Any = None) -> str:
     That makes the intake prompt a separate injection surface, so it is screened
     on its own and before any model call rather than after one.
 
-    L2 runs last and only on text the deterministic checks already cleared, so
-    an oversized or obviously-injected prompt is still rejected without an API
-    call. This surface needs L2 most: it is unconstrained prose, where the
-    four literal patterns in `PROMPT_INJECTION` have the least purchase.
+    Three layers, in this order: length and injection (free, local, and either
+    can reject outright), then PII redaction, then L2.
+
+    Redaction sits ahead of L2 deliberately. L2 is a network call to a model
+    provider, so redacting after it would mean the one component whose job is to
+    notice PII is also the component that transmits it. Injection detection runs
+    ahead of redaction only because it is free and its outcome is a rejection —
+    the two rule sets are disjoint, so that order is a cost choice, not a
+    correctness one.
+
+    Returns a `ScreenedPrompt`. Callers must use `.text`, never the argument
+    they passed in: the redacted string is the one safe to store, send and echo.
     """
     if not isinstance(text, str) or not text.strip():
         raise SafetyError("A travel request message is required")
     if len(text) > max_chars:
         raise SafetyError("Request is too large")
-    if PROMPT_INJECTION.search(text):
+    # Detection runs against a normalized copy — homoglyphs and zero-width
+    # characters folded to what they visually read as — so an attacker who
+    # types "іgnore previous instructions" with a Cyrillic і cannot dodge the
+    # regex that way. The original `text`, not the normalized copy, is what
+    # gets redacted and stored below: normalization is for detection only and
+    # must never change what a traveller's own free text actually says.
+    if _INJECTION_GUARD.detect(normalize_for_screening(text)):
         raise SafetyError("Instruction-like text was detected in the message")
-    _apply_l2([text], guardrail)
-    return text.strip()
+    # Redaction sits here, between the free local check and the network one, so
+    # no identifier the traveller typed ever reaches a model provider.
+    result = (redactor if redactor is not None else _DEFAULT_REDACTOR).redact(text.strip())
+    return ScreenedPrompt(
+        text=result.text, pii=result, verdict=_screen_redacted(result, guardrail)
+    )
+
+
+def _screen_redacted(result: RedactionResult, guardrail: Any) -> Verdict | None:
+    """L2 over redacted text, with one verdict the caller must not act on.
+
+    Observed live: a traveller wrote "I use my credit card <number> for
+    memberships". Redaction masked the number, and L2 then blocked the masked
+    sentence as `pii_exposure` at confidence 1.0 — reading the intent still
+    visible in the words around the placeholder, not any data, because the data
+    was already gone. The traveller was denied over information the system no
+    longer held, which is precisely what "redaction never blocks" exists to
+    prevent.
+
+    So a `pii_exposure` block is downgraded to FLAG — audited, not denied — but
+    ONLY when redaction actually fired on this text. That narrowness is what
+    makes it safe: if nothing was redacted, L2 is reporting a credential these
+    rules do not cover (an API key, say), that block is about live data, and it
+    stands. Every other category is untouched.
+    """
+    try:
+        return _apply_l2([result.text], guardrail)
+    except GuardrailBlocked as exc:
+        if not (result.redacted and exc.verdict.category is Category.PII_EXPOSURE):
+            raise
+        return replace(exc.verdict, decision=Decision.FLAG)
 
 
 def screen_answers(answers: Any) -> dict[str, Any]:
@@ -116,8 +182,10 @@ def validate_request(payload: dict[str, Any], max_chars: int) -> TravelRequest:
     request = TravelRequest.model_validate(payload)
     # `collect_free_text` covers the city names and per-traveller accessibility
     # needs too, which the old inline concatenation missed — see the note in
-    # `guardrails/fields.py`.
-    if any(PROMPT_INJECTION.search(value) for value in collect_free_text(
+    # `guardrails/fields.py`. Each value is normalized before matching, for the
+    # same reason as `screen_prompt` above — this only widens what the existing
+    # regex catches, it does not change what is validated or stored.
+    if any(PROMPT_INJECTION.search(normalize_for_screening(value)) for value in collect_free_text(
         request.model_dump(mode="json")
     )):
         raise SafetyError("Instruction-like text was detected in request fields")

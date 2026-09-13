@@ -50,6 +50,33 @@ class Config:
     LLM_API_KEY = os.getenv("LLM_API_KEY")
     LLM_BASE_URL = os.getenv("LLM_BASE_URL")
     AI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "180"))
+    # Official A2A 1.x specialist endpoints. The Flask application keeps its
+    # browser API; specialists are exposed by a small ASGI sidecar so standard
+    # A2A clients can discover and invoke them independently.
+    A2A_BASE_URL = os.getenv("A2A_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
+    A2A_HOST = os.getenv("A2A_HOST", "127.0.0.1")
+    A2A_PORT = int(os.getenv("A2A_PORT", "5000"))
+    # Which agent answers at `/.well-known/agent-card.json`. The orchestrator is
+    # the sensible front door for a caller who wants a trip planned; point this
+    # at `flight_agent` to put that agent alone in front of a conformance run.
+    A2A_ROOT_AGENT = os.getenv("A2A_ROOT_AGENT", "orchestrator_agent")
+    # Whether an A2A caller may name the request id its work is recorded under.
+    # Safe only when the endpoint is not reachable by strangers, because that id
+    # is a write key into an existing audit trail. Enable it together with the
+    # in-house orchestrator transport below.
+    A2A_TRUST_CALLER_REQUEST_ID = os.getenv(
+        "A2A_TRUST_CALLER_REQUEST_ID", "false"
+    ).lower() == "true"
+
+    # How the orchestrator reaches the flight agent. `inprocess` (default) calls
+    # the node directly; `a2a` routes it over the real Agent2Agent protocol.
+    # Resolved once when the graph is built, never per request — the same
+    # one-variable-revert shape as FLIGHT_AGENT_MODE.
+    FLIGHT_AGENT_TRANSPORT = os.getenv("FLIGHT_AGENT_TRANSPORT", "inprocess").strip().lower()
+    FLIGHT_AGENT_A2A_URL = os.getenv("FLIGHT_AGENT_A2A_URL", "")
+    FLIGHT_AGENT_A2A_TIMEOUT_SECONDS = float(
+        os.getenv("FLIGHT_AGENT_A2A_TIMEOUT_SECONDS", "60")
+    )
     # L2 guardrails: the LLM classifier that screens traveller free text and
     # generated plans for what the regex layer cannot see (obfuscated injection,
     # role-play jailbreaks, out-of-scope requests). Set enabled=false to develop
@@ -98,6 +125,13 @@ class Config:
     # flags and proceeds, relying on L0/L1 alone. Fail-open is a deliberate,
     # visible choice, never a silent fallback.
     GUARDRAIL_FAIL_MODE = os.getenv("GUARDRAIL_FAIL_MODE", "closed").strip().lower()
+    # L1 PII redaction on the intake prompt, ahead of the L2 call. Unlike every
+    # other guardrail this one never blocks: it removes the identifier and lets
+    # planning continue, because a traveller who volunteers a phone number is
+    # not an attacker and the trip does not need it. Off is a development
+    # convenience only — with it off, identifiers a traveller types reach the
+    # classifier, the extraction model, and the intake_messages table.
+    PII_REDACTION_ENABLED = os.getenv("PII_REDACTION_ENABLED", "true").lower() == "true"
     # Where Flight Agent's inventory comes from: "seed" (the project's static
     # dataset, the default and what every golden scenario is pinned to) or
     # "duffel" (live supplier search). Selecting duffel without a token falls

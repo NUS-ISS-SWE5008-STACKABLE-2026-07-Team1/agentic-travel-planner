@@ -73,11 +73,13 @@ def to_hotel_trip_context(travel_request, *, arrival_airport: str | None = None)
     dest_country = travel_request.destination
     dest_city = getattr(travel_request, "destination_city", None)
     dest_city_slug = None
+    dest_airports: list[str] = []
 
     if dest_city:
         city = find_city(dest_country, dest_city)
         if city:
             dest_city_slug = city.slug
+            dest_airports = list(city.airports)
         else:
             unresolved.append(
                 f"'{dest_city}' is not a recognised city in {dest_country}; "
@@ -90,6 +92,7 @@ def to_hotel_trip_context(travel_request, *, arrival_airport: str | None = None)
         fallback = primary_city(dest_country)
         if fallback:
             dest_city_slug = fallback.slug
+            dest_airports = list(fallback.airports)
             unresolved.append(
                 f"No destination city was given for {dest_country}; assumed "
                 f"{fallback.name} ({'/'.join(fallback.airports)}) for hotel search."
@@ -101,12 +104,17 @@ def to_hotel_trip_context(travel_request, *, arrival_airport: str | None = None)
         need for need in travel_request.accessibility_needs
         if need.strip()
     ]
+    for traveller_needs in travel_request.traveller_accessibility_needs:
+        for need in traveller_needs:
+            need = need.strip()
+            if need and need not in accessibility_needs:
+                accessibility_needs.append(need)
 
     context = HotelTripContext(
         dest_country=dest_country,
         dest_city=dest_city,
         dest_city_slug=dest_city_slug,
-        dest_airports=[],
+        dest_airports=dest_airports,
         arrival_airport=arrival_airport,
         check_in_date=travel_request.departure_date.isoformat(),
         check_out_date=travel_request.return_date.isoformat(),

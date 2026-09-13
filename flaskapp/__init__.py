@@ -16,9 +16,21 @@ def create_app(config_object: type[Config] = Config) -> Flask:
     app.config.from_object(config_object)
     csrf.init_app(app)
 
-    from flaskapp.database import init_app as init_database
+    from flaskapp.database import init_app as init_database, seed_risk_reference_data
 
     init_database(app)
+
+    # Risk & Advisory's reference data is declarative, not user-writable, so
+    # re-seeding it on every startup keeps the database an exact mirror of
+    # seed_data.py rather than something that can drift from it. Deliberately
+    # not inside database.py itself: that module knows how to persist data,
+    # not which agent's data belongs in it — that decision lives here, where
+    # the app is already wiring its pieces together.
+    from flaskapp.travel_ai.agents.risk_advisory_agent.seed_data import (
+        DATED_EVENTS, SEASONAL_WINDOWS, STANDING_FACTS,
+    )
+
+    seed_risk_reference_data(app.config["DATABASE"], STANDING_FACTS, SEASONAL_WINDOWS, DATED_EVENTS)
 
     from flaskapp.routes import pages_bp
     from flaskapp.travel_ai.api import travel_api_bp

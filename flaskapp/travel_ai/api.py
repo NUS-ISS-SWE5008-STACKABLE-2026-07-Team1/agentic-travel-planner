@@ -17,6 +17,7 @@ from flaskapp.travel_ai.safeguards import (
 from flaskapp.travel_ai.guardrails import (
     GUARDRAIL_PROMPT_VERSION, Category, LlmGuardrail, build_guardrail, guardrail_settings,
 )
+from flaskapp.travel_ai.guardrails.pii import PiiRedactor
 from flaskapp.travel_ai.jobs import cancel_job, get_job, submit_plan
 from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.tracing import AuditTracer
@@ -122,10 +123,16 @@ def create_travel_intent():
         return jsonify(error=configuration_error), 503
     payload = request.get_json(silent=True) or {}
     try:
-        prompt = screen_prompt(
+        screened = screen_prompt(
             payload.get("prompt"), current_app.config["MAX_INPUT_CHARS"],
             build_guardrail(current_app.config),
+            PiiRedactor.from_config(current_app.config),
         )
+        # From here on the raw prompt is out of scope by construction. The
+        # redacted string is what gets persisted, what the model sees, and what
+        # the traveller reads back; these are the two lines that make the
+        # redaction layer more than detection.
+        prompt = screened.text
         current = ExtractedIntent.model_validate(payload.get("extracted") or {})
         is_first_turn = not payload.get("request_id")
         intake_request_id = str(payload.get("request_id") or uuid4())
@@ -165,6 +172,12 @@ def create_travel_intent():
     )
     if is_first_turn:
         tracer.record("user_request_submitted", "system", {"stage": "intake"})
+    if screened.pii.redacted:
+        # Rule names and counts only. This event is served by
+        # `GET /api/v1/traces/<id>` and rendered in the admin dashboard, so
+        # recording *what* was redacted would put the identifier straight back
+        # into the audit log the redaction exists to keep it out of.
+        tracer.record("pii_redacted", "orchestrator_agent", screened.pii.as_audit_details())
     tracer.record(
         "orchestrator_validation_started", "orchestrator_agent",
         {"turn": "initial" if is_first_turn else "clarification"},
@@ -266,6 +279,7 @@ def _prompt_catalog():
     from flaskapp.travel_ai.agents.hotel_transport_agent.prompt import INSTRUCTION as hotel
     from flaskapp.travel_ai.agents.orchestrator_agent.prompt import INSTRUCTION as orchestrator
     from flaskapp.travel_ai.agents.risk_advisory_agent.prompt import INSTRUCTION as risk
+    from flaskapp.travel_ai.guardrails.pii import DEFAULT_RULES
     from flaskapp.travel_ai.safeguards import PROMPT_INJECTION, SENSITIVE_KEYS
     return [
         {"agent": "Flight agent", "instruction": flight},
@@ -276,6 +290,14 @@ def _prompt_catalog():
         {"agent": "Shared deterministic guardrails", "instruction":
          f"Reject oversized input, sensitive ranking fields ({', '.join(sorted(SENSITIVE_KEYS))}), "
          f"and prompt-injection patterns matching: {PROMPT_INJECTION.pattern}"},
+        {"agent": "PII redaction (L1)", "instruction":
+         "Runs on the intake prompt after the injection check and BEFORE the L2 "
+         "classifier, so no identifier a traveller types reaches a model provider. "
+         "The redacted text is what is stored, sent and echoed back. This layer "
+         "never denies a request \u2014 it removes the identifier and planning "
+         "continues. Rules, in the order applied: "
+         + ", ".join(f"{rule.name} ({rule.strategy})" for rule in DEFAULT_RULES)
+         + f". Enabled: {current_app.config.get('PII_REDACTION_ENABLED', True)}."},
         {"agent": "LLM guardrail classifier (L2)", "instruction":
          f"Prompt version {GUARDRAIL_PROMPT_VERSION}. Runs after the deterministic gates on "
          f"traveller free text and on the synthesized plan. Blocks at confidence >= "

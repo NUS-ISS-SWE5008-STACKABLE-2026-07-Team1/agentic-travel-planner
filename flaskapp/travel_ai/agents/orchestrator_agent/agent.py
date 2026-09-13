@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from flaskapp.travel_ai.agents.base import compact
 from flaskapp.travel_ai.agents.orchestrator_agent.prompt import INSTRUCTION
 from flaskapp.travel_ai.agents.shared import SYSTEM_POLICY
+from flaskapp.travel_ai.guardrails.canary import embed_canary, generate_canary, leaked
 from flaskapp.travel_ai.guardrails.types import Decision
 from flaskapp.travel_ai.schemas import TravelPlan
 from flaskapp.travel_ai.terminal import log_payload
@@ -71,8 +72,13 @@ def create_node(llm, tracer, guardrail=None):
         tracer.record("agent_started", NAME, {"finding_count": len(findings)})
         if tracer.database_path:
             save_agent_run(tracer.database_path, state["request_id"], NAME, "processing")
+        # A fresh secret per request, embedded in the system prompt and never
+        # anywhere else. Its reappearance in generated text is not a semantic
+        # guess the way L2's `system_prompt_leak` category is — it is proof,
+        # because nothing else in the system could have produced that string.
+        canary_token = generate_canary()
         messages = [
-            SystemMessage(content=SYSTEM_POLICY + "\n" + INSTRUCTION),
+            SystemMessage(content=embed_canary(SYSTEM_POLICY + "\n" + INSTRUCTION, canary_token)),
             HumanMessage(content=compact({
                 "request": state["request"],
                 "specialist_findings": [item.model_dump() for item in findings],
@@ -86,12 +92,20 @@ def create_node(llm, tracer, guardrail=None):
             plan = None
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 candidate = structured_llm.invoke(messages, config={"callbacks": [usage]})
-                verdict = guardrail.screen_output(plan_text(candidate)) if guardrail else None
+                text = plan_text(candidate)
+                verdict = guardrail.screen_output(text) if guardrail else None
                 if verdict is not None:
                     tracer.record("guardrail_llm_verdict", NAME, {
                         "gate": "output", "attempt": attempt, **verdict.as_audit_details(),
                     })
-                if verdict is None or verdict.decision is not Decision.BLOCK:
+                canary_leaked = leaked(text, canary_token)
+                if canary_leaked:
+                    # No token value here, deliberately — same reasoning as
+                    # every other audit detail in this codebase: the trace is
+                    # served back to the traveller via the admin dashboard and
+                    # must never carry the thing a leak is about.
+                    tracer.record("guardrail_canary_leak_detected", NAME, {"attempt": attempt})
+                if (verdict is None or verdict.decision is not Decision.BLOCK) and not canary_leaked:
                     plan = candidate
                     break
             if plan is None:
