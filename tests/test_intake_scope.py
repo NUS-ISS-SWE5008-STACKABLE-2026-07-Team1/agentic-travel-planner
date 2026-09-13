@@ -158,3 +158,41 @@ def test_going_back_restores_the_scope_and_reapplies_it():
     restore = javascript[javascript.index("const restoreStoredTrip"):]
     body = restore[:restore.index("\n  };")]
     assert "applyScope()" in body, "restore must re-apply the scope it just set"
+
+
+# --- the scope choice as option buttons rather than a dropdown ---------------
+
+
+def test_the_form_offers_scope_as_option_buttons():
+    from pathlib import Path
+
+    html = Path("flaskapp/templates/main.html").read_text(encoding="utf-8")
+    assert html.count('type="radio"') >= 3
+    assert 'name="plan_scope"' in html
+    assert '<select class="form-select" id="plan_scope"' not in html
+
+
+def test_restoring_a_trip_checks_the_right_option_button():
+    """`setValue` assigns `.value`, which on a radio sets its value attribute
+    rather than selecting it — the group would stay on its default."""
+    from pathlib import Path
+
+    javascript = Path("flaskapp/static/js/app.js").read_text(encoding="utf-8")
+    assert 'type === "radio"' in javascript
+
+
+def test_applying_scope_reads_the_checked_option_button():
+    from pathlib import Path
+
+    javascript = Path("flaskapp/static/js/app.js").read_text(encoding="utf-8")
+    assert "[name='plan_scope']:checked" in javascript
+
+
+def test_the_card_renders_scope_as_option_buttons_and_reads_only_the_checked_one():
+    """Every created control carries data-key, and the collector reads `.value`
+    from each — so without a guard all three radios answer and the last wins."""
+    from pathlib import Path
+
+    javascript = Path("flaskapp/static/js/intake.js").read_text(encoding="utf-8")
+    assert 'field.input === "scope"' in javascript
+    assert 'input.type === "radio" && !input.checked' in javascript
