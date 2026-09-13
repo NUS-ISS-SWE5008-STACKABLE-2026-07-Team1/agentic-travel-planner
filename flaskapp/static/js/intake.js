@@ -105,12 +105,42 @@ if (intentForm) {
     wrapper.append(label);
 
     let input;
-    if (field.input === "country" || field.input === "gender" || field.input === "scope") {
+    if (field.input === "scope") {
+      // Three mutually exclusive choices read better as buttons than as a
+      // dropdown: all the options are visible without opening anything.
+      const group = document.createElement("div");
+      group.className = "btn-group flex-wrap";
+      group.setAttribute("role", "group");
+      scopes.forEach(([value, text], position) => {
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.className = "btn-check";
+        radio.name = id;
+        radio.id = `${id}-${value}`;
+        radio.value = value;
+        radio.checked = position === 0;
+        radio.dataset.key = field.name;
+        const label = document.createElement("label");
+        label.className = "btn btn-outline-primary";
+        label.setAttribute("for", radio.id);
+        label.textContent = text;
+        group.append(radio, label);
+      });
+      wrapper.append(group);
+      if (field.hint) {
+        const scopeHint = document.createElement("div");
+        scopeHint.className = "form-text";
+        scopeHint.textContent = field.hint;
+        wrapper.append(scopeHint);
+      }
+      return wrapper;
+    }
+    if (field.input === "country" || field.input === "gender") {
       input = document.createElement("select");
       input.className = "form-select";
       const options = field.input === "country"
         ? countries.map((country) => [country, country])
-        : field.input === "scope" ? scopes : genders;
+        : genders;
       const blank = document.createElement("option");
       blank.value = "";
       blank.textContent = field.input === "country" ? "Select a country" : "Select";
@@ -183,6 +213,9 @@ if (intentForm) {
       for (const input of card.querySelectorAll("[data-key]")) {
         /* Presence is what marks a field answered. Accessibility needs are sent
            even when blank, which is how "no needs" reaches the server. */
+        /* Every control carries data-key, so an unchecked radio would answer
+           too and the last one in the group would win. */
+        if (input.type === "radio" && !input.checked) continue;
         if (input.value !== "" || input.dataset.key.startsWith("traveller_accessibility_needs")) {
           answers[input.dataset.key] = input.value;
         }
