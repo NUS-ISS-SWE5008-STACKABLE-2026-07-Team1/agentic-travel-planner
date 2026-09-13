@@ -12,6 +12,11 @@ combined with a month. "My partner" gives travellers=2 but tells you nothing
 about anyone's age or gender. A destination does not imply an origin, and an
 origin is never assumed from context.
 
+Record `plan_scope` only when the traveller says what they want planned: "book
+me a hotel" is `hotel`, "just find flights" is `flights`, "flights and a hotel"
+is `both`. A destination alone tells you nothing about scope. Leave it null when
+they did not say, and the application asks.
+
 `destination` is the COUNTRY; `destination_city` is the city within it. Put a
 city the traveller named into `destination_city` and leave `destination` null
 unless they actually named the country. "Tokyo" gives destination_city="Tokyo"

@@ -20,7 +20,11 @@ class TravelRequest(BaseModel):
     # and Risk & Advisory reasons at country granularity (visas, advisories).
     # The city fields are additive so every request predating city intake —
     # stored rows, golden scenarios, the bias audit — stays valid unchanged.
-    origin: str = Field(min_length=2, max_length=100)
+    # Optional ONLY for a hotel-only request, which is a stay rather than a
+    # journey: nobody flies, and Risk & Advisory — the other reader of this
+    # field, for visa and entry rules — does not run for that scope. Every
+    # other scope still requires it; see `origin_is_required_unless_hotel_only`.
+    origin: str | None = Field(default=None, min_length=2, max_length=100)
     destination: str = Field(min_length=2, max_length=100)
     # City names as displayed in `flaskapp/places.py`, which the form posts
     # alongside the country. Left unvalidated against that dataset on purpose:
@@ -29,6 +33,12 @@ class TravelRequest(BaseModel):
     # around rather than an exception it has to catch.
     origin_city: str | None = Field(default=None, min_length=2, max_length=100)
     destination_city: str | None = Field(default=None, min_length=2, max_length=100)
+    # Which specialists this trip needs. Defaulted, so every stored row, golden
+    # scenario and caller written before selective dispatch stays valid — the
+    # same additive discipline the city fields used. `both` is the superset, so
+    # an absent value runs an agent the traveller may not have needed rather
+    # than silently dropping one they did.
+    plan_scope: Literal["both", "flights", "hotel"] = "both"
     departure_date: date
     return_date: date
     travellers: int = Field(default=1, ge=1, le=20)
@@ -43,6 +53,19 @@ class TravelRequest(BaseModel):
     accessibility_needs: list[str] = Field(default_factory=list, max_length=30)
     refinement_notes: list[str] = Field(default_factory=list, max_length=10)
     risk_tolerance: Literal["low", "medium", "high"] = "medium"
+
+    @model_validator(mode="after")
+    def origin_is_required_unless_hotel_only(self) -> "TravelRequest":
+        """A journey needs a departure country; a hotel stay does not.
+
+        Enforced here rather than by making the field required, because the
+        requirement genuinely depends on another field. A caller that omits
+        `origin` on a flight-bearing scope gets a validation error at L0, not a
+        plan built around a hole.
+        """
+        if self.plan_scope != "hotel" and not self.origin:
+            raise ValueError("origin is required unless the request is hotel-only")
+        return self
 
     @model_validator(mode="after")
     def dates_are_ordered(self) -> "TravelRequest":
@@ -62,6 +85,13 @@ class TravelRequest(BaseModel):
 class Option(BaseModel):
     """A transparent option proposed by a specialist agent."""
 
+    # What kind of thing this is, asserted by the builder that made it rather
+    # than inferred from its prose. Without it a hotel and an airport transfer
+    # are indistinguishable in `finding.options` — both are just a name and a
+    # description — and rendering them separately would mean parsing the
+    # description, a format nothing enforces. Defaulted to None so every stored
+    # row and A2A artifact written before this field stays valid.
+    category: Literal["flight", "hotel", "transport", "accessibility", "advisory"] | None = None
     name: str
     description: str
     estimated_cost: float | None = None
@@ -114,11 +144,25 @@ class TravelPlan(BaseModel):
     safety: SafetyAssessment = Field(default_factory=pending_safety_assessment)
 
 
+class PlanSection(BaseModel):
+    """One specialist's contribution to the plan, as a traveller reads it."""
+
+    title: str
+    agent: str
+    summary: str
+    options: list[Option] = Field(default_factory=list)
+
+
 class PlanResponse(BaseModel):
     request_id: str
     status: Literal["completed"] = "completed"
     plan: TravelPlan
     agent_findings: list[AgentFinding]
+    # Derived from `agent_findings` at response time and never persisted: the
+    # findings themselves are already stored, and a second copy could disagree
+    # with the first. Defaulted so an older caller constructing a PlanResponse
+    # by hand stays valid.
+    sections: list[PlanSection] = Field(default_factory=list)
     trace_url: str
 
 

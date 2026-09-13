@@ -191,6 +191,7 @@ def _candidate_to_option(candidate: FlightCandidate, currency: str, assumption: 
         factors.append(f"Estimated seat selection fees: {candidate.seat_fee_estimate:.2f} {currency}")
 
     return Option(
+        category="flight",
         name=f"{candidate.flight_id} ({candidate.direction.title()})",
         description=(
             f"{candidate.direction.title()} to {candidate.dest_airport}, departing "
