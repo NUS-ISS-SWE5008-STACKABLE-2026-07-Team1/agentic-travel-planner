@@ -78,16 +78,16 @@ class TravelPlanningService:
             LlmGuardrail.from_settings(self.guardrail_settings)
             if self.guardrail_settings else None
         )
-        specialist_client = None
-        if self.a2a_base_url:
-            from flaskapp.travel_ai.a2a_client import A2ASpecialistClient
-            specialist_client = A2ASpecialistClient(
-                self.a2a_base_url, timeout=self.timeout
-            )
+        graph_config = {
+            "A2A_INTERNAL_ENABLED": bool(self.a2a_base_url),
+            "A2A_BASE_URL": self.a2a_base_url or "",
+            "AI_REQUEST_TIMEOUT_SECONDS": self.timeout,
+            "FLIGHT_AGENT_A2A_TIMEOUT_SECONDS": self.timeout,
+        }
         graph = build_travel_graph(
-            llm, tracer, self.cancel_event, guardrail, specialist_client
+            llm, tracer, self.cancel_event, guardrail, config=graph_config
         )
-        messages = [] if specialist_client else [
+        messages = [
             request_message(
                 correlation_id=correlation_id,
                 sender="orchestrator_agent",

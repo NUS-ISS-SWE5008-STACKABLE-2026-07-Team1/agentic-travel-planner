@@ -731,6 +731,33 @@ def create_planning_job(path: Path | str, request_id: str, user_id: int | None,
         )
 
 
+def ensure_planning_job(path: Path | str, request_id: str, user_id: int | None,
+                        request_payload: Any) -> bool:
+    """Create the job row only if it is not already there. Returns True if created.
+
+    Separate from `create_planning_job` rather than a flag on it, because the two
+    want opposite things on conflict. `create_planning_job` deliberately upserts
+    back to 'queued' so `jobs.submit_plan` can resubmit a request; doing that here
+    would reset a job that is already running and make `/admin` report a live plan
+    as queued.
+
+    This exists for the A2A entry point, where the caller is a peer agent rather
+    than the website: `agent_runs.request_id` references `planning_jobs`, so
+    without a row here every `save_agent_run` on that path fails the foreign key
+    and the whole request dies as an opaque error. It is idempotent because the
+    parent request may already own a job — the orchestrator delegating to a
+    specialist is the normal case, not an edge one.
+    """
+    with connect(path) as db:
+        cursor = db.execute(
+            """INSERT INTO planning_jobs (request_id, user_id, status, request_json)
+               VALUES (?, ?, 'queued', ?)
+               ON CONFLICT(request_id) DO NOTHING""",
+            (request_id, user_id, _json(request_payload)),
+        )
+        return bool(getattr(cursor, "rowcount", 0))
+
+
 def save_intake_request(path: Path | str, request_id: str, user_id: int,
                         request_payload: Any) -> bool:
     """Create or update the durable row for a conversational user request."""
