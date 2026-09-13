@@ -68,6 +68,7 @@ def _run_plan(request_id: str, request: TravelRequest, settings: dict,
             cancel_event=_cancel_events[request_id],
             guardrail_settings=settings.get("guardrail"),
             input_guardrail=settings.get("input_guardrail"),
+            a2a_base_url=settings.get("a2a_base_url"),
         )
         response = service.create_plan(request, request_id=request_id)
         with _lock:

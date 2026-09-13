@@ -33,7 +33,8 @@ class TravelPlanningService:
                  base_url: str | None = None,
                  database_path: Path | str | None = None, user_id: int | None = None,
                  cancel_event=None, guardrail_settings: dict | None = None,
-                 input_guardrail: dict | None = None):
+                 input_guardrail: dict | None = None,
+                 a2a_base_url: str | None = None):
         self.api_key = api_key
         self.provider = provider
         self.endpoint = endpoint
@@ -52,6 +53,7 @@ class TravelPlanningService:
         # about which model and threshold are in force.
         self.guardrail_settings = guardrail_settings
         self.input_guardrail = input_guardrail
+        self.a2a_base_url = a2a_base_url.rstrip("/") if a2a_base_url else None
 
     def create_plan(self, request: TravelRequest, request_id: str | None = None) -> PlanResponse:
         correlation_id = uuid4() if request_id is None else UUID(request_id)
@@ -76,8 +78,16 @@ class TravelPlanningService:
             LlmGuardrail.from_settings(self.guardrail_settings)
             if self.guardrail_settings else None
         )
-        graph = build_travel_graph(llm, tracer, self.cancel_event, guardrail)
-        messages = [
+        specialist_client = None
+        if self.a2a_base_url:
+            from flaskapp.travel_ai.a2a_client import A2ASpecialistClient
+            specialist_client = A2ASpecialistClient(
+                self.a2a_base_url, timeout=self.timeout
+            )
+        graph = build_travel_graph(
+            llm, tracer, self.cancel_event, guardrail, specialist_client
+        )
+        messages = [] if specialist_client else [
             request_message(
                 correlation_id=correlation_id,
                 sender="orchestrator_agent",

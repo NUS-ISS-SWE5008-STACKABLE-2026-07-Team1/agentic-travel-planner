@@ -13,26 +13,54 @@ from flaskapp.travel_ai.a2a_standard import build_a2a_application
 from flaskapp.travel_ai.agents import SPECIALIST_NODE_FACTORIES
 from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.tracing import AuditTracer
+from flaskapp.travel_ai.guardrails import LlmGuardrail, guardrail_settings
+from flaskapp.travel_ai.safeguards import screen_request_l2, validate_request
+from flaskapp.travel_ai.service import TravelPlanningService
 
 
-def create_application(flask_app=None):
+def create_application(flask_app=None, *, node_factories=None, orchestrator_runner=None):
     """Construct the ASGI sidecar using the same configuration as Flask."""
     flask_app = flask_app or create_app()
-    llm_settings, configuration_error = get_llm_settings(flask_app.config)
-    if configuration_error or llm_settings is None:
-        raise RuntimeError(configuration_error or "LLM configuration is unavailable")
-    llm = build_llm(**llm_settings)
-    trace_dir = Path(flask_app.config["TRACE_DIR"])
-    database_path = flask_app.config["DATABASE"]
+    if node_factories is None:
+        llm_settings, configuration_error = get_llm_settings(flask_app.config)
+        if configuration_error or llm_settings is None:
+            raise RuntimeError(configuration_error or "LLM configuration is unavailable")
+        llm = build_llm(**llm_settings)
+        trace_dir = Path(flask_app.config["TRACE_DIR"])
+        database_path = flask_app.config["DATABASE"]
 
-    node_factories = {}
-    for name, create_node in SPECIALIST_NODE_FACTORIES.items():
-        def node_factory(request_id, create_node=create_node):
-            tracer = AuditTracer(trace_dir, request_id, database_path)
-            return create_node(llm, tracer)
-        node_factories[name] = node_factory
+        node_factories = {}
+        for name, create_node in SPECIALIST_NODE_FACTORIES.items():
+            def node_factory(request_id, create_node=create_node):
+                tracer = AuditTracer(trace_dir, request_id, database_path)
+                return create_node(llm, tracer)
+            node_factories[name] = node_factory
 
-    return build_a2a_application(node_factories, flask_app.config["A2A_BASE_URL"])
+        if orchestrator_runner is None:
+            def orchestrator_runner(request, request_id):
+                validated = validate_request(
+                    request.model_dump(mode="json"),
+                    flask_app.config["MAX_INPUT_CHARS"],
+                )
+                settings = guardrail_settings(flask_app.config)
+                verdict = screen_request_l2(
+                    validated, LlmGuardrail.from_settings(settings)
+                )
+                service = TravelPlanningService(
+                    **llm_settings,
+                    trace_dir=trace_dir,
+                    database_path=database_path,
+                    guardrail_settings=settings,
+                    input_guardrail=verdict.as_audit_details() if verdict else None,
+                    a2a_base_url=flask_app.config["A2A_BASE_URL"],
+                )
+                return service.create_plan(validated, request_id=request_id)
+
+    return build_a2a_application(
+        node_factories,
+        flask_app.config["A2A_BASE_URL"],
+        orchestrator_runner=orchestrator_runner,
+    )
 
 
 def main() -> None:
