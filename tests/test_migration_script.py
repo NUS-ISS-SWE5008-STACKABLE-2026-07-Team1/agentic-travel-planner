@@ -51,6 +51,7 @@ def test_identity_tables_are_the_ones_with_generated_keys():
     assert IDENTITY_TABLES == (
         "users", "agent_findings", "options", "audit_events",
         "intake_messages", "agent_runs", "plan_feedback",
+        "risk_standing_facts", "risk_seasonal_windows", "risk_dated_events",
     )
 
 
@@ -97,6 +98,9 @@ def test_table_primary_keys_do_not_assume_id_everywhere():
         "intake_messages": "id",
         "agent_runs": "id",
         "plan_feedback": "id",
+        "risk_standing_facts": "id",
+        "risk_seasonal_windows": "id",
+        "risk_dated_events": "id",
     }
 
 
