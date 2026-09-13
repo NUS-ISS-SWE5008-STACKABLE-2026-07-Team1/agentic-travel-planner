@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Architecture and guardrail flow for the Atlas Travel Planner Accessibility Agent.">
+  <title>Accessibility Agent — Processing and Guardrail Flow</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page: #f4f7fb;
+      --surface: #ffffff;
+      --surface-soft: #edf3fa;
+      --ink: #142033;
+      --muted: #5c6b80;
+      --line: #c8d4e3;
+      --blue: #075ea8;
+      --blue-soft: #e3f1ff;
+      --green: #187348;
+      --green-soft: #e3f7ed;
+      --amber: #8a5600;
+      --amber-soft: #fff1d5;
+      --red: #a12b2b;
+      --red-soft: #fde8e8;
+      --purple: #6842a6;
+      --purple-soft: #f0e9fc;
+      --shadow: 0 12px 32px rgba(27, 52, 82, 0.10);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--ink);
+      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--blue); }
+    a:focus-visible, summary:focus-visible { outline: 3px solid var(--amber); outline-offset: 3px; }
+    .skip-link {
+      position: absolute; left: 1rem; top: -5rem; z-index: 10;
+      padding: .75rem 1rem; background: var(--surface); color: var(--ink);
+    }
+    .skip-link:focus { top: 1rem; }
+    header {
+      background: linear-gradient(125deg, #073b66, #075ea8 62%, #0c7b72);
+      color: #fff;
+      padding: clamp(2rem, 7vw, 5rem) max(1.25rem, calc((100% - 1180px) / 2));
+    }
+    header p { max-width: 780px; margin: .8rem 0 0; font-size: 1.1rem; }
+    .eyebrow { margin: 0; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; font-size: .78rem; }
+    h1 { max-width: 880px; margin: .4rem 0 0; font-size: clamp(2.1rem, 5vw, 4.25rem); line-height: 1.05; }
+    h2 { margin: 0 0 .65rem; font-size: clamp(1.55rem, 3vw, 2.2rem); line-height: 1.2; }
+    h3 { margin: 0 0 .45rem; font-size: 1.05rem; }
+    main { width: min(1180px, calc(100% - 2rem)); margin: 0 auto; padding: 2.2rem 0 4rem; }
+    section { margin: 0 0 3rem; }
+    .lede { color: var(--muted); max-width: 820px; margin: 0 0 1.4rem; }
+    .legend { display: flex; flex-wrap: wrap; gap: .8rem 1.2rem; margin: 1rem 0 1.5rem; }
+    .legend span { display: inline-flex; align-items: center; gap: .45rem; }
+    .dot { width: .8rem; height: .8rem; border-radius: 50%; background: var(--blue); }
+    .dot.guard { background: var(--amber); }
+    .dot.external { background: var(--purple); }
+    .dot.output { background: var(--green); }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(150px, 1fr));
+      gap: 2.1rem 1.2rem;
+      align-items: stretch;
+    }
+    .node {
+      position: relative;
+      min-height: 150px;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--blue);
+      border-radius: 12px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .node.guard { border-top-color: var(--amber); background: var(--amber-soft); }
+    .node.external { border-top-color: var(--purple); background: var(--purple-soft); }
+    .node.output { border-top-color: var(--green); background: var(--green-soft); }
+    .node::after {
+      content: "→";
+      position: absolute; right: -1.65rem; top: 50%; transform: translateY(-50%);
+      color: var(--muted); font-size: 1.7rem; font-weight: 700;
+    }
+    .node:nth-child(5)::after, .node:last-child::after { content: ""; }
+    .node:nth-child(6) { grid-column: 5; }
+    .node:nth-child(7) { grid-column: 4; }
+    .node:nth-child(8) { grid-column: 3; }
+    .node:nth-child(9) { grid-column: 2; }
+    .node:nth-child(10) { grid-column: 1; }
+    .node:nth-child(n+6)::after { right: auto; left: -1.65rem; content: "←"; }
+    .node:last-child::after { content: ""; }
+    .step {
+      display: inline-grid; place-items: center; width: 1.8rem; height: 1.8rem;
+      margin-bottom: .7rem; border-radius: 50%; background: var(--ink); color: var(--surface);
+      font-weight: 700; font-size: .82rem;
+    }
+    .node p { margin: 0; color: var(--muted); font-size: .92rem; }
+
+    .a2a-band {
+      margin: 1.7rem 0; padding: 1rem 1.2rem; border-left: 5px solid var(--blue);
+      background: var(--blue-soft); color: var(--ink);
+    }
+    .agents { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+    .agent {
+      padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+    }
+    .agent.accessibility { border: 2px solid var(--green); background: var(--green-soft); }
+    .agent p { margin: 0; color: var(--muted); font-size: .9rem; }
+
+    .layers { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+    details {
+      border: 1px solid var(--line); border-radius: 10px; background: var(--surface); overflow: clip;
+    }
+    summary { cursor: pointer; padding: 1rem; font-weight: 700; }
+    details[open] summary { background: var(--surface-soft); border-bottom: 1px solid var(--line); }
+    details div { padding: 0 1rem 1rem; }
+    details p, details ul { margin-bottom: 0; }
+    .tag {
+      display: inline-block; margin-right: .45rem; padding: .12rem .5rem;
+      border-radius: 999px; background: var(--amber-soft); color: var(--amber);
+      font-size: .78rem; font-weight: 700; text-transform: uppercase;
+    }
+    .decision-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    .decision {
+      padding: 1.1rem; border-radius: 10px; background: var(--surface); border: 1px solid var(--line);
+    }
+    .decision.good { border-top: 5px solid var(--green); }
+    .decision.warn { border-top: 5px solid var(--amber); }
+    .decision.stop { border-top: 5px solid var(--red); }
+    .decision p { margin: 0; color: var(--muted); }
+    .callout { padding: 1.2rem; border-left: 5px solid var(--red); background: var(--red-soft); }
+    code { padding: .1rem .3rem; border-radius: 4px; background: var(--surface-soft); }
+    footer { border-top: 1px solid var(--line); padding: 1.5rem; color: var(--muted); text-align: center; }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page: #101722; --surface: #172231; --surface-soft: #202f42;
+        --ink: #edf4fc; --muted: #bac7d8; --line: #405169;
+        --blue: #7dc4ff; --blue-soft: #163451; --green: #75d9aa;
+        --green-soft: #173a2d; --amber: #ffd17a; --amber-soft: #443518;
+        --red: #ff9999; --red-soft: #482525; --purple: #c6a6ff; --purple-soft: #33264d;
+        --shadow: none;
+      }
+      header { background: linear-gradient(125deg, #0b3456, #0c4d7c 62%, #125950); }
+      .step { background: var(--ink); color: var(--page); }
+    }
+    @media (max-width: 900px) {
+      .flow { grid-template-columns: 1fr 1fr; }
+      .node, .node:nth-child(n) { grid-column: auto; }
+      .node::after, .node:nth-child(n)::after { content: "↓"; right: auto; left: 50%; top: auto; bottom: -2rem; transform: translateX(-50%); }
+      .node:last-child::after { content: ""; }
+      .agents { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 620px) {
+      .flow, .layers, .agents, .decision-grid { grid-template-columns: 1fr; }
+      main { width: min(100% - 1.25rem, 1180px); }
+    }
+    @media print {
+      body { background: #fff; color: #000; }
+      header { background: #fff; color: #000; padding: 1rem 0; }
+      main { width: 100%; padding: 0; }
+      .node, .agent, details, .decision { box-shadow: none; break-inside: avoid; }
+      details > div { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header>
+    <p class="eyebrow">Atlas Travel Planner · Solution Architecture</p>
+    <h1>How the Accessibility Agent works</h1>
+    <p>From traveller input to evidence-grounded recommendations, showing the official A2A handoff, external research, safety controls, and final response.</p>
+  </header>
+
+  <main id="main">
+    <section aria-labelledby="flow-title">
+      <h2 id="flow-title">End-to-end information flow</h2>
+      <p class="lede">Guardrails surround the model rather than relying on prompting alone. Validation happens before execution, retrieved content is treated as untrusted, and generated claims are checked again before delivery.</p>
+      <div class="legend" aria-label="Diagram legend">
+        <span><i class="dot"></i> Application or agent</span>
+        <span><i class="dot guard"></i> Guardrail</span>
+        <span><i class="dot external"></i> External service</span>
+        <span><i class="dot output"></i> Validated output</span>
+      </div>
+
+      <div class="flow" role="list" aria-label="Ten-step Accessibility Agent processing flow">
+        <article class="node" role="listitem"><span class="step">1</span><h3>Traveller request</h3><p>Destination, dates, budget, preferences and per-traveller accessibility requirements are submitted.</p></article>
+        <article class="node guard" role="listitem"><span class="step">2</span><h3>Platform input gates</h3><p>Authentication, schema, size, sensitive-field, injection and optional L2 semantic screening.</p></article>
+        <article class="node" role="listitem"><span class="step">3</span><h3>Orchestrator</h3><p>Creates the planning job and fans the validated request out to specialist agents.</p></article>
+        <article class="node" role="listitem"><span class="step">4</span><h3>Official A2A handoff</h3><p>JSON-RPC sends a structured TravelRequest to the Accessibility Agent endpoint.</p></article>
+        <article class="node guard" role="listitem"><span class="step">5</span><h3>A2A + agent preflight</h3><p>Boundary validation repeats, followed by accessibility-specific injection, toxicity and bias checks.</p></article>
+        <article class="node" role="listitem"><span class="step">6</span><h3>Safe search plan</h3><p>Needs are categorized and converted into functional queries without sending raw medical descriptions.</p></article>
+        <article class="node external" role="listitem"><span class="step">7</span><h3>Serper evidence</h3><p>Bounded web search retrieves public HTTPS evidence with source type, excerpt, date and evidence ID.</p></article>
+        <article class="node guard" role="listitem"><span class="step">8</span><h3>Evidence sanitation</h3><p>Unsafe snippets are removed. Remaining web content is labelled untrusted before model use.</p></article>
+        <article class="node" role="listitem"><span class="step">9</span><h3>Structured analysis</h3><p>The specialist evaluates the full journey and returns a schema-validated AgentFinding.</p></article>
+        <article class="node output" role="listitem"><span class="step">10</span><h3>Verified response</h3><p>Deterministic checks enforce citations, ratings, confidence, vetoes and supplier questions.</p></article>
+      </div>
+
+      <div class="a2a-band"><strong>Single deployment, protocol-based communication:</strong> the web application, orchestrator and all specialist A2A endpoints share port 5000, while agent-to-agent messages still use the official A2A JSON-RPC contract.</div>
+
+      <div class="agents" aria-label="Parallel specialist agents">
+        <article class="agent"><h3>Flight Agent</h3><p>Flight availability, feasibility and traveller constraints.</p></article>
+        <article class="agent"><h3>Hotel &amp; Transport Agent</h3><p>Accommodation and ground transport compatibility.</p></article>
+        <article class="agent accessibility"><h3>Accessibility Agent</h3><p>Evidence-grounded, end-to-end accessibility assessment.</p></article>
+        <article class="agent"><h3>Risk Advisory Agent</h3><p>Destination, itinerary and safety risks.</p></article>
+      </div>
+    </section>
+
+    <section aria-labelledby="guards-title">
+      <h2 id="guards-title">Accessibility guardrail layers</h2>
+      <p class="lede">Open each layer for the control, its purpose, and the behaviour when it fails.</p>
+      <div class="layers">
+        <details><summary><span class="tag">Input</span> Schema, size and sensitive fields</summary><div><p>Rejects malformed or oversized requests and unsupported sensitive ranking attributes before any model or search call.</p></div></details>
+        <details><summary><span class="tag">Input</span> Prompt injection and L2 screening</summary><div><p>Normalizes all user-controlled text, detects explicit injection patterns, and optionally uses a semantic classifier for obfuscated attacks and out-of-scope requests.</p></div></details>
+        <details><summary><span class="tag">A2A</span> Protocol boundary validation</summary><div><p>Requires exactly one JSON data part, validates the TravelRequest again, and reports typed A2A errors instead of starting a phantom task.</p></div></details>
+        <details><summary><span class="tag">Safety</span> Accessibility preflight</summary><div><p>Blocks injection, toxic language and high-risk disability stereotypes. A blocked request bypasses the model and returns confidence zero with human review required.</p></div></details>
+        <details><summary><span class="tag">Privacy</span> Requirement abstraction</summary><div><p>Maps raw needs to functional categories such as mobility, vision or hearing. External queries use generic functional terms instead of raw medical descriptions.</p></div></details>
+        <details><summary><span class="tag">Retrieval</span> Bounded web search</summary><div><p>Uses a fixed HTTPS provider endpoint, timeouts, two attempts, four results per query, at most four categories and eight total evidence records.</p></div></details>
+        <details><summary><span class="tag">Retrieval</span> URL and source controls</summary><div><p>Accepts public HTTPS links without embedded credentials, removes duplicates, and classifies sources as official, specialist, crowdsourced or unknown.</p></div></details>
+        <details><summary><span class="tag">Evidence</span> Untrusted-content sanitation</summary><div><p>Screens titles and excerpts for injection, toxicity and bias. Unsafe records are removed and the rejection count is disclosed in warnings.</p></div></details>
+        <details><summary><span class="tag">Output</span> Structured response validation</summary><div><p>Requires the model to return the AgentFinding schema. Malformed output fails instead of being displayed as a recommendation.</p></div></details>
+        <details><summary><span class="tag">Output</span> Evidence ID and exact-link enforcement</summary><div><p>A claim retains a URL only when it cites a valid evidence ID that maps to the exact retrieved URL. Invented and altered links are removed.</p></div></details>
+        <details><summary><span class="tag">Output</span> Status, rating and confidence controls</summary><div><p>Downgrades unsupported “verified” claims, recalculates accessibility ratings, and caps confidence when evidence is missing, partial or unknown.</p></div></details>
+        <details><summary><span class="tag">Output</span> Accessibility veto and human review</summary><div><p>Removes known-unsuitable options, records the unmet requirement, and generates specific questions for suppliers when evidence is incomplete.</p></div></details>
+      </div>
+    </section>
+
+    <section aria-labelledby="decision-title">
+      <h2 id="decision-title">How evidence changes the response</h2>
+      <div class="decision-grid">
+        <article class="decision good"><h3>Grounded</h3><p>Evidence ID and exact URL support the feature. The option can be marked verified, normally up to a deterministic 4/5 rating.</p></article>
+        <article class="decision warn"><h3>Uncertain</h3><p>Evidence is missing, partial, conflicting, crowdsourced or unknown. Confidence is reduced and direct supplier confirmation is required.</p></article>
+        <article class="decision stop"><h3>Requirement unmet</h3><p>The option receives an accessibility veto, is removed from recommendations, and is disclosed to the orchestrator as unsuitable.</p></article>
+      </div>
+    </section>
+
+    <section aria-labelledby="delivery-title">
+      <h2 id="delivery-title">Fan-in and user delivery</h2>
+      <p class="lede">The Accessibility Agent returns an A2A <code>agent-finding</code> artifact. The orchestrator combines it with the other specialists, runs final output assurance, copies validated accessibility URLs into the plan, stores the result and audit trace, and displays the response in the chatbot.</p>
+      <div class="callout"><strong>Input requirement:</strong> accessibility needs must be placed in <code>traveller_accessibility_needs</code> or <code>accessibility_needs</code>. Text stored only in <code>preferences</code> is safety-screened but may not become a formal accessibility requirement.</div>
+    </section>
+  </main>
+
+  <footer>Atlas Travel Planner · Accessibility Agent processing reference</footer>
+</body>
+</html>
