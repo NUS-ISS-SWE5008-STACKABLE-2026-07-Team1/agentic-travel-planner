@@ -3,23 +3,34 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 
 from flaskapp import create_app
 from flaskapp.config import get_llm_settings
-from flaskapp.travel_ai.a2a_standard import build_a2a_application
+from flaskapp.travel_ai.guardrails import LlmGuardrail, guardrail_settings
+from flaskapp.travel_ai.a2a_standard import ExecutorContext, build_a2a_application
 from flaskapp.travel_ai.agents import SPECIALIST_NODE_FACTORIES
 from flaskapp.travel_ai.llm import build_llm
-from flaskapp.travel_ai.tracing import AuditTracer
-from flaskapp.travel_ai.guardrails import LlmGuardrail, guardrail_settings
 from flaskapp.travel_ai.safeguards import screen_request_l2, validate_request
 from flaskapp.travel_ai.service import TravelPlanningService
+from flaskapp.travel_ai.tracing import AuditTracer
 
 
-def create_application(flask_app=None, *, node_factories=None, orchestrator_runner=None):
-    """Construct the ASGI sidecar using the same configuration as Flask."""
+def create_application(
+    flask_app=None,
+    node_factories: Mapping[str, Any] | None = None,
+    orchestrator_runner=None,
+):
+    """Construct the ASGI sidecar using real or injected specialist nodes.
+
+    Production callers omit ``node_factories`` and therefore retain fail-fast
+    LLM configuration validation. Tests may inject deterministic nodes so CI
+    does not need provider credentials merely to verify HTTP route composition.
+    """
     flask_app = flask_app or create_app()
     if node_factories is None:
         llm_settings, configuration_error = get_llm_settings(flask_app.config)
@@ -29,37 +40,44 @@ def create_application(flask_app=None, *, node_factories=None, orchestrator_runn
         trace_dir = Path(flask_app.config["TRACE_DIR"])
         database_path = flask_app.config["DATABASE"]
 
-        node_factories = {}
+        resolved_node_factories = {}
         for name, create_node in SPECIALIST_NODE_FACTORIES.items():
             def node_factory(request_id, create_node=create_node):
                 tracer = AuditTracer(trace_dir, request_id, database_path)
                 return create_node(llm, tracer)
-            node_factories[name] = node_factory
+            resolved_node_factories[name] = node_factory
 
         if orchestrator_runner is None:
             def orchestrator_runner(request, request_id):
-                validated = validate_request(
+                validated_request = validate_request(
                     request.model_dump(mode="json"),
                     flask_app.config["MAX_INPUT_CHARS"],
                 )
-                settings = guardrail_settings(flask_app.config)
-                verdict = screen_request_l2(
-                    validated, LlmGuardrail.from_settings(settings)
+                guard_settings = guardrail_settings(flask_app.config)
+                input_verdict = screen_request_l2(
+                    validated_request,
+                    LlmGuardrail.from_settings(guard_settings),
                 )
                 service = TravelPlanningService(
                     **llm_settings,
                     trace_dir=trace_dir,
                     database_path=database_path,
-                    guardrail_settings=settings,
-                    input_guardrail=verdict.as_audit_details() if verdict else None,
+                    guardrail_settings=guard_settings,
+                    input_guardrail=(
+                        input_verdict.as_audit_details() if input_verdict else None
+                    ),
                     a2a_base_url=flask_app.config["A2A_BASE_URL"],
                 )
-                return service.create_plan(validated, request_id=request_id)
+                return service.create_plan(validated_request, request_id=request_id)
+    else:
+        resolved_node_factories = dict(node_factories)
 
     return build_a2a_application(
-        node_factories,
+        resolved_node_factories,
         flask_app.config["A2A_BASE_URL"],
         orchestrator_runner=orchestrator_runner,
+        context=ExecutorContext.from_flask_config(flask_app.config),
+        root_agent=flask_app.config.get("A2A_ROOT_AGENT"),
     )
 
 

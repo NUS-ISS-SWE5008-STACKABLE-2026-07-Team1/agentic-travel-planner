@@ -137,3 +137,61 @@ def test_initialize_is_idempotent_and_adds_city_columns_to_an_old_database(tmp_p
         ).fetchone()
     assert {"origin_city", "destination_city"} <= columns
     assert preserved == ("Singapore", None)
+
+
+def test_ensure_planning_job_does_not_reset_a_running_job(tmp_path):
+    """The whole reason this is separate from `create_planning_job`.
+
+    `create_planning_job` upserts back to 'queued' so a resubmit works. Doing
+    that here would take a job that is mid-flight and report it to `/admin` as
+    queued, so the A2A path needs a create-if-absent that leaves an existing
+    row alone.
+    """
+    from flaskapp.database import connect, create_planning_job, ensure_planning_job
+    from flaskapp.database import update_planning_job
+
+    path = tmp_path / "planner.sqlite3"
+    initialize(path)
+
+    created = ensure_planning_job(path, "req-1", None, {"origin": "Singapore"})
+    assert created is True
+    update_planning_job(path, "req-1", "processing")
+
+    created_again = ensure_planning_job(path, "req-1", None, {"origin": "Tokyo"})
+
+    assert created_again is False, "second call must not insert a second row"
+    with connect(path) as db:
+        rows = db.execute(
+            "SELECT request_id, status FROM planning_jobs WHERE request_id = ?",
+            ("req-1",),
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "processing", "a live job was reset to queued"
+
+    # Contrast: create_planning_job deliberately does reset, and that behaviour
+    # must stay intact for `jobs.submit_plan`'s resubmit path.
+    create_planning_job(path, "req-1", None, {"origin": "Tokyo"})
+    with connect(path) as db:
+        status = db.execute(
+            "SELECT status FROM planning_jobs WHERE request_id = ?", ("req-1",)
+        ).fetchone()["status"]
+    assert status == "queued"
+
+
+def test_ensure_planning_job_satisfies_the_agent_runs_foreign_key(tmp_path):
+    """`agent_runs.request_id` references `planning_jobs`, with FKs enforced."""
+    from flaskapp.database import ensure_planning_job, save_agent_run
+
+    path = tmp_path / "planner.sqlite3"
+    initialize(path)
+
+    ensure_planning_job(path, "a2a-task-1", None, {"origin": "Singapore"})
+    save_agent_run(path, "a2a-task-1", "flight_agent", "completed")
+
+    from flaskapp.database import connect
+    with connect(path) as db:
+        row = db.execute(
+            "SELECT agent, status FROM agent_runs WHERE request_id = ?",
+            ("a2a-task-1",),
+        ).fetchone()
+    assert row["agent"] == "flight_agent"

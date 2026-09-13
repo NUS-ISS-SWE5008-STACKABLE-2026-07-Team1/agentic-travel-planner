@@ -147,15 +147,28 @@ invents. `adapter.py` translates the shared `TravelRequest` into these contracts
 and is the single place that knows both schemas — point changes there when the
 shared schema or the intake form moves.
 
-**The graph does not use this layer yet.** `agent.py` still runs the prompt-only
-node, so runtime behaviour is unchanged. Connecting them is one change to
-`create_node` (`adapter.to_flight_request` produces what
-`reasoning.run_flight_agent` needs), deliberately left as its own reviewed step
-because it changes what every downstream agent receives.
+**The graph runs this layer.** `agent.py` adapts the shared request, fetches
+inventory once, ranks it deterministically, and asks the model only for the
+narrative — on every request the provider covers.
 
-One limit to know before wiring it in: by default inventory is 284 static rows,
-SIN-origin hub-and-spoke across 18 airports between 2026-08-24 and 2026-10-08,
-so anything else correctly returns no candidates.
+The prompt-only node survives as the fallback for routes the loaded inventory
+does not cover, where there is nothing to ground an answer in. That path is
+screened on the way in and out, and `_forbid_concrete_options` strips every
+option from its result: with no candidate set to check membership against,
+`validate_grounded_explanation` cannot run, so the design keeps the route-level
+guidance and drops the specifics rather than risking invented flight numbers in
+the part of the UI users read most. See
+[docs/flight_agent/design.md](docs/flight_agent/design.md) §3.
+
+`FLIGHT_AGENT_MODE` selects how the covered path reasons: `structured`
+(single-shot), `agentic` (always open the tool-calling loop in `agentic.py`), or
+`auto` — the default, which is single-shot and escalates to the loop only when
+the deterministic search leaves a leg empty. `docs/flight_agent/mode-eval.md`
+records the measurement behind that default.
+
+One limit to know: the seed dataset is illustrative, not exhaustive — currently
+1568 rows across 30 airports with departures between 2026-08-24 and 2027-01-06.
+A route or date outside it correctly returns no candidates and falls back.
 
 The intake form collects a country **and a city**, and a city resolves to every
 airport serving it — picking Tokyo ranks Haneda and Narita together rather than
@@ -184,16 +197,16 @@ python scripts/demo_multi_gap_relaxation.py   # does relaxation choice track par
 deterministically — same output every run, so a regeneration that produces a
 diff means an input changed.
 
-## Agent communication contracts
+## Internal agent handoff envelope
 
-In combined mode, every orchestrator-to-specialist handoff uses the official A2A
-1.x SDK and JSON-RPC protocol. Each client first discovers the target Agent Card,
-sends a validated `TravelRequest` data Part, observes task status, and consumes a
-validated `AgentFinding` artifact. The legacy versioned `A2AMessage` envelope in
-`flaskapp/travel_ai/a2a.py` remains only as a Flask-only compatibility path and
-for local trace metadata; it is not the wire protocol used by combined mode.
+Every agent handoff uses the versioned `A2AMessage` envelope defined in
+`flaskapp/travel_ai/a2a.py`. Agents must not invent their own dictionaries or pass
+unstructured text as a cross-agent interface. This is the application's local,
+transport-neutral LangGraph contract; it is not itself the official Agent2Agent
+wire protocol. `flaskapp/travel_ai/a2a_standard.py` adapts this local contract to
+official A2A 1.x messages, tasks, artifacts, Agent Cards, and JSON-RPC endpoints.
 
-The Flask-only compatibility envelope fields are:
+Required envelope fields:
 
 | Field | Standard |
 | --- | --- |
@@ -451,32 +464,25 @@ Protect trace access with authorization and a retention policy in production.
 
 ## Agent2Agent (A2A) interoperability
 
-The application uses the official A2A 1.x protocol through the official Python
-SDK for both external interoperability and internal agent-to-agent calls. The
-LangGraph orchestrator retains fan-out/fan-in control, but its specialist nodes
-are A2A client proxies. They discover and invoke the four specialist endpoints
-within the same deployment. The orchestrator itself also publishes an Agent
-Card and accepts complete planning requests through A2A.
+The application supports the official A2A 1.x protocol through the official
+Python SDK. The existing LangGraph fan-out/fan-in workflow remains the default
+internal execution path, while adapters make the orchestrator and every
+specialist independently discoverable and callable by standards-compliant A2A
+clients. The same agent implementations, Pydantic validation, guardrails,
+evidence handling, database recording, and audit tracing are reused on both
+paths.
 
-```text
-Browser/API -> Orchestrator workflow -> official A2A clients
-                                      -> Flight Agent A2A endpoint
-                                      -> Hotel/Transport Agent A2A endpoint
-                                      -> Accessibility Agent A2A endpoint
-                                      -> Risk Agent A2A endpoint
-                                      <- AgentFinding artifacts
-            <- synthesized PlanResponse
-```
-
-These are protocol-isolated agents in one process and deployment, not separate
-microservices. The same validation, guardrails, evidence handling, database,
-and audit tracing are reused across both browser and A2A entry paths.
+When started through `scripts.run_all` or `asgi.py`, the orchestrator also
+reaches all four specialists through their official A2A JSON-RPC endpoints in
+the same ASGI process. This provides protocol-based agent isolation without
+requiring separate microservice deployments. Flask-only `python app.py` keeps
+the direct in-process compatibility path because it does not host A2A routes.
 
 The implementation consists of:
 
-- `flaskapp/travel_ai/a2a_client.py`: official SDK discovery and specialist calls.
-- `flaskapp/travel_ai/a2a_standard.py`: all Agent Cards, specialist and
-  orchestrator executors, tasks, artifacts, failures, and cancellation.
+- `flaskapp/travel_ai/a2a_standard.py`: Agent Cards, request conversion,
+  specialist and orchestrator executors, task status, artifacts, failures, and
+  cancellation.
 - `scripts/a2a_server.py`: standalone A2A-only ASGI service.
 - `flaskapp/combined.py` and `asgi.py`: one ASGI application containing the
   Flask website and all A2A routes.
@@ -503,9 +509,7 @@ This single process serves both interfaces on port 5000:
 | Accessibility Agent Card | `http://127.0.0.1:5000/a2a/accessibility_agent/.well-known/agent-card.json` |
 | Risk Advisory Agent Card | `http://127.0.0.1:5000/a2a/risk_advisory_agent/.well-known/agent-card.json` |
 
-Use this combined command when full A2A communication is required. `python
-app.py` intentionally uses the direct compatibility path because Flask alone
-does not host the A2A routes. Do not run it at the same time. If an Agent Card returns Flask's
+Do not run `python app.py` at the same time. If the Agent Card returns Flask's
 “Not Found” page, stop the Flask-only process with `Ctrl+C` and start
 `scripts.run_all` instead. Stop the combined server with `Ctrl+C`.
 
@@ -528,17 +532,17 @@ Each Agent Card advertises A2A 1.0 over the `JSONRPC` protocol binding with
 data Part holding a validated `TravelRequest`, either directly or under a
 `travel_request` property. A successful specialist task produces an
 `agent-finding` artifact containing a validated `AgentFinding`. A successful
-orchestrator task produces a `travel-plan-response` artifact containing a
-validated `PlanResponse`. Each is followed by completed task status. Invalid
-requests and execution errors produce failed status; cancellation produces
-cancelled status.
+orchestrator task runs the complete planning workflow and produces a
+`travel-plan-response` artifact containing a validated `PlanResponse`, including
+the synthesized plan, specialist findings, safety assessment, sources, and trace
+URL. Invalid requests and execution errors produce a failed task status;
+cancellation produces a cancelled task status.
 
 ### Single-process deployment
 
 `asgi.py` is the production entry point for a single deployment. It registers
-the A2A routes before mounting Flask as the fallback and automatically enables
-internal A2A dispatch. A compatible start command (also used by `render.yaml`)
-is:
+the A2A routes before mounting the Flask WSGI application as the fallback. A
+compatible start command is:
 
 ```text
 uvicorn asgi:application --host 0.0.0.0 --port $PORT --workers 1

@@ -97,10 +97,12 @@ from flaskapp.travel_ai.agents.flight_agent.seed_data import (
 covers_route(["SIN"], ["NRT", "HND"])   # True if ANY pair is stocked
 ```
 
-Flight inventory is SIN-origin hub-and-spoke: **280 generated rows** across
-SIN ↔ NRT, HND, LHR, LGW, SYD, BKK, DMK, HKG, KIX, MEL, ICN, KUL, DPS, CGK,
-HKT, TPE, DXB, CDG — plus 4 hand-written golden-scenario flights. If you seed
-hotels for the same cities, a demo runs end to end without gaps.
+Flight inventory is two-hub, **1564 generated rows** across 30 airports —
+plus 4 hand-written golden-scenario flights. SIN ↔ NRT, HND, LHR, LGW, SYD,
+BKK, DMK, HKG, KIX, MEL, ICN, KUL, DPS, CGK, HKT, TPE, DXB, CDG, and LHR ↔ AMS,
+BCN, CDG, CPH, DUB, FCO, FRA, JFK, LIS, MAD, MXP, ZRH. Of all 1568 rows, 940
+touch SIN and 628 are the LHR-hub pairs.
+If you seed hotels for the same cities, a demo runs end to end without gaps.
 
 Regenerate with `python scripts/generate_flight_seed_csv.py`. It is
 deterministic, and city routes use a separate RNG stream so regenerating never

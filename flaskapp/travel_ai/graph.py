@@ -5,51 +5,68 @@ from __future__ import annotations
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+from flaskapp.config import Config
+from flaskapp.travel_ai.a2a_client import create_remote_specialist_node
 from flaskapp.travel_ai.agents import SPECIALIST_NODE_FACTORIES, create_orchestrator_node
 from flaskapp.travel_ai.schemas import TravelGraphState
-from flaskapp.travel_ai.schemas import TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.cancellation import PlanningCancelled
 
 SPECIALISTS = tuple(SPECIALIST_NODE_FACTORIES)
 
 
-def build_travel_graph(
-    llm: ChatOpenAI,
-    tracer: AuditTracer,
-    cancel_event=None,
-    guardrail=None,
-    specialist_client=None,
-):
+def _specialist_node(name, create_node, llm, tracer, settings):
+    """The in-process node, or a remote one speaking A2A to the same agent.
+
+    The choice is made HERE, when the graph is built, and never inside the node.
+    Two reasons, and the first is not obvious: the A2A *server* builds its
+    specialist nodes from this same registry, so a branch inside `create_node`
+    would have the served flight agent call itself over HTTP. The second is the
+    `FLIGHT_AGENT_MODE` precedent — transport is a composition concern, and
+    resolving it once means it cannot change under a traveller mid-plan.
+    """
+    full_a2a = bool(settings.get("A2A_INTERNAL_ENABLED", False))
+    flight_a2a = (
+        name == "flight_agent"
+        and str(settings.get("FLIGHT_AGENT_TRANSPORT", "inprocess")).strip().lower()
+        == "a2a"
+    )
+    if not (full_a2a or flight_a2a):
+        return create_node(llm, tracer)
+    endpoint = (
+        settings.get("FLIGHT_AGENT_A2A_URL") if name == "flight_agent" else None
+    ) or (
+        f"{str(settings.get('A2A_BASE_URL', '')).rstrip('/')}/a2a/{name}"
+    )
+    return create_remote_specialist_node(
+        name, tracer, endpoint=endpoint,
+        timeout_seconds=float(settings.get(
+            "FLIGHT_AGENT_A2A_TIMEOUT_SECONDS"
+            if name == "flight_agent" else "AI_REQUEST_TIMEOUT_SECONDS",
+            60,
+        )),
+    )
+
+
+def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None,
+                       guardrail=None, config=None):
     """Compile a fan-out/fan-in graph: four specialists feed one orchestrator.
 
     `guardrail` is the L2 classifier, passed to the orchestrator so the final
     plan is screened before it reaches the traveller. None disables that gate;
     the deterministic checks in `assess_plan` run either way.
+
+    `config` is the injection point for transport settings. Combined mode sets
+    `A2A_INTERNAL_ENABLED`, routing all four specialists over official A2A;
+    Flask-only mode retains direct in-process nodes.
     """
     # CUSTOMIZE THE LANGGRAPH WORKFLOW HERE.
     # Current design: START -> all four specialists in parallel -> orchestrator -> END.
     # Add conditional edges here if an agent should run only for certain requests.
+    settings = vars(Config) if config is None else config
     workflow = StateGraph(TravelGraphState)
     for name, create_node in SPECIALIST_NODE_FACTORIES.items():
-        if specialist_client is None:
-            node = create_node(llm, tracer)
-        else:
-            def node(state, name=name):
-                tracer.record("a2a_specialist_dispatched", name, {
-                    "transport": "JSONRPC", "protocol_version": "1.0",
-                })
-                finding = specialist_client.invoke(
-                    name,
-                    TravelRequest.model_validate(state["request"]),
-                    state["request_id"],
-                    cancel_event,
-                )
-                tracer.record("a2a_specialist_received", name, {
-                    "confidence": finding.confidence,
-                    "option_count": len(finding.options),
-                })
-                return {"findings": [finding]}
+        node = _specialist_node(name, create_node, llm, tracer, settings)
         def cancellable_specialist(state, node=node):
             if cancel_event and cancel_event.is_set():
                 raise PlanningCancelled("Planning was cancelled")
