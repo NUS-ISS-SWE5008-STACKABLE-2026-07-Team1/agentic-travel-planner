@@ -66,13 +66,18 @@
           <form id="travel-plan-form" data-endpoint="{{ url_for('travel_api.create_travel_plan') }}">
             <div class="row g-4">
               <div class="col-12">
-                <label class="form-label mb-2" for="plan_scope">What to plan</label>
-                <select class="form-select" id="plan_scope" name="plan_scope">
-                  <option value="both" selected>Flights and hotel</option>
-                  <option value="flights">Flights only</option>
-                  <option value="hotel">Hotel and transport only</option>
-                </select>
-                <div class="form-text">Only the specialists you need are consulted.</div>
+                <fieldset>
+                  <legend class="form-label mb-2">What to plan</legend>
+                  <div class="btn-group flex-wrap" role="group" aria-describedby="plan-scope-hint">
+                    <input type="radio" class="btn-check" name="plan_scope" id="plan_scope_both" value="both" checked>
+                    <label class="btn btn-outline-primary" for="plan_scope_both">Flights and hotel</label>
+                    <input type="radio" class="btn-check" name="plan_scope" id="plan_scope_flights" value="flights">
+                    <label class="btn btn-outline-primary" for="plan_scope_flights">Flights only</label>
+                    <input type="radio" class="btn-check" name="plan_scope" id="plan_scope_hotel" value="hotel">
+                    <label class="btn btn-outline-primary" for="plan_scope_hotel">Hotel and transport only</label>
+                  </div>
+                  <div class="form-text" id="plan-scope-hint">Only the specialists you need are consulted.</div>
+                </fieldset>
               </div>
               <div class="col-md-6" id="origin-fieldset">
                 <fieldset>
