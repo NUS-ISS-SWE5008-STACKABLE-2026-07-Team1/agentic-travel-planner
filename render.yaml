@@ -18,16 +18,15 @@ services:
     # line describes an intention rather than a fact.
     branch: release
     buildCommand: pip install -r requirements.txt
-    # ONE worker, deliberately. flaskapp/travel_ai/jobs.py keeps planning jobs in
-    # a module-level dict, so a second worker would answer
+    # ONE ASGI worker, deliberately. flaskapp/travel_ai/jobs.py keeps planning
+    # jobs in a module-level dict, so a second worker would answer
     # GET /api/v1/travel-plans/<id>/status for a job it never ran and return 404
-    # while the plan is actually running in its sibling. Threads give the
-    # concurrency instead; the planning work itself is already on a
-    # ThreadPoolExecutor. Do not raise --workers without moving job state into
-    # the planning_jobs table first.
+    # while the plan is actually running in its sibling. The planning work is
+    # already on a ThreadPoolExecutor, while Uvicorn keeps serving the internal
+    # A2A calls. Do not raise --workers without moving job state into the
+    # planning_jobs table first.
     startCommand: >-
-      gunicorn "flaskapp:create_app()"
-      --workers 1 --threads 8 --timeout 120 --bind 0.0.0.0:$PORT
+      uvicorn asgi:application --host 0.0.0.0 --port $PORT --workers 1
     healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
@@ -50,6 +49,10 @@ services:
         sync: false
       # Used only by Accessibility Agent evidence retrieval.
       - key: SERPER_API_KEY
+        sync: false
+      # Public origin advertised in Agent Cards and used for same-deployment
+      # A2A calls, for example https://agentic-travel-planner.onrender.com.
+      - key: A2A_BASE_URL
         sync: false
       - key: ADMIN_EMAILS
         sync: false

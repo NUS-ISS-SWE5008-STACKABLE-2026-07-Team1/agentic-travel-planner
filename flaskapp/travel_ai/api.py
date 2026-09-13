@@ -90,6 +90,11 @@ def create_travel_plan():
             # gate uses the same configuration the input gate just used.
             "guardrail": guard_settings,
             "input_guardrail": input_verdict.as_audit_details() if input_verdict else None,
+            "a2a_base_url": (
+                current_app.config.get("A2A_BASE_URL")
+                if current_app.config.get("A2A_INTERNAL_ENABLED", False)
+                else None
+            ),
         }
         job = (
             submit_plan(travel_request, settings, session.get("user_id"), intake_request_id)

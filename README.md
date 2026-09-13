@@ -184,16 +184,16 @@ python scripts/demo_multi_gap_relaxation.py   # does relaxation choice track par
 deterministically — same output every run, so a regeneration that produces a
 diff means an input changed.
 
-## Internal agent handoff envelope
+## Agent communication contracts
 
-Every agent handoff uses the versioned `A2AMessage` envelope defined in
-`flaskapp/travel_ai/a2a.py`. Agents must not invent their own dictionaries or pass
-unstructured text as a cross-agent interface. This is the application's local,
-transport-neutral LangGraph contract; it is not itself the official Agent2Agent
-wire protocol. `flaskapp/travel_ai/a2a_standard.py` adapts this local contract to
-official A2A 1.x messages, tasks, artifacts, Agent Cards, and JSON-RPC endpoints.
+In combined mode, every orchestrator-to-specialist handoff uses the official A2A
+1.x SDK and JSON-RPC protocol. Each client first discovers the target Agent Card,
+sends a validated `TravelRequest` data Part, observes task status, and consumes a
+validated `AgentFinding` artifact. The legacy versioned `A2AMessage` envelope in
+`flaskapp/travel_ai/a2a.py` remains only as a Flask-only compatibility path and
+for local trace metadata; it is not the wire protocol used by combined mode.
 
-Required envelope fields:
+The Flask-only compatibility envelope fields are:
 
 | Field | Standard |
 | --- | --- |
@@ -451,17 +451,32 @@ Protect trace access with authorization and a retention policy in production.
 
 ## Agent2Agent (A2A) interoperability
 
-The application supports the official A2A 1.x protocol through the official
-Python SDK. The existing LangGraph fan-out/fan-in workflow remains the default
-internal execution path, while an adapter makes each specialist independently
-discoverable and callable by a standards-compliant external orchestrator. The
-same agent implementation, Pydantic validation, guardrails, evidence handling,
-database recording, and audit tracing are reused on both paths.
+The application uses the official A2A 1.x protocol through the official Python
+SDK for both external interoperability and internal agent-to-agent calls. The
+LangGraph orchestrator retains fan-out/fan-in control, but its specialist nodes
+are A2A client proxies. They discover and invoke the four specialist endpoints
+within the same deployment. The orchestrator itself also publishes an Agent
+Card and accepts complete planning requests through A2A.
+
+```text
+Browser/API -> Orchestrator workflow -> official A2A clients
+                                      -> Flight Agent A2A endpoint
+                                      -> Hotel/Transport Agent A2A endpoint
+                                      -> Accessibility Agent A2A endpoint
+                                      -> Risk Agent A2A endpoint
+                                      <- AgentFinding artifacts
+            <- synthesized PlanResponse
+```
+
+These are protocol-isolated agents in one process and deployment, not separate
+microservices. The same validation, guardrails, evidence handling, database,
+and audit tracing are reused across both browser and A2A entry paths.
 
 The implementation consists of:
 
-- `flaskapp/travel_ai/a2a_standard.py`: Agent Cards, request conversion,
-  `SpecialistAgentExecutor`, task status, artifacts, failures, and cancellation.
+- `flaskapp/travel_ai/a2a_client.py`: official SDK discovery and specialist calls.
+- `flaskapp/travel_ai/a2a_standard.py`: all Agent Cards, specialist and
+  orchestrator executors, tasks, artifacts, failures, and cancellation.
 - `scripts/a2a_server.py`: standalone A2A-only ASGI service.
 - `flaskapp/combined.py` and `asgi.py`: one ASGI application containing the
   Flask website and all A2A routes.
@@ -482,12 +497,15 @@ This single process serves both interfaces on port 5000:
 | Interface | URL |
 | --- | --- |
 | Web application | `http://127.0.0.1:5000/` |
+| Orchestrator Agent Card | `http://127.0.0.1:5000/a2a/orchestrator_agent/.well-known/agent-card.json` |
 | Flight Agent Card | `http://127.0.0.1:5000/a2a/flight_agent/.well-known/agent-card.json` |
 | Hotel & Transport Agent Card | `http://127.0.0.1:5000/a2a/hotel_transport_agent/.well-known/agent-card.json` |
 | Accessibility Agent Card | `http://127.0.0.1:5000/a2a/accessibility_agent/.well-known/agent-card.json` |
 | Risk Advisory Agent Card | `http://127.0.0.1:5000/a2a/risk_advisory_agent/.well-known/agent-card.json` |
 
-Do not run `python app.py` at the same time. If the Agent Card returns Flask's
+Use this combined command when full A2A communication is required. `python
+app.py` intentionally uses the direct compatibility path because Flask alone
+does not host the A2A routes. Do not run it at the same time. If an Agent Card returns Flask's
 “Not Found” page, stop the Flask-only process with `Ctrl+C` and start
 `scripts.run_all` instead. Stop the combined server with `Ctrl+C`.
 
@@ -508,16 +526,19 @@ defaults are unsuitable.
 Each Agent Card advertises A2A 1.0 over the `JSONRPC` protocol binding with
 `application/json` input and output modes. Requests contain exactly one JSON
 data Part holding a validated `TravelRequest`, either directly or under a
-`travel_request` property. A successful task produces an `agent-finding`
-artifact containing the validated `AgentFinding`, followed by a completed task
-status. Invalid requests and execution errors produce a failed task status;
-cancellation produces a cancelled task status.
+`travel_request` property. A successful specialist task produces an
+`agent-finding` artifact containing a validated `AgentFinding`. A successful
+orchestrator task produces a `travel-plan-response` artifact containing a
+validated `PlanResponse`. Each is followed by completed task status. Invalid
+requests and execution errors produce failed status; cancellation produces
+cancelled status.
 
 ### Single-process deployment
 
 `asgi.py` is the production entry point for a single deployment. It registers
-the A2A routes before mounting the Flask WSGI application as the fallback. A
-compatible start command is:
+the A2A routes before mounting Flask as the fallback and automatically enables
+internal A2A dispatch. A compatible start command (also used by `render.yaml`)
+is:
 
 ```text
 uvicorn asgi:application --host 0.0.0.0 --port $PORT --workers 1

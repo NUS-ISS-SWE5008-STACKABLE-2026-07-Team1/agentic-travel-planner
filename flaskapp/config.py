@@ -56,6 +56,9 @@ class Config:
     A2A_BASE_URL = os.getenv("A2A_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
     A2A_HOST = os.getenv("A2A_HOST", "127.0.0.1")
     A2A_PORT = int(os.getenv("A2A_PORT", "5000"))
+    # Enabled automatically by the combined ASGI application. Leave false for
+    # Flask-only `python app.py`, where no A2A endpoints are listening.
+    A2A_INTERNAL_ENABLED = os.getenv("A2A_INTERNAL_ENABLED", "false").lower() == "true"
     # L2 guardrails: the LLM classifier that screens traveller free text and
     # generated plans for what the regex layer cannot see (obfuscated injection,
     # role-play jailbreaks, out-of-scope requests). Set enabled=false to develop

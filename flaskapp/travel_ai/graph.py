@@ -7,13 +7,20 @@ from langgraph.graph import END, START, StateGraph
 
 from flaskapp.travel_ai.agents import SPECIALIST_NODE_FACTORIES, create_orchestrator_node
 from flaskapp.travel_ai.schemas import TravelGraphState
+from flaskapp.travel_ai.schemas import TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.cancellation import PlanningCancelled
 
 SPECIALISTS = tuple(SPECIALIST_NODE_FACTORIES)
 
 
-def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None, guardrail=None):
+def build_travel_graph(
+    llm: ChatOpenAI,
+    tracer: AuditTracer,
+    cancel_event=None,
+    guardrail=None,
+    specialist_client=None,
+):
     """Compile a fan-out/fan-in graph: four specialists feed one orchestrator.
 
     `guardrail` is the L2 classifier, passed to the orchestrator so the final
@@ -25,7 +32,24 @@ def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None, 
     # Add conditional edges here if an agent should run only for certain requests.
     workflow = StateGraph(TravelGraphState)
     for name, create_node in SPECIALIST_NODE_FACTORIES.items():
-        node = create_node(llm, tracer)
+        if specialist_client is None:
+            node = create_node(llm, tracer)
+        else:
+            def node(state, name=name):
+                tracer.record("a2a_specialist_dispatched", name, {
+                    "transport": "JSONRPC", "protocol_version": "1.0",
+                })
+                finding = specialist_client.invoke(
+                    name,
+                    TravelRequest.model_validate(state["request"]),
+                    state["request_id"],
+                    cancel_event,
+                )
+                tracer.record("a2a_specialist_received", name, {
+                    "confidence": finding.confidence,
+                    "option_count": len(finding.options),
+                })
+                return {"findings": [finding]}
         def cancellable_specialist(state, node=node):
             if cancel_event and cancel_event.is_set():
                 raise PlanningCancelled("Planning was cancelled")
