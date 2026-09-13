@@ -5,12 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from flaskapp.travel_ai.graph import SPECIALISTS, build_travel_graph
+from dataclasses import asdict
+
+from flaskapp.travel_ai.dispatch import specialists_for
+from flaskapp.travel_ai.sections import plan_sections
+from flaskapp.travel_ai.graph import build_travel_graph
 from flaskapp.travel_ai.guardrails import LlmGuardrail
 from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.a2a import request_message
-from flaskapp.travel_ai.safeguards import assess_plan
-from flaskapp.travel_ai.schemas import PlanResponse, TravelRequest
+from flaskapp.travel_ai.safeguards import assess_plan, disclose_unconsulted
+from flaskapp.travel_ai.schemas import PlanResponse, PlanSection, TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.terminal import log_payload
 
@@ -76,7 +80,20 @@ class TravelPlanningService:
             LlmGuardrail.from_settings(self.guardrail_settings)
             if self.guardrail_settings else None
         )
-        graph = build_travel_graph(llm, tracer, self.cancel_event, guardrail)
+        # ONE decision, used twice. `make_specialist_node` raises
+        # `Missing A2A request for {name}` when a node runs without an envelope
+        # addressed to it, so a graph and a message list built from different
+        # values is a crash rather than a degraded plan. Deriving both from the
+        # same tuple is what makes that impossible.
+        selected = specialists_for(request)
+        tracer.record("specialists_dispatched", "orchestrator_agent", {
+            "plan_scope": request.plan_scope,
+            "dispatched": list(selected),
+            "count": len(selected),
+        })
+        graph = build_travel_graph(
+            llm, tracer, self.cancel_event, guardrail, specialists=selected
+        )
         messages = [
             request_message(
                 correlation_id=correlation_id,
@@ -85,7 +102,7 @@ class TravelPlanningService:
                 payload_type="TravelRequest",
                 payload=request,
             )
-            for name in SPECIALISTS
+            for name in selected
         ]
         result = graph.invoke({
             "request_id": request_id,
@@ -99,6 +116,10 @@ class TravelPlanningService:
         # evidence must not depend on generative compliance. Copy its vetted
         # URLs into the user-visible plan deterministically.
         merge_accessibility_sources(plan, findings)
+        # Stated, not left to be inferred from absence: a plan that never
+        # mentions flights reads the same whether none were found or none were
+        # sought, and only one of those is a reason to look elsewhere.
+        disclose_unconsulted(plan, selected)
         plan.safety = assess_plan(request, plan, findings)
         tracer.record("assurance_completed", "system", {
             "passed": plan.safety.passed,
@@ -108,6 +129,12 @@ class TravelPlanningService:
             request_id=request_id,
             plan=plan,
             agent_findings=findings,
+            # A projection of the findings above, not a second source of truth:
+            # the Option objects are the same objects the specialists returned,
+            # so a figure shown cannot drift from a figure found.
+            sections=[
+                PlanSection(**asdict(section)) for section in plan_sections(findings)
+            ],
             trace_url=f"/api/v1/traces/{request_id}",
         )
         log_payload(f"REQUEST {request_id} | FINAL RECOMMENDATION", response)

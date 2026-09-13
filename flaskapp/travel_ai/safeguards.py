@@ -19,6 +19,13 @@ from flaskapp.travel_ai.schemas import AgentFinding, SafetyAssessment, TravelPla
 _INJECTION_GUARD = PromptInjectionGuard()
 _DEFAULT_REDACTOR = PiiRedactor()
 
+# The full specialist roster. Declared here rather than imported from `graph`:
+# safeguards is the deterministic layer and must not depend on how the workflow
+# happens to be composed. `tests/test_schema_parity.py` guards the two lists.
+SPECIALIST_NAMES = (
+    "flight_agent", "hotel_transport_agent", "accessibility_agent", "risk_advisory_agent",
+)
+
 SENSITIVE_KEYS = {
     "race", "ethnicity", "religion", "gender", "sexual_orientation",
     "disability_status", "political_affiliation",
@@ -205,6 +212,34 @@ def screen_request_l2(request: TravelRequest, guardrail: Any = None) -> Verdict 
     for input that is already structurally sound and syntactically clean.
     """
     return _apply_l2(collect_free_text(request.model_dump(mode="json")), guardrail)
+
+
+UNCONSULTED_DISCLOSURE = (
+    "The following specialist(s) were not consulted for this plan, because the "
+    "request did not ask for them: {agents}. Nothing here reflects their input."
+)
+
+
+def disclose_unconsulted(plan: TravelPlan, selected) -> list[str]:
+    """Name the specialists that never ran, in the plan's own limitations.
+
+    Absence is not a signal a traveller can read. A plan that never mentions
+    flights looks identical whether the flight agent searched and found nothing,
+    or was never asked at all — and only one of those is a reason to go looking
+    elsewhere.
+
+    Written deterministically for the same reason as
+    `enforce_provenance_disclosure`: the orchestrator cannot be relied on to
+    mention an agent that produced nothing for it to mention. Returns the
+    unconsulted agents so the caller can record them.
+    """
+    unconsulted = sorted(set(SPECIALIST_NAMES) - set(selected))
+    if not unconsulted:
+        return []
+    disclosure = UNCONSULTED_DISCLOSURE.format(agents=", ".join(unconsulted))
+    if disclosure not in plan.limitations:
+        plan.limitations = [disclosure, *plan.limitations]
+    return unconsulted
 
 
 def ungrounded_agents(findings: list[AgentFinding]) -> list[str]:

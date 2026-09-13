@@ -41,7 +41,7 @@ def _specialist_node(name, create_node, llm, tracer, settings):
 
 
 def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None,
-                       guardrail=None, config=None):
+                       guardrail=None, config=None, specialists=SPECIALISTS):
     """Compile a fan-out/fan-in graph: four specialists feed one orchestrator.
 
     `guardrail` is the L2 classifier, passed to the orchestrator so the final
@@ -51,14 +51,22 @@ def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None,
     `config` is the injection point for settings, mirroring
     `flight_agent.create_node(llm, tracer, provider=None, config=None)`. It
     decides how the flight agent is reached — see `_specialist_node`.
+
+    `specialists` is which of them to build. Nodes, START edges and the barrier
+    all read this one value, which is what keeps the join correct: the barrier
+    joins on a fixed source list, so a graph that still contained a node nobody
+    routed to would never fire it. Defaults to all four, so every existing
+    caller is unaffected. `dispatch.specialists_for` produces it, and the caller
+    must pass the SAME value to the A2A message list — `make_specialist_node`
+    raises `Missing A2A request` for a node that runs without one.
     """
     # CUSTOMIZE THE LANGGRAPH WORKFLOW HERE.
-    # Current design: START -> all four specialists in parallel -> orchestrator -> END.
-    # Add conditional edges here if an agent should run only for certain requests.
+    # START -> the selected specialists in parallel -> orchestrator -> END.
     settings = vars(Config) if config is None else config
     workflow = StateGraph(TravelGraphState)
-    for name, create_node in SPECIALIST_NODE_FACTORIES.items():
-        node = _specialist_node(name, create_node, llm, tracer, settings)
+    selected = tuple(name for name in SPECIALISTS if name in set(specialists))
+    for name in selected:
+        node = _specialist_node(name, SPECIALIST_NODE_FACTORIES[name], llm, tracer, settings)
         def cancellable_specialist(state, node=node):
             if cancel_event and cancel_event.is_set():
                 raise PlanningCancelled("Planning was cancelled")
@@ -78,6 +86,6 @@ def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None,
         return result
     workflow.add_node("orchestrator_agent", cancellable_orchestrator)
     # A list-valued source is a barrier: synthesis starts only after every branch.
-    workflow.add_edge(list(SPECIALISTS), "orchestrator_agent")
+    workflow.add_edge(list(selected), "orchestrator_agent")
     workflow.add_edge("orchestrator_agent", END)
     return workflow.compile()

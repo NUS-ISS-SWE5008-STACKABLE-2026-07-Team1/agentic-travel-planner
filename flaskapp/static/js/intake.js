@@ -16,6 +16,15 @@ if (intentForm) {
     ["female", "Female"], ["male", "Male"],
     ["non_binary", "Non-binary"], ["prefer_not_to_say", "Prefer not to say"]
   ];
+  // The three dispatch choices, in the order offered. "Flights and hotel" is
+  // first because it is the default and the common case: a traveller who does
+  // not care picks the first option and still gets every specialist.
+  const scopes = [
+    ["both", "Flights and hotel"], ["flights", "Flights only"],
+    // "and transport": this agent books airport transfers and local transport
+    // as well as accommodation, and "Hotel only" understates what is included.
+    ["hotel", "Hotel and transport only"]
+  ];
   let intakeState = null;
   let sessionHandoff = false;
 
@@ -96,12 +105,12 @@ if (intentForm) {
     wrapper.append(label);
 
     let input;
-    if (field.input === "country" || field.input === "gender") {
+    if (field.input === "country" || field.input === "gender" || field.input === "scope") {
       input = document.createElement("select");
       input.className = "form-select";
       const options = field.input === "country"
         ? countries.map((country) => [country, country])
-        : genders;
+        : field.input === "scope" ? scopes : genders;
       const blank = document.createElement("option");
       blank.value = "";
       blank.textContent = field.input === "country" ? "Select a country" : "Select";

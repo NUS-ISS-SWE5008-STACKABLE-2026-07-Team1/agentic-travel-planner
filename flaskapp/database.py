@@ -41,12 +41,13 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS travel_requests (
     id TEXT PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    origin TEXT NOT NULL,
+    origin TEXT,
     destination TEXT NOT NULL,
     -- Countries above, cities here. NULLable because city intake postdates
     -- these rows and a country-only request stays valid.
     origin_city TEXT,
     destination_city TEXT,
+    plan_scope TEXT NOT NULL DEFAULT 'both',
     departure_date TEXT NOT NULL,
     return_date TEXT NOT NULL,
     travellers INTEGER NOT NULL CHECK (travellers BETWEEN 1 AND 20),
@@ -100,7 +101,11 @@ CREATE TABLE IF NOT EXISTS options (
     source_urls_json TEXT NOT NULL DEFAULT '[]',
     assumptions_json TEXT NOT NULL DEFAULT '[]',
     limitations_json TEXT NOT NULL DEFAULT '[]',
-    selection_factors_json TEXT NOT NULL DEFAULT '[]'
+    selection_factors_json TEXT NOT NULL DEFAULT '[]',
+    -- What kind of option this is, as asserted by the builder that made it.
+    -- Nullable: rows written before builders classified themselves genuinely
+    -- have no category, and NULL says that rather than guessing one.
+    category TEXT
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -260,10 +265,11 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS travel_requests (
     id TEXT PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    origin TEXT NOT NULL,
+    origin TEXT,
     destination TEXT NOT NULL,
     origin_city TEXT,
     destination_city TEXT,
+    plan_scope TEXT NOT NULL DEFAULT 'both',
     departure_date TEXT NOT NULL,
     return_date TEXT NOT NULL,
     travellers INTEGER NOT NULL CHECK (travellers BETWEEN 1 AND 20),
@@ -317,7 +323,11 @@ CREATE TABLE IF NOT EXISTS options (
     source_urls_json TEXT NOT NULL DEFAULT '[]',
     assumptions_json TEXT NOT NULL DEFAULT '[]',
     limitations_json TEXT NOT NULL DEFAULT '[]',
-    selection_factors_json TEXT NOT NULL DEFAULT '[]'
+    selection_factors_json TEXT NOT NULL DEFAULT '[]',
+    -- What kind of option this is, as asserted by the builder that made it.
+    -- Nullable: rows written before builders classified themselves genuinely
+    -- have no category, and NULL says that rather than guessing one.
+    category TEXT
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -618,6 +628,40 @@ def close_db(_error: BaseException | None = None) -> None:
         connection.close()
 
 
+def _allow_null_origin(connection) -> None:
+    """Drop the NOT NULL constraint on `travel_requests.origin`.
+
+    A hotel-only request has no departure country, so the column must accept
+    NULL. Postgres alters in place. SQLite has no `ALTER COLUMN`, so the
+    documented workaround applies: create the relaxed table, copy every row
+    across by name, drop the original and rename. Copying BY NAME rather than
+    positionally matters — this table has gained columns over time and the two
+    shapes need not agree.
+    """
+    if connection.dialect == "postgres":
+        connection.execute(
+            "ALTER TABLE travel_requests ALTER COLUMN origin DROP NOT NULL"
+        )
+        return
+    columns = connection.execute("PRAGMA table_info(travel_requests)").fetchall()
+    if not columns or not any(row[1] == "origin" and row[3] for row in columns):
+        return  # Already nullable, or the table does not exist yet.
+    names = ", ".join(row[1] for row in columns)
+    definitions = ", ".join(
+        f"{row[1]} {row[2]}"
+        + (" PRIMARY KEY" if row[5] else "")
+        + (" NOT NULL" if row[3] and row[1] != "origin" else "")
+        + (f" DEFAULT {row[4]}" if row[4] is not None else "")
+        for row in columns
+    )
+    connection.execute(f"CREATE TABLE travel_requests_migrated ({definitions})")
+    connection.execute(
+        f"INSERT INTO travel_requests_migrated ({names}) SELECT {names} FROM travel_requests"
+    )
+    connection.execute("DROP TABLE travel_requests")
+    connection.execute("ALTER TABLE travel_requests_migrated RENAME TO travel_requests")
+
+
 def initialize(target: Path | str) -> None:
     with connect(target) as connection:
         connection.executescript(
@@ -658,6 +702,20 @@ def initialize(target: Path | str) -> None:
         # city intake existed have no city and must stay readable. A NULL here
         # means "country granularity", which the flight adapter handles by
         # falling back to the country's main gateway.
+        if "category" not in existing_columns("options"):
+            connection.execute("ALTER TABLE options ADD COLUMN category TEXT")
+        # `origin` was NOT NULL until hotel-only scope existed: a stay has no
+        # departure country. Postgres can relax the constraint in place;
+        # SQLite cannot, so the table is rebuilt with its rows copied across.
+        _allow_null_origin(connection)
+        # Which specialists the request asked for. NOT NULL with a default
+        # rather than nullable: a row written before selective dispatch existed
+        # ran every specialist, and `both` is exactly what that means. A NULL
+        # here would be indistinguishable from "nobody recorded it".
+        if "plan_scope" not in request_columns:
+            connection.execute(
+                "ALTER TABLE travel_requests ADD COLUMN plan_scope TEXT NOT NULL DEFAULT 'both'"
+            )
         for name in ("origin_city", "destination_city"):
             if name not in request_columns:
                 connection.execute(f"ALTER TABLE travel_requests ADD COLUMN {name} TEXT")
@@ -760,14 +818,14 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
         db.execute(
             """INSERT INTO travel_requests
                (id, user_id, origin, destination, origin_city, destination_city,
-                departure_date, return_date, travellers,
+                plan_scope, departure_date, return_date, travellers,
                 traveller_ages_json, traveller_genders_json, budget, currency, preferences_json,
                 traveller_accessibility_needs_json, accessibility_needs_json,
                 refinement_notes_json, risk_tolerance)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (request_id, user_id, request.origin, request.destination,
              getattr(request, "origin_city", None), getattr(request, "destination_city", None),
-             str(request.departure_date),
+             getattr(request, "plan_scope", "both"), str(request.departure_date),
              str(request.return_date), request.travellers, _json(request.traveller_ages),
              _json(request.traveller_genders), request.budget, request.currency,
              _json(request.preferences), _json(request.traveller_accessibility_needs),
@@ -792,11 +850,12 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
                 db.execute(
                     """INSERT INTO options
                        (finding_id, name, description, estimated_cost, currency, source_urls_json,
-                        assumptions_json, limitations_json, selection_factors_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        assumptions_json, limitations_json, selection_factors_json, category)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (finding_id, option.name, option.description, option.estimated_cost,
                      option.currency, _json(option.source_urls), _json(option.assumptions),
-                     _json(option.limitations), _json(option.selection_factors)),
+                     _json(option.limitations), _json(option.selection_factors),
+                     getattr(option, "category", None)),
                 )
         for message in messages:
             item = message.model_dump(mode="json") if hasattr(message, "model_dump") else message

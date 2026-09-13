@@ -21,6 +21,10 @@ DEFAULT_CURRENCY = "SGD"
 
 # The required set of TravelRequest, as questions. Order is the order asked.
 SCALAR_FIELDS: tuple[tuple[str, str, str, str | None], ...] = (
+    # No trailing "?" — `clarification_question` lowercases these labels into a
+    # list ("could you share what to plan, flying from, ..."), so a label that
+    # ends a sentence terminates that one mid-way.
+    ("plan_scope", "What to plan", "scope", None),
     ("origin", "Flying from", "country", None),
     ("destination", "Destination country", "country", None),
     ("destination_city", "Destination city", "text", "The city you will be staying in"),
@@ -90,12 +94,20 @@ def clarification_question(missing: list[MissingField]) -> str:
     return f"Before I brief the specialist agents, could you share {needed}?"
 
 
+# Questions that only a journey has an answer to. A hotel-only request is a
+# stay: nobody flies, and `TravelRequest` does not require an origin for that
+# scope, so asking would collect a field nothing downstream reads.
+JOURNEY_ONLY_FIELDS = frozenset({"origin"})
+
+
 def compute_gaps(extracted: ExtractedIntent) -> list[MissingField]:
     """Everything still needed before `TravelRequest` would accept this."""
+    hotel_only = extracted.plan_scope == "hotel"
     missing = [
         MissingField(name=name, label=label, input=kind, hint=hint)
         for name, label, kind, hint in SCALAR_FIELDS
         if getattr(extracted, name) is None
+        and not (hotel_only and name in JOURNEY_ONLY_FIELDS)
     ]
     # An impossible date pair is a question, not an error. Asking again keeps the
     # traveller in the card with their other answers intact, rather than letting
@@ -173,6 +185,9 @@ def to_request_payload(extracted: ExtractedIntent) -> dict:
         "origin": extracted.origin,
         "destination": extracted.destination,
         "destination_city": extracted.destination_city,
+        # `both` when unanswered: the superset runs an agent the traveller may
+        # not have needed, which is the harmless direction to fail.
+        "plan_scope": extracted.plan_scope or "both",
         "departure_date": extracted.departure_date.isoformat(),
         "return_date": extracted.return_date.isoformat(),
         "travellers": extracted.travellers,

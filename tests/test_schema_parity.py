@@ -94,3 +94,17 @@ def test_both_schemas_declare_the_same_indexes():
         return [" ".join(match.split()) for match in INDEX.findall(schema)]
 
     assert normalize(SCHEMA_SQLITE) == normalize(SCHEMA_POSTGRES)
+
+
+def test_the_specialist_roster_matches_the_graph():
+    """`safeguards.SPECIALIST_NAMES` must list exactly the graph's specialists.
+
+    safeguards declares its own copy so the deterministic layer does not depend
+    on how the workflow is composed. That independence is only safe while the
+    two agree: a specialist added to the graph but missing here would never be
+    reported as unconsulted, and the traveller would not be told it was skipped.
+    """
+    from flaskapp.travel_ai.graph import SPECIALISTS
+    from flaskapp.travel_ai.safeguards import SPECIALIST_NAMES
+
+    assert set(SPECIALIST_NAMES) == set(SPECIALISTS)
