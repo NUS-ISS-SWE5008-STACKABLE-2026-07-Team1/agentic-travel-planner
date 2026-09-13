@@ -1,26 +1,26 @@
-"""The multi-gap relaxation scenario (update.md §5, "give one example where Flight
+"""The multi-gap acknowledgment scenario (update.md §5, "give one example where Flight
 Agent needs the LLM instead of being deterministic").
 
 Fixture: a leg where every surviving flight is BOTH a red-eye (departs 22:30+) AND
-arrives after the traveller's stated soft arrival preference — two valid relaxation
-gaps exist simultaneously, and `PreferenceRelaxation` only allows proposing one. Built
-once here so both the mocked tests below and `scripts/demo_multi_gap_relaxation.py`
+arrives after the traveller's stated soft arrival preference — two valid acknowledgment
+gaps exist simultaneously, and `PreferenceAcknowledgment` only allows proposing one. Built
+once here so both the mocked tests below and `scripts/demo_multi_gap_acknowledgment.py`
 (a real-LLM comparison) share the identical data — single source of truth, no drift
 between what's tested and what's demoed.
 
-What this file CAN prove: the mechanism handles either valid relaxation choice
+What this file CAN prove: the mechanism handles either valid acknowledgment choice
 correctly, for both a family and a solo-traveller context, and the deterministic gap
 detection itself expresses no preference between the two gaps (it hands the LLM a
 genuinely open choice). What this file CANNOT prove: that an LLM's actual choice is
 context-sensitive — every response below is authored by the test, not a model.
 
-**That claim WAS tested for real, 2026-07-20**, via `scripts/demo_multi_gap_relaxation.py`
-against gpt-4.1-mini: family relaxed `soft_arrival_preference` (kept avoiding the
-red-eye), solo relaxed `avoid_red_eye` instead (kept the arrival-time preference) —
+**That claim WAS tested for real, 2026-07-20**, via `scripts/demo_multi_gap_acknowledgment.py`
+against gpt-4.1-mini: family acknowledged `soft_arrival_preference` (kept avoiding the
+red-eye), solo acknowledged `avoid_red_eye` instead (kept the arrival-time preference) —
 different choices, both citing party composition in the rationale. See `update.md`
 2026-07-20 for the full result and the one prompt change (`prompts.py`, weigh `party`
 when multiple gaps exist) that produced it — the first run, before that instruction
-existed, chose the same relaxation both times.
+existed, chose the same acknowledgment both times.
 """
 
 from unittest.mock import Mock
@@ -35,7 +35,7 @@ from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightInventoryItem,
     FlightPreferences,
     FlightProposalRequest,
-    PreferenceRelaxation,
+    PreferenceAcknowledgment,
     TripContext,
 )
 
@@ -86,7 +86,7 @@ DUAL_GAP_INVENTORY = [DGAP1, DGAP2, RETURN_LEG]
 
 
 def family_request() -> FlightProposalRequest:
-    """A family with two young children — plausibly better served relaxing the
+    """A family with two young children — plausibly better served acknowledging the
     arrival-time preference (land a bit later, in daylight) than putting kids
     through a red-eye."""
     return FlightProposalRequest(
@@ -98,7 +98,7 @@ def family_request() -> FlightProposalRequest:
 
 def solo_business_request() -> FlightProposalRequest:
     """A solo traveller — plausibly better served keeping the red-eye (arrive
-    already, use the day) and relaxing the arrival-time preference instead, or
+    already, use the day) and acknowledging the arrival-time preference instead, or
     the reverse — the point is it's genuinely not obviously the same answer as
     the family case, and nothing in the deterministic layer decides it."""
     return FlightProposalRequest(
@@ -134,13 +134,13 @@ def test_mechanism_accepts_avoid_red_eye_choice(build_request):
     response = FlightAgentResponse(
         rationale="Proposing to relax red-eye avoidance to open up options.",
         highlighted_flight_ids=["DGAP1-20260901"],
-        proposed_relaxation=PreferenceRelaxation(field="avoid_red_eye", reason="both gaps present"),
+        proposed_acknowledgment=PreferenceAcknowledgment(field="avoid_red_eye", reason="both gaps present"),
         confidence=0.6,
     )
     llm = _fake_llm(response)
     proposal, result = run_flight_agent(build_request(), DUAL_GAP_INVENTORY, llm)
-    assert result.relaxation_applied is not None
-    assert result.relaxation_applied.field == "avoid_red_eye"
+    assert result.acknowledgment_applied is not None
+    assert result.acknowledgment_applied.field == "avoid_red_eye"
 
 
 @pytest.mark.parametrize("build_request", [family_request, solo_business_request])
@@ -148,15 +148,15 @@ def test_mechanism_accepts_soft_arrival_preference_choice(build_request):
     response = FlightAgentResponse(
         rationale="Proposing to relax the arrival-time preference instead.",
         highlighted_flight_ids=["DGAP1-20260901"],
-        proposed_relaxation=PreferenceRelaxation(
+        proposed_acknowledgment=PreferenceAcknowledgment(
             field="soft_arrival_preference", direction="OUTBOUND", reason="both gaps present"
         ),
         confidence=0.6,
     )
     llm = _fake_llm(response)
     proposal, result = run_flight_agent(build_request(), DUAL_GAP_INVENTORY, llm)
-    assert result.relaxation_applied is not None
-    assert result.relaxation_applied.field == "soft_arrival_preference"
+    assert result.acknowledgment_applied is not None
+    assert result.acknowledgment_applied.field == "soft_arrival_preference"
 
 
 def test_fixture_is_symmetric_between_the_two_party_contexts():

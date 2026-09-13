@@ -1,8 +1,8 @@
-"""Option B — bounded soft-preference relaxation (discussion_agents_vs_deterministic.md §1).
+"""Option B — bounded soft-preference acknowledgment (discussion_agents_vs_deterministic.md §1).
 
 Two layers under test:
 - domain.py: gap detection + validation + application (pure, no LLM).
-- agent.py: the LLM proposes a relaxation, code re-verifies and applies at
+- agent.py: the LLM proposes a acknowledgment, code re-verifies and applies at
   most one extra tool+LLM pass. Fake ChatModel, no real API call.
 """
 
@@ -10,11 +10,11 @@ from unittest.mock import Mock
 
 from flaskapp.travel_ai.agents.flight_agent.reasoning import run_flight_agent
 from flaskapp.travel_ai.agents.flight_agent.domain import (
-    apply_relaxation,
+    apply_acknowledgment,
     flight_preference_gaps,
     preference_gap_for_leg,
     propose_flights,
-    relaxation_is_valid,
+    acknowledgment_is_valid,
 )
 from flaskapp.travel_ai.agents.flight_agent.schemas import (
     ArrivalPreference,
@@ -22,7 +22,7 @@ from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightInventoryItem,
     FlightPreferences,
     FlightProposalRequest,
-    PreferenceRelaxation,
+    PreferenceAcknowledgment,
     TripContext,
 )
 
@@ -58,7 +58,7 @@ def _flight(flight_id, dep_ts, arr_ts, price, stops=0):
 
 
 # Both outbound options are red-eyes — so avoid_red_eye can't be satisfied by
-# any surviving flight: a genuine, relaxable gap.
+# any surviving flight: a genuine, acknowledgeable gap.
 RE1 = _flight("RE1", "2026-09-01T23:00+08:00", "2026-09-02T05:00+09:00", 300)
 RE2 = _flight("RE2", "2026-09-01T22:30+08:00", "2026-09-02T04:30+09:00", 350)
 # A return leg with a normal daytime flight so RETURN has no gap.
@@ -98,7 +98,7 @@ def test_no_gap_when_some_survivor_satisfies_the_pref():
     assert "avoid_red_eye" not in gaps["OUTBOUND"]
 
 
-def test_empty_leg_produces_no_gap_hard_constraint_not_relaxable():
+def test_empty_leg_produces_no_gap_hard_constraint_not_acknowledgeable():
     # max_stops=0 is a hard filter; combined with an all-connecting inventory
     # the leg is empty -> no gap, because emptiness is a hard-constraint problem.
     connecting = _flight("C1", "2026-09-01T09:00+08:00", "2026-09-01T18:00+09:00", 400, stops=1)
@@ -110,41 +110,41 @@ def test_empty_leg_produces_no_gap_hard_constraint_not_relaxable():
     assert gaps == []
 
 
-def test_relaxation_is_valid_only_for_a_real_gap():
+def test_acknowledgment_is_valid_only_for_a_real_gap():
     gaps = {"OUTBOUND": ["avoid_red_eye"], "RETURN": []}
-    assert relaxation_is_valid(PreferenceRelaxation(field="avoid_red_eye", reason="x"), gaps) is True
-    assert relaxation_is_valid(PreferenceRelaxation(field="prefer_direct", reason="x"), gaps) is False
+    assert acknowledgment_is_valid(PreferenceAcknowledgment(field="avoid_red_eye", reason="x"), gaps) is True
+    assert acknowledgment_is_valid(PreferenceAcknowledgment(field="prefer_direct", reason="x"), gaps) is False
 
 
-def test_apply_relaxation_turns_off_exactly_one_soft_pref():
+def test_apply_acknowledgment_turns_off_exactly_one_soft_pref():
     prefs = FlightPreferences(avoid_red_eye=True, prefer_direct=True)
-    relaxed = apply_relaxation(prefs, PreferenceRelaxation(field="avoid_red_eye", reason="x"))
-    assert relaxed.avoid_red_eye is False
-    assert relaxed.prefer_direct is True  # untouched
+    acknowledged = apply_acknowledgment(prefs, PreferenceAcknowledgment(field="avoid_red_eye", reason="x"))
+    assert acknowledged.avoid_red_eye is False
+    assert acknowledged.prefer_direct is True  # untouched
 
 
-def test_apply_relaxation_removes_only_the_scoped_soft_arrival_pref():
+def test_apply_acknowledgment_removes_only_the_scoped_soft_arrival_pref():
     prefs = FlightPreferences(arrival_preferences=[
         ArrivalPreference(direction="OUTBOUND", by="2026-09-01T12:00+09:00", hard=False),
         ArrivalPreference(direction="RETURN", by="2026-09-05T20:00+08:00", hard=False),
     ])
-    relaxed = apply_relaxation(prefs, PreferenceRelaxation(field="soft_arrival_preference", direction="OUTBOUND", reason="x"))
-    remaining = {p.direction for p in relaxed.arrival_preferences}
+    acknowledged = apply_acknowledgment(prefs, PreferenceAcknowledgment(field="soft_arrival_preference", direction="OUTBOUND", reason="x"))
+    remaining = {p.direction for p in acknowledged.arrival_preferences}
     assert remaining == {"RETURN"}
 
 
 # --- agent-level (LLM + code fence) ---
 
-def test_valid_relaxation_triggers_second_tool_pass_and_is_recorded():
+def test_valid_acknowledgment_triggers_second_tool_pass_and_is_recorded():
     request = _request(FlightPreferences(avoid_red_eye=True))
     first = FlightAgentResponse(
         rationale="Both options are red-eyes; proposing to relax that.",
         highlighted_flight_ids=["RE1", "RET1"],
-        proposed_relaxation=PreferenceRelaxation(field="avoid_red_eye", reason="all outbound are red-eyes"),
+        proposed_acknowledgment=PreferenceAcknowledgment(field="avoid_red_eye", reason="all outbound are red-eyes"),
         confidence=0.6,
     )
     second = FlightAgentResponse(
-        rationale="After relaxing red-eye avoidance, RE1 is cheapest.",
+        rationale="After acknowledging red-eye avoidance, RE1 is cheapest.",
         highlighted_flight_ids=["RE1", "RET1"],
         confidence=0.8,
     )
@@ -152,20 +152,20 @@ def test_valid_relaxation_triggers_second_tool_pass_and_is_recorded():
 
     proposal, response = run_flight_agent(request, INVENTORY, llm)
 
-    assert structured_llm.invoke.call_count == 2  # reasoned again after relaxing
-    assert response.relaxation_applied is not None
-    assert response.relaxation_applied.field == "avoid_red_eye"
+    assert structured_llm.invoke.call_count == 2  # reasoned again after acknowledging
+    assert response.acknowledgment_applied is not None
+    assert response.acknowledgment_applied.field == "avoid_red_eye"
     assert response.rationale == second.rationale
 
 
-def test_invalid_relaxation_is_ignored_not_applied():
+def test_invalid_acknowledgment_is_ignored_not_applied():
     # prefer_direct isn't a real gap here (all flights are direct), so even if
     # the LLM proposes it, code must ignore it — no second pass, no application.
     request = _request(FlightPreferences(avoid_red_eye=True))
     only = FlightAgentResponse(
         rationale="Trying to relax the wrong thing.",
         highlighted_flight_ids=["RE1", "RET1"],
-        proposed_relaxation=PreferenceRelaxation(field="prefer_direct", reason="not actually a gap"),
+        proposed_acknowledgment=PreferenceAcknowledgment(field="prefer_direct", reason="not actually a gap"),
         confidence=0.5,
     )
     llm, structured_llm = _fake_llm(only)
@@ -173,10 +173,10 @@ def test_invalid_relaxation_is_ignored_not_applied():
     proposal, response = run_flight_agent(request, INVENTORY, llm)
 
     assert structured_llm.invoke.call_count == 1  # no second pass
-    assert response.relaxation_applied is None
+    assert response.acknowledgment_applied is None
 
 
-def test_no_relaxation_proposed_behaves_exactly_as_before():
+def test_no_acknowledgment_proposed_behaves_exactly_as_before():
     request = _request(FlightPreferences(avoid_red_eye=True))
     only = FlightAgentResponse(
         rationale="Presenting options as-is.",
@@ -188,15 +188,15 @@ def test_no_relaxation_proposed_behaves_exactly_as_before():
     proposal, response = run_flight_agent(request, INVENTORY, llm)
 
     assert structured_llm.invoke.call_count == 1
-    assert response.relaxation_applied is None
+    assert response.acknowledgment_applied is None
     assert response is only
 
 
-def test_relaxation_field_cannot_express_a_hard_constraint():
-    # Schema-level fence: PreferenceRelaxation.field is a Literal, so a hard
-    # constraint literally cannot be constructed as a relaxation target.
+def test_acknowledgment_field_cannot_express_a_hard_constraint():
+    # Schema-level fence: PreferenceAcknowledgment.field is a Literal, so a hard
+    # constraint literally cannot be constructed as a acknowledgment target.
     import pydantic
     import pytest
 
     with pytest.raises(pydantic.ValidationError):
-        PreferenceRelaxation(field="max_price", reason="should be impossible")
+        PreferenceAcknowledgment(field="max_price", reason="should be impossible")

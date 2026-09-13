@@ -110,8 +110,9 @@ def derive_flight_preferences(preferences: list[str]) -> FlightPreferences:
     """Best-effort structured preferences from the form's free-text list.
 
     Only sets SOFT preferences, and only on unambiguous phrases. A soft
-    preference affects ranking and can be relaxed by the option-B path; it
-    never excludes a flight. That asymmetry is what makes a conservative guess
+    preference affects ranking and can be acknowledged as unmet by the
+    option-B path; it never excludes a flight. That asymmetry is what makes a
+    conservative guess
     safe here — a wrong guess costs ranking order, not a viable option.
     """
     lowered = [p.lower() for p in preferences]

@@ -256,34 +256,34 @@ def test_seen_ids_accumulate_across_searches():
     assert ctx.cache.seen_ids, "searching registered nothing"
 
 
-# --- Relaxation ---------------------------------------------------------------
+# --- Acknowledgment ---------------------------------------------------------------
 
 
-def test_relaxation_without_a_real_gap_is_ignored(tracer):
+def test_acknowledgment_without_a_real_gap_is_ignored(tracer):
     """The model's claim that a gap exists is never trusted."""
     ctx = _context(tracer=tracer)
     tools.search_flights(ctx, direction="OUTBOUND")
 
-    result = tools.relax_constraint(
+    result = tools.acknowledge_unmet_preference(
         ctx, field="avoid_red_eye", reason="I would like more options."
     )
 
     assert result["applied"] is False
     assert result["reason_code"] == "no_matching_gap"
-    assert ctx.relaxation_applied is None
+    assert ctx.acknowledgment_applied is None
 
 
-def test_relaxation_cannot_express_a_hard_constraint():
-    """The closed `Literal` on `PreferenceRelaxation.field` is the fence: budget,
+def test_acknowledgment_cannot_express_a_hard_constraint():
+    """The closed `Literal` on `PreferenceAcknowledgment.field` is the fence: budget,
     accessibility and max_stops are not expressible, not merely rejected later."""
-    result = tools.relax_constraint(_context(), field="budget", reason="too expensive")
+    result = tools.acknowledge_unmet_preference(_context(), field="budget", reason="too expensive")
 
     assert result["error"] == "invalid_args"
     assert "avoid_red_eye" in result["allowed"]["field"]
 
 
-def test_arrival_relaxation_requires_a_direction():
-    result = tools.relax_constraint(
+def test_arrival_acknowledgment_requires_a_direction():
+    result = tools.acknowledge_unmet_preference(
         _context(), field="soft_arrival_preference", reason="no viable options"
     )
     assert result["error"] == "invalid_args"
@@ -394,7 +394,7 @@ def test_node_fetches_inventory_exactly_once(tracer):
 # hypothetical one. The first version of the histogram keyed on each reason's
 # leading clause, so twelve rows rejected for the same cause produced twelve
 # distinct keys with a count of one. The model searched, saw no pattern, tried
-# relaxing a preference instead (correctly rejected, since the preference was not
+# acknowledging a preference instead (correctly rejected, since the preference was not
 # the problem) and gave up on a leg that had flights two days away.
 #
 # Every unit test passed at the time. The signal, not the plumbing, was broken.

@@ -164,12 +164,12 @@ def test_tool_call_budget_refuses_rather_than_raising():
     assert "detail" in refused, "the model was not told how to proceed"
 
 
-def test_relaxation_budget_allows_exactly_one():
-    """Preserves the pre-loop guarantee — at most one relaxation, ever — now
+def test_acknowledgment_budget_allows_exactly_one():
+    """Preserves the pre-loop guarantee — at most one acknowledgment, ever — now
     enforced by the budget rather than by the shape of the call sequence."""
-    budget = LoopBudget(max_relaxations=1)
-    assert budget.spend_relaxation() is True
-    assert budget.spend_relaxation() is False
+    budget = LoopBudget(max_acknowledgments=1)
+    assert budget.spend_acknowledgment() is True
+    assert budget.spend_acknowledgment() is False
 
 
 def test_llm_turn_budget_is_enforced():
@@ -221,7 +221,7 @@ def test_fresh_resets_counters_but_keeps_limits():
 def test_counts_are_integers_for_the_audit_trail():
     counts = LoopBudget().start().as_counts()
     assert set(counts) == {
-        "llm_turns", "tool_calls", "provider_calls", "relaxations", "elapsed_ms",
+        "llm_turns", "tool_calls", "provider_calls", "acknowledgments", "elapsed_ms",
     }
     assert all(isinstance(value, int) for value in counts.values())
 

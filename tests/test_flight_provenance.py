@@ -169,7 +169,7 @@ def test_tools_cannot_widen_the_ledger():
 
     # Every non-searching tool, and a refused search.
     tools.rank_flights(ctx, direction="OUTBOUND", priority=["cost"])
-    tools.relax_constraint(ctx, field="avoid_red_eye", reason="more options please")
+    tools.acknowledge_unmet_preference(ctx, field="avoid_red_eye", reason="more options please")
     tools.search_flights(ctx, direction="OUTBOUND", origin_airports=["JFK"])
 
     assert ctx.cache.seen_ids == before

@@ -87,7 +87,7 @@ NO_CONCRETE_OPTIONS_WARNING = (
 # also usable standalone (the demo scripts call it directly, with no graph).
 # Inside the node those two duplicate the lifecycle events this module already
 # records, and the admin monitor reads that stream — so they are dropped here
-# while everything genuinely new (relaxation applied/rejected, blocked input,
+# while everything genuinely new (acknowledgment applied/rejected, blocked input,
 # failed LLM attempts) passes through untouched.
 _DUPLICATE_EVENTS = frozenset({"agent_started", "agent_completed"})
 
@@ -226,10 +226,10 @@ def _build_finding(
     warnings = list(unresolved) + _coverage_warnings(proposal)
     if response.escalate and response.escalation_reason:
         warnings.append(f"Escalation requested: {response.escalation_reason}")
-    if response.relaxation_applied is not None:
+    if response.acknowledgment_applied is not None:
         warnings.append(
-            f"Relaxed the soft preference '{response.relaxation_applied.field}' to find "
-            f"viable options: {response.relaxation_applied.reason}"
+            f"The soft preference '{response.acknowledgment_applied.field}' could not be "
+            f"satisfied by any available option: {response.acknowledgment_applied.reason}"
         )
     return AgentFinding(
         agent=NAME,

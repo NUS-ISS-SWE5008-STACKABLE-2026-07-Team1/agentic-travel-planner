@@ -7,8 +7,8 @@ first and is never bypassed — search/filter/rank stays deterministic,
 reliable, and cheap. The LLM only reasons over the tool's already-grounded
 output: writing the traveller-facing rationale, judging whether to escalate,
 and — option B, localfolder/discussion_agents_vs_deterministic.md §1 — proposing (never
-deciding) a bounded relaxation of Flight Agent's *own* soft preferences when
-a leg comes back empty-of-good-options. This keeps Flight Agent at the
+deciding) that one of Flight Agent's *own* soft preferences be acknowledged as
+unmet, when every surviving flight already fails it. This keeps Flight Agent at the
 "structured-output" pattern (llmops_plan.md §8), not a full autonomous
 tool-calling loop — matches the course's own "pick the lowest agency level
 that solves the problem" guidance.
@@ -20,12 +20,13 @@ ungrounded output. The tool's output is always usable on its own even if the
 LLM call fails entirely, which is deliberate: Flight Agent degrades to
 workflow-level reliability, never blocks a negotiation on the LLM.
 
-Option B's fence, enforced in code (not just the prompt): a relaxation only
-ever takes effect if (1) `PreferenceRelaxation.field` is one of the three
-soft preferences — the schema itself can't express anything else — and (2)
-`domain.relaxation_is_valid()` re-confirms a real gap exists, never trusting
-the LLM's own claim. At most one extra tool call and one extra LLM call per
-run — bounded, not a loop.
+Option B's fence, enforced in code (not just the prompt): an acknowledgment
+only ever takes effect if (1) `PreferenceAcknowledgment.field` is one of the
+three soft preferences — the schema itself can't express anything else — and
+(2) `domain.acknowledgment_is_valid()` re-confirms a real, unanimous gap
+exists, never trusting the LLM's own claim. At most one extra tool call and
+one extra LLM call per run — bounded, not a loop. Applying it never changes
+which flights are shown; only that the traveller is told the wish went unmet.
 
 Input/output screening (2026-07-20, guardrails.py): `trip_context.preferences`
 (the only free text this agent ever receives) is screened for injection/bias/
@@ -42,10 +43,10 @@ import json
 from typing import Any, Protocol
 
 from flaskapp.travel_ai.agents.flight_agent.domain import (
-    apply_relaxation,
+    acknowledgment_is_valid,
+    apply_acknowledgment,
     flight_preference_gaps,
     propose_flights,
-    relaxation_is_valid,
     screen_flights,
 )
 from flaskapp.travel_ai.agents.flight_agent.guardrails import (
@@ -104,7 +105,7 @@ def _build_messages(
                     "negotiation_history": [h.model_dump() for h in request.negotiation_history],
                     "proposal": proposal.model_dump(),
                     "screening": [s.model_dump() for s in screening],
-                    "relaxable_preference_gaps": gaps,
+                    "acknowledgeable_preference_gaps": gaps,
                 }
             ),
         },
@@ -150,7 +151,7 @@ def _reason_over_proposal(
     tracer,
 ) -> FlightAgentResponse:
     """The retry-then-fallback loop, isolated so option B can call it a
-    second time (post-relaxation) without duplicating the logic."""
+    second time (post-acknowledgment) without duplicating the logic."""
     structured_llm = llm.with_structured_output(FlightAgentResponse, method="json_schema")
     messages = _build_messages(request, proposal, screening, gaps)
 
@@ -191,12 +192,16 @@ def run_flight_agent(
 ) -> tuple[FlightProposal, FlightAgentResponse]:
     """The tool always runs; the brain reasons over its output, fail-closed.
 
-    Option B: if the brain proposes relaxing one of its own soft preferences
-    and `domain.relaxation_is_valid()` confirms a real gap exists, this runs
-    the tool once more with the relaxed preferences and reasons again over
-    the new result — at most one extra tool call, one extra LLM pass, ever.
-    Anything else (a hallucinated or invalid relaxation) is ignored, not
-    applied — the original proposal/response stands.
+    Option B: if the brain proposes acknowledging one of its own soft
+    preferences as unmet and `domain.acknowledgment_is_valid()` confirms a
+    real, unanimous gap exists, this runs the tool once more with the
+    acknowledgment applied and reasons again over the new result — at most
+    one extra tool call, one extra LLM pass, ever. Anything else (a
+    hallucinated or invalid acknowledgment) is ignored, not applied — the
+    original proposal/response stands. Re-running never changes the
+    candidates for this exact gap (everything in it already ties on the
+    acknowledged criterion); it exists so the second pass's rationale can
+    honestly say the wish was acknowledged rather than silently dropped.
 
     `tracer` is optional and duck-typed to `tracing.AuditTracer` (`.record(event,
     agent, details)`) — not required, so this stays testable without one.
@@ -222,36 +227,37 @@ def run_flight_agent(
         if tracer is not None:
             tracer.record("agent_completed", "flight_agent", {
                 "escalate": response.escalate, "confidence": response.confidence,
-                "relaxation_applied": False,
+                "acknowledgment_applied": False,
             })
         return proposal, response
 
     response = _reason_over_proposal(request, proposal, screening, gaps, llm, tracer)
 
-    relaxation = response.proposed_relaxation
-    if relaxation is not None and relaxation_is_valid(relaxation, gaps):
+    acknowledgment = response.proposed_acknowledgment
+    if acknowledgment is not None and acknowledgment_is_valid(acknowledgment, gaps):
         if tracer is not None:
-            tracer.record("agent_relaxation_applied", "flight_agent", {
-                "field": relaxation.field, "direction": relaxation.direction, "reason": relaxation.reason,
+            tracer.record("agent_acknowledgment_applied", "flight_agent", {
+                "field": acknowledgment.field, "direction": acknowledgment.direction,
+                "reason": acknowledgment.reason,
             })
-        relaxed_prefs = apply_relaxation(request.trip_context.flight_preferences, relaxation)
-        relaxed_context = request.trip_context.model_copy(update={"flight_preferences": relaxed_prefs})
-        relaxed_request = request.model_copy(update={"trip_context": relaxed_context})
+        updated_prefs = apply_acknowledgment(request.trip_context.flight_preferences, acknowledgment)
+        updated_context = request.trip_context.model_copy(update={"flight_preferences": updated_prefs})
+        updated_request = request.model_copy(update={"trip_context": updated_context})
 
-        proposal = propose_flights(relaxed_request, inventory)  # the one extra tool call
-        screening = screen_flights(relaxed_request, inventory)
-        gaps = flight_preference_gaps(relaxed_request, inventory)
-        response = _reason_over_proposal(relaxed_request, proposal, screening, gaps, llm, tracer)
-        response = response.model_copy(update={"relaxation_applied": relaxation})
-    elif relaxation is not None and tracer is not None:
-        tracer.record("agent_relaxation_rejected", "flight_agent", {
-            "field": relaxation.field, "direction": relaxation.direction,
+        proposal = propose_flights(updated_request, inventory)  # the one extra tool call
+        screening = screen_flights(updated_request, inventory)
+        gaps = flight_preference_gaps(updated_request, inventory)
+        response = _reason_over_proposal(updated_request, proposal, screening, gaps, llm, tracer)
+        response = response.model_copy(update={"acknowledgment_applied": acknowledgment})
+    elif acknowledgment is not None and tracer is not None:
+        tracer.record("agent_acknowledgment_rejected", "flight_agent", {
+            "field": acknowledgment.field, "direction": acknowledgment.direction,
             "reason": "no matching gap found; ignored, not applied",
         })
 
     if tracer is not None:
         tracer.record("agent_completed", "flight_agent", {
             "escalate": response.escalate, "confidence": response.confidence,
-            "relaxation_applied": response.relaxation_applied is not None,
+            "acknowledgment_applied": response.acknowledgment_applied is not None,
         })
     return proposal, response

@@ -1,4 +1,4 @@
-"""Live demo: does the LLM's relaxation choice actually differ by traveller context?
+"""Live demo: does the LLM's acknowledgment choice actually differ by traveller context?
 
 This is the real proof update.md's multi-gap follow-up item calls for — every test in
 tests/test_flight_multi_gap_context.py mocks the LLM's response (we author what "the
@@ -12,7 +12,7 @@ Needs a provider configured in .env/.env.secrets (see .env.example). Not runnabl
 network/key assumed) — this is scaffolding, ready to run the moment a key exists.
 
 Usage:
-    python scripts/demo_multi_gap_relaxation.py
+    python scripts/demo_multi_gap_acknowledgment.py
 """
 
 from __future__ import annotations
@@ -31,37 +31,37 @@ from tests.test_flight_multi_gap_context import (
 )
 
 
-def _print_relaxation_status(response) -> None:
+def _print_acknowledgment_status(response) -> None:
     """Unambiguous status line, independent of which of the two possible
     result shapes `response` is in:
 
-    - A relaxation was applied: `relaxation_applied` is what call #1 proposed
-      and code actually acted on. `proposed_relaxation` at this point is a
-      DIFFERENT field — call #2's own fresh suggestion on the post-relaxation
-      result, which was NEVER applied (bounded to one relaxation per run).
+    - A acknowledgment was applied: `acknowledgment_applied` is what call #1 proposed
+      and code actually acted on. `proposed_acknowledgment` at this point is a
+      DIFFERENT field — call #2's own fresh suggestion on the post-acknowledgment
+      result, which was NEVER applied (bounded to one acknowledgment per run).
       Printing both under the same unqualified label reads as a mismatch;
       it isn't one — see update.md 2026-07-20 for the full trace that found
       this the first time this script actually ran.
-    - No relaxation was applied: `proposed_relaxation` (if present) is
+    - No acknowledgment was applied: `proposed_acknowledgment` (if present) is
       whatever call #1 proposed that code rejected as not matching a real
       gap, or there was nothing to propose in the first place.
     """
-    applied = response.relaxation_applied
-    proposed = response.proposed_relaxation
+    applied = response.acknowledgment_applied
+    proposed = response.proposed_acknowledgment
     if applied:
-        print(f"relaxation_applied: {applied.field} ({applied.reason})")
+        print(f"acknowledgment_applied: {applied.field} ({applied.reason})")
         if proposed:
             print(
                 f"further gap noted next round (NOT applied - bounded to one "
-                f"relaxation per run): {proposed.field} ({proposed.reason})"
+                f"acknowledgment per run): {proposed.field} ({proposed.reason})"
             )
     elif proposed:
         print(
-            f"proposed_relaxation (NOT applied - code found no matching gap, "
+            f"proposed_acknowledgment (NOT applied - code found no matching gap, "
             f"ignored): {proposed.field} ({proposed.reason})"
         )
     else:
-        print("relaxation: none proposed or applied")
+        print("acknowledgment: none proposed or applied")
 
 
 def _run(label: str, request, llm):
@@ -69,7 +69,7 @@ def _run(label: str, request, llm):
     print(f"\n{'=' * 60}\n{label}\n{'=' * 60}")
     print(f"party: {request.trip_context.party}")
     print(f"rationale: {response.rationale}")
-    _print_relaxation_status(response)
+    _print_acknowledgment_status(response)
     print(f"escalate: {response.escalate}")
     return response
 
@@ -88,19 +88,19 @@ def main() -> None:
 
     print(f"\n{'=' * 60}\nCOMPARISON\n{'=' * 60}")
     same_choice = (
-        family.relaxation_applied
-        and solo.relaxation_applied
-        and family.relaxation_applied.field == solo.relaxation_applied.field
+        family.acknowledgment_applied
+        and solo.acknowledgment_applied
+        and family.acknowledgment_applied.field == solo.acknowledgment_applied.field
     )
     if same_choice:
         print(
-            "Same relaxation chosen for both contexts - either the model isn't "
+            "Same acknowledgment chosen for both contexts - either the model isn't "
             "weighing party context here, or both are legitimately equally valid for "
             "this scenario. Worth a closer look / a sharper fixture, not proof either way."
         )
     else:
         print(
-            "DIFFERENT relaxation chosen per context - direct evidence the LLM's "
+            "DIFFERENT acknowledgment chosen per context - direct evidence the LLM's "
             "choice is context-sensitive, not a fixed rule wearing a prompt."
         )
 

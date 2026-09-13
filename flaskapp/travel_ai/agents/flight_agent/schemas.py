@@ -145,7 +145,7 @@ class FlightPreferences(BaseModel):
     # can't seat the whole party. UI suggests this on when party has children,
     # user decides. `seat_configuration`: SOFT — e.g. {"window": 2, "aisle": 2};
     # ranks flights that can satisfy it higher, never excludes (also a valid
-    # option-B relaxation target). `seat_tier_preference`: SOFT — which fare
+    # option-B acknowledgment target). `seat_tier_preference`: SOFT — which fare
     # tier's fee applies; EXIT_ROW is invalid when wheelchair assistance is
     # needed (enforced in domain.py, not here — this schema doesn't see
     # accessibility_needs). An accessible seat REQUIREMENT is NOT a preference:
@@ -383,16 +383,23 @@ class FlightScreeningResult(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
-class PreferenceRelaxation(BaseModel):
-    """A structured, code-validated proposal to relax one of Flight Agent's
-    own soft preferences (option B — localfolder/discussion_agents_vs_deterministic.md).
+class PreferenceAcknowledgment(BaseModel):
+    """A structured, code-validated admission that one of Flight Agent's own
+    soft preferences could not be honoured (option B —
+    localfolder/discussion_agents_vs_deterministic.md). Despite the verb this
+    replaced ("relax"), applying this NEVER changes which flights are shown or
+    their order — soft preferences never excluded or reordered anything a
+    hard filter didn't already settle, so there is nothing left to loosen.
+    What it changes is disclosure: the traveller is told the wish could not be
+    met, instead of it being silently dropped.
+
     This is the LLM's *only* permitted authority over control flow, and the
     Literal below is the actual enforcement of that fence: the LLM cannot
     even express a request to touch max_stops, a hard arrival preference,
     accessibility, or budget — those aren't valid values of `field`, so
     Pydantic rejects them before this ever reaches domain.py.
-    `domain.relaxation_is_valid()` re-verifies against the real gap before
-    anything acts on this — never trust the LLM's own claim.
+    `domain.acknowledgment_is_valid()` re-verifies against a real, unanimous
+    gap before anything acts on this — never trust the LLM's own claim.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -402,7 +409,7 @@ class PreferenceRelaxation(BaseModel):
     reason: str
 
     @model_validator(mode="after")
-    def direction_required_for_arrival_preference(self) -> "PreferenceRelaxation":
+    def direction_required_for_arrival_preference(self) -> "PreferenceAcknowledgment":
         if self.field == "soft_arrival_preference" and self.direction is None:
             raise ValueError("direction is required when field='soft_arrival_preference'")
         return self
@@ -423,22 +430,25 @@ class FlightAgentResponse(BaseModel):
     highlighted_flight_ids: list[str] = Field(default_factory=list)
     escalate: bool = False
     escalation_reason: str | None = None
-    suggested_relaxation: str | None = Field(
+    suggested_acknowledgment: str | None = Field(
         default=None,
-        description="Free-text explanation of why a relaxation might help — "
-        "human-readable companion to the structured proposed_relaxation "
-        "below, which is the field code actually acts on.",
+        description="Free-text explanation of why acknowledging one soft "
+        "preference as unmet might help — human-readable companion to the "
+        "structured proposed_acknowledgment below, which is the field code "
+        "actually acts on.",
     )
-    proposed_relaxation: PreferenceRelaxation | None = Field(
+    proposed_acknowledgment: PreferenceAcknowledgment | None = Field(
         default=None,
-        description="A concrete, bounded request to relax one of Flight "
-        "Agent's own soft preferences — only takes effect if "
-        "domain.relaxation_is_valid() confirms a real gap exists.",
+        description="A concrete, bounded admission that one of Flight "
+        "Agent's own soft preferences could not be honoured — only takes "
+        "effect if domain.acknowledgment_is_valid() confirms every "
+        "surviving flight really does fail it.",
     )
-    relaxation_applied: PreferenceRelaxation | None = Field(
+    acknowledgment_applied: PreferenceAcknowledgment | None = Field(
         default=None,
         description="Set by code (agent.py), never by the LLM, after "
-        "validating and applying a proposed_relaxation — the audit record "
-        "of what option B actually did, if anything.",
+        "validating and applying a proposed_acknowledgment — the audit "
+        "record of what option B actually did, if anything. Never changes "
+        "which flights are shown; it only changes what the traveller is told.",
     )
     confidence: float = Field(ge=0, le=1)
