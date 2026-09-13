@@ -14,7 +14,7 @@ def _guarded_evidence(state):
     return sanitize_evidence(retrieve_accessibility_evidence(state))
 
 
-def create_node(llm, tracer):
+def create_node(llm, tracer, config=None):
     return make_specialist_node(
         NAME, INSTRUCTION, llm, tracer,
         context_provider=_guarded_evidence,

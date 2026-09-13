@@ -27,10 +27,10 @@ def _specialist_node(name, create_node, llm, tracer, settings):
     resolving it once means it cannot change under a traveller mid-plan.
     """
     if name != FLIGHT_NAME:
-        return create_node(llm, tracer)
+        return create_node(llm, tracer, config=settings)
     transport = str(settings.get("FLIGHT_AGENT_TRANSPORT", "inprocess")).strip().lower()
     if transport != "a2a":
-        return create_node(llm, tracer)
+        return create_node(llm, tracer, config=settings)
     endpoint = settings.get("FLIGHT_AGENT_A2A_URL") or (
         f"{str(settings.get('A2A_BASE_URL', '')).rstrip('/')}/a2a/{FLIGHT_NAME}"
     )
@@ -56,6 +56,11 @@ def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None,
     # Current design: START -> all four specialists in parallel -> orchestrator -> END.
     # Add conditional edges here if an agent should run only for certain requests.
     settings = vars(Config) if config is None else config
+    if config is None and tracer.database_path:
+        # `AuditTracer` is created from the app's runtime DATABASE setting
+        # (including E2E's throwaway per-run SQLite path). Keep provider-backed
+        # specialists on that same database instead of Config.DATABASE defaults.
+        settings = {**settings, "DATABASE": tracer.database_path}
     workflow = StateGraph(TravelGraphState)
     for name, create_node in SPECIALIST_NODE_FACTORIES.items():
         node = _specialist_node(name, create_node, llm, tracer, settings)

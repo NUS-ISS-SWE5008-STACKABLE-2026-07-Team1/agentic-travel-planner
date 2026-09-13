@@ -188,6 +188,25 @@ def test_setting_the_transport_to_a2a_installs_the_remote_node(tracer):
     assert node.__name__ == "remote_node"
 
 
+@pytest.mark.parametrize("name, settings", [
+    ("risk_advisory_agent", {"DATABASE": "tmp/e2e.sqlite3"}),
+    (NAME, {"DATABASE": "tmp/e2e.sqlite3", "FLIGHT_AGENT_TRANSPORT": "inprocess"}),
+])
+def test_inprocess_specialists_receive_runtime_settings(name, settings, tracer):
+    """Provider-backed agents must read the app's runtime config, not Config defaults."""
+    from flaskapp.travel_ai.graph import _specialist_node
+
+    observed = {}
+
+    def fake_factory(_llm, _tracer, config=None):
+        observed["config"] = config
+        return lambda _state: {}
+
+    _specialist_node(name, fake_factory, _grounded_llm(), tracer, settings)
+
+    assert observed["config"] is settings
+
+
 def test_the_switch_only_affects_the_flight_agent(tracer):
     """Other specialists keep running in-process regardless."""
     from flaskapp.travel_ai.graph import _specialist_node
