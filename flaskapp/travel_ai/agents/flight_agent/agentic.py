@@ -1,7 +1,7 @@
 """The tool-calling loop: agentic in process, grounded in fact.
 
-The model decides *what to search*, *how to rank* and *whether to relax*. It never
-decides what a flight says. That separation is what makes a loop safe here, and it
+The model decides *what to search*, *how to rank* and *whether a preference went
+unmet*. It never decides what a flight says. That separation is what makes a loop safe here, and it
 is held by four things, none of which is the prompt:
 
 - **`tools.py`'s envelope** caps how far a search may move a date and which
@@ -267,7 +267,7 @@ def run_agentic_flight_agent(
             })
 
     # Best-available-so-far, in code and with no model involved: whatever the loop
-    # found, ranked deterministically under any relaxation it legitimately applied.
+    # found, ranked deterministically under any acknowledgment it legitimately applied.
     resolved = ctx.resolved_request()
     rows, notes = ctx.cache.rows_for(resolved)
     ctx.notes.extend(note for note in notes if note not in ctx.notes)
@@ -282,8 +282,8 @@ def run_agentic_flight_agent(
     proposal = ctx.final_proposal(ctx.cache.all_rows or rows)
 
     response = _terminal_response(llm, ctx, messages, proposal, tracer)
-    if ctx.relaxation_applied is not None:
-        response = response.model_copy(update={"relaxation_applied": ctx.relaxation_applied})
+    if ctx.acknowledgment_applied is not None:
+        response = response.model_copy(update={"acknowledgment_applied": ctx.acknowledgment_applied})
 
     ctx.record(EVENT_LOOP_COMPLETED, {
         "candidate_count": len(proposal.candidates),

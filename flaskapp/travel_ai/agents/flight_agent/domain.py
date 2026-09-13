@@ -19,7 +19,7 @@ from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightProposal,
     FlightProposalRequest,
     FlightScreeningResult,
-    PreferenceRelaxation,
+    PreferenceAcknowledgment,
     TripContext,
 )
 
@@ -449,7 +449,7 @@ def _survivors_for_leg(
 ) -> list[FlightInventoryItem]:
     """Items passing every hard filter (route, date, seats, constraints,
     hard preferences) for this leg — unsorted, before top_n. Shared by
-    ranking (`rank_leg`) and the option-B relaxation-gap check
+    ranking (`rank_leg`) and the option-B acknowledgment-gap check
     (`preference_gap_for_leg`) so the two never drift apart."""
     return [
         item
@@ -467,12 +467,13 @@ def preference_gap_for_leg(
     leg_date: date,
     direction: str,
 ) -> list[str]:
-    """Which soft preferences, if relaxed, could plausibly change this leg's
-    result — i.e. every hard-filter survivor still violates it. Empty list
-    means either nothing violates, or (deliberately) there are no survivors
-    at all: an empty leg is a hard-constraint problem (accessibility, seats,
-    dates, max_stops, a hard arrival deadline), never something Flight
-    Agent's own soft-preference relaxation (option B) is allowed to touch —
+    """Which soft preferences every hard-filter survivor unanimously still
+    violates — i.e. where acknowledging the preference as unmet is at least
+    honest, even though it changes nothing about which flights are shown.
+    Empty list means either nothing violates, or (deliberately) there are no
+    survivors at all: an empty leg is a hard-constraint problem (accessibility,
+    seats, dates, max_stops, a hard arrival deadline), never something Flight
+    Agent's own soft-preference acknowledgment (option B) is allowed to touch —
     that must go to escalation instead, see localfolder/discussion_agents_vs_deterministic.md.
     """
     survivors = _survivors_for_leg(inventory, request, origin=origin, dest=dest, leg_date=leg_date, direction=direction)
@@ -491,8 +492,9 @@ def preference_gap_for_leg(
 
 
 def flight_preference_gaps(request: FlightProposalRequest, inventory: list[FlightInventoryItem]) -> dict[str, list[str]]:
-    """Both legs' relaxation gaps — what agent.py shows the LLM so it knows
-    what's actually relaxable (if anything) before proposing option B."""
+    """Both legs' acknowledgment gaps — what agent.py shows the LLM so it
+    knows what's actually acknowledgeable (if anything) before proposing
+    option B."""
     ctx = request.trip_context
     return {
         "OUTBOUND": preference_gap_for_leg(
@@ -508,31 +510,37 @@ def flight_preference_gaps(request: FlightProposalRequest, inventory: list[Fligh
     }
 
 
-def relaxation_is_valid(relaxation: PreferenceRelaxation, gaps: dict[str, list[str]]) -> bool:
-    """Code-side re-verification that a proposed relaxation corresponds to a
-    real, currently-existing gap — never trust the LLM's own claim that
-    relaxing something would help. This is what keeps option B bounded: an
-    LLM can *ask* to relax avoid_red_eye/prefer_direct/soft_arrival_preference,
-    but the request only ever takes effect if this returns True."""
-    directions = [relaxation.direction] if relaxation.direction else ["OUTBOUND", "RETURN"]
-    return any(relaxation.field in gaps.get(d, []) for d in directions)
+def acknowledgment_is_valid(acknowledgment: PreferenceAcknowledgment, gaps: dict[str, list[str]]) -> bool:
+    """Code-side re-verification that a proposed acknowledgment corresponds
+    to a real, currently-existing gap — never trust the LLM's own claim that
+    a preference actually went unmet. This is what keeps option B bounded: an
+    LLM can *ask* to acknowledge avoid_red_eye/prefer_direct/soft_arrival_preference
+    as unmet, but the request only ever takes effect if this returns True."""
+    directions = [acknowledgment.direction] if acknowledgment.direction else ["OUTBOUND", "RETURN"]
+    return any(acknowledgment.field in gaps.get(d, []) for d in directions)
 
 
-def apply_relaxation(prefs: FlightPreferences, relaxation: PreferenceRelaxation) -> FlightPreferences:
+def apply_acknowledgment(prefs: FlightPreferences, acknowledgment: PreferenceAcknowledgment) -> FlightPreferences:
     """A new FlightPreferences with exactly one soft preference turned off —
     never touches max_stops or any hard arrival_preference (those aren't
-    valid `PreferenceRelaxation.field` values at the schema level, so this
-    can't accidentally reach a hard constraint)."""
+    valid `PreferenceAcknowledgment.field` values at the schema level, so this
+    can't accidentally reach a hard constraint).
+
+    Turning the flag off here does NOT change which flights are shown for the
+    gap that justified this call — every survivor already failed it unanimously,
+    so there was nothing left for the flag to differentiate. It only changes
+    ranking behaviour for whatever the loop searches next (a later, mixed
+    result set could genuinely be affected by it)."""
     update: dict = {}
-    if relaxation.field == "avoid_red_eye":
+    if acknowledgment.field == "avoid_red_eye":
         update["avoid_red_eye"] = False
-    elif relaxation.field == "prefer_direct":
+    elif acknowledgment.field == "prefer_direct":
         update["prefer_direct"] = False
-    elif relaxation.field == "soft_arrival_preference":
+    elif acknowledgment.field == "soft_arrival_preference":
         update["arrival_preferences"] = [
             pref
             for pref in prefs.arrival_preferences
-            if pref.hard or pref.direction != relaxation.direction
+            if pref.hard or pref.direction != acknowledgment.direction
         ]
     return prefs.model_copy(update=update)
 

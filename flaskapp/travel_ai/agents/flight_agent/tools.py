@@ -1,10 +1,11 @@
 """The three callable pieces of `domain.py`, as tools an agent can invoke.
 
 This is the "agentic in process, grounded in fact" seam. The model decides *what
-to search*, *how to rank* and *whether to relax*; it never decides what a flight
-says. Every row these tools return came from a provider, every ordering came from
-`domain._rank_key`, and every relaxation was re-verified against a real gap
-before it took effect.
+to search*, *how to rank* and *whether a soft preference went unmet*; it never
+decides what a flight says. Every row these tools return came from a provider,
+every ordering came from `domain._rank_key`, and every acknowledgment was
+re-verified against a real, unanimous gap before it took effect — never against
+more flights, since acknowledging one never produces any.
 
 **Langchain-free, deliberately.** `reasoning.py` carries the same property so its
 grounding and fallback logic can be tested without langchain installed
@@ -39,17 +40,17 @@ from typing import Any
 from flaskapp.travel_ai.agents.flight_agent.domain import (
     DEFAULT_RANK_PRIORITY,
     RANK_COMPONENTS,
-    apply_relaxation,
+    acknowledgment_is_valid,
+    apply_acknowledgment,
     flight_preference_gaps,
     normalise_priority,
     rank_leg,
-    relaxation_is_valid,
     screen_leg,
 )
 from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightProposal,
     FlightProposalRequest,
-    PreferenceRelaxation,
+    PreferenceAcknowledgment,
 )
 from flaskapp.travel_ai.agents.loop import (
     EVENT_TOOL_CALLED,
@@ -130,9 +131,9 @@ class ToolContext:
     """Mutable working state for one agent run.
 
     `base_request` is the traveller's actual request and is never mutated: it is
-    the reference the date envelope is measured against, so a relaxation cannot
-    move the goalposts it is checked by. `current_request` carries any applied
-    relaxation.
+    the reference the date envelope is measured against, so an acknowledged
+    preference cannot move the goalposts it is checked by. `current_request`
+    carries any acknowledgment applied so far.
     """
 
     base_request: FlightProposalRequest
@@ -140,7 +141,7 @@ class ToolContext:
     cache: InventoryCache
     budget: LoopBudget
     tracer: Any | None = None
-    relaxation_applied: PreferenceRelaxation | None = None
+    acknowledgment_applied: PreferenceAcknowledgment | None = None
     notes: list[str] = field(default_factory=list)
     # Per-run rather than a module constant so `FLIGHT_AGENT_MAX_DATE_SHIFT_DAYS`
     # can tune it without the envelope becoming a global.
@@ -334,8 +335,8 @@ def _search_request(
 ) -> FlightProposalRequest:
     """`current_request` with this search's overrides applied.
 
-    Built from `current_request` so an applied relaxation stays in force, and
-    only ever narrowed by values the envelope already approved.
+    Built from `current_request` so an applied acknowledgment stays in force,
+    and only ever narrowed by values the envelope already approved.
     """
     updates: dict[str, Any] = {}
     if depart_date is not None:
@@ -381,9 +382,9 @@ def _reason_histogram(screening) -> dict[str, int]:
     clause, which for the commonest case ("departs 2026-09-10, requested
     2026-09-12") produced one bucket per row: twelve keys with a count of one
     each. Against a real model that was actively misleading — it searched, saw no
-    pattern in the noise, tried relaxing a preference instead (correctly rejected,
-    since the preference was not the problem), and gave up on a leg that had
-    flights two days away.
+    pattern in the noise, tried acknowledging a preference as unmet instead
+    (correctly rejected, since the preference was not the problem), and gave up
+    on a leg that had flights two days away.
 
     Twelve rows excluded for `wrong_date` is a signal. Twelve distinct strings is
     not.
@@ -549,52 +550,54 @@ def rank_flights(
     }
 
 
-def relax_constraint(ctx: ToolContext, *, field: str, direction: str | None = None, reason: str) -> dict:
-    """Propose relaxing one soft preference. Verified before it takes effect.
+def acknowledge_unmet_preference(ctx: ToolContext, *, field: str, direction: str | None = None, reason: str) -> dict:
+    """Admit that one soft preference is unanimously unmet. Verified before it
+    takes effect, and never changes which flights are shown — see the module
+    and class docstrings for why "relax" was the wrong verb for this.
 
     Two fences, both unchanged from the pre-loop implementation:
 
-    1. `PreferenceRelaxation.field` is a closed `Literal`, so a request to touch
-       `max_stops`, budget, or accessibility cannot even be expressed.
-    2. `domain.relaxation_is_valid()` re-confirms a real gap exists. The caller's
-       own claim that one does is never trusted.
+    1. `PreferenceAcknowledgment.field` is a closed `Literal`, so a request to
+       touch `max_stops`, budget, or accessibility cannot even be expressed.
+    2. `domain.acknowledgment_is_valid()` re-confirms a real, unanimous gap
+       exists. The caller's own claim that one does is never trusted.
 
-    At most one relaxation per run, as before — enforced by the budget rather
-    than by the shape of the call sequence.
+    At most one acknowledgment per run, as before — enforced by the budget
+    rather than by the shape of the call sequence.
     """
     try:
-        relaxation = PreferenceRelaxation(field=field, direction=direction, reason=reason)
+        acknowledgment = PreferenceAcknowledgment(field=field, direction=direction, reason=reason)
     except Exception as exc:  # noqa: BLE001 - a malformed proposal is a refusal, not a crash
-        ctx.record(EVENT_TOOL_REJECTED, {"tool": "relax_constraint", "reason_code": REASON_INVALID_ARGS})
+        ctx.record(EVENT_TOOL_REJECTED, {"tool": "acknowledge_unmet_preference", "reason_code": REASON_INVALID_ARGS})
         return _refusal(
             REASON_INVALID_ARGS, str(exc),
             allowed={"field": ["avoid_red_eye", "prefer_direct", "soft_arrival_preference"]},
         )
 
     gaps = flight_preference_gaps(ctx.current_request, ctx.cache.all_rows)
-    if not relaxation_is_valid(relaxation, gaps):
+    if not acknowledgment_is_valid(acknowledgment, gaps):
         # Same event name and wording as the pre-loop path, so existing trace
         # consumers keep working.
-        ctx.record("agent_relaxation_rejected", {
-            "field": relaxation.field, "direction": relaxation.direction,
+        ctx.record("agent_acknowledgment_rejected", {
+            "field": acknowledgment.field, "direction": acknowledgment.direction,
             "reason": "no matching gap found; ignored, not applied",
         })
         return {"applied": False, "reason_code": "no_matching_gap", "gaps": gaps}
 
-    if not ctx.budget.spend_relaxation():
+    if not ctx.budget.spend_acknowledgment():
         ctx.record(EVENT_TOOL_REJECTED, {
-            "tool": "relax_constraint", "reason_code": REASON_BUDGET_EXHAUSTED,
+            "tool": "acknowledge_unmet_preference", "reason_code": REASON_BUDGET_EXHAUSTED,
         })
-        return {"applied": False, "reason_code": "relaxation_budget_exhausted"}
+        return {"applied": False, "reason_code": "acknowledgment_budget_exhausted"}
 
-    ctx.record("agent_relaxation_applied", {
-        "field": relaxation.field, "direction": relaxation.direction,
+    ctx.record("agent_acknowledgment_applied", {
+        "field": acknowledgment.field, "direction": acknowledgment.direction,
     })
-    relaxed = apply_relaxation(ctx.current_request.trip_context.flight_preferences, relaxation)
-    context = ctx.current_request.trip_context.model_copy(update={"flight_preferences": relaxed})
+    updated = apply_acknowledgment(ctx.current_request.trip_context.flight_preferences, acknowledgment)
+    context = ctx.current_request.trip_context.model_copy(update={"flight_preferences": updated})
     ctx.current_request = ctx.current_request.model_copy(update={"trip_context": context})
-    ctx.relaxation_applied = relaxation
-    return {"applied": True, "field": relaxation.field, "direction": relaxation.direction}
+    ctx.acknowledgment_applied = acknowledgment
+    return {"applied": True, "field": acknowledgment.field, "direction": acknowledgment.direction}
 
 
 # OpenAI-format tool schemas. Hand-written dicts, not `@tool` decorators, so this
@@ -659,11 +662,16 @@ TOOL_SPECS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "relax_constraint",
+            "name": "acknowledge_unmet_preference",
             "description": (
-                "Propose relaxing ONE of the traveller's soft preferences when a leg has "
-                "no viable options. The proposal is re-verified against the real inventory "
-                "gap and is ignored if no such gap exists. At most one per request."
+                "Admit that EVERY surviving flight for a leg fails the same ONE soft "
+                "preference (e.g. all remaining options are red-eyes). Not for an empty "
+                "leg with zero options — use search_flights with a different date or "
+                "airport for that instead. This is re-verified against the real, "
+                "unanimous gap and is ignored if no such gap exists. It never changes "
+                "which flights are shown or their order; it only discloses the tradeoff "
+                "to the traveller instead of silently dropping their wish. At most one "
+                "per request."
             ),
             "parameters": {
                 "type": "object",
@@ -687,7 +695,7 @@ TOOL_SPECS: list[dict] = [
 _TOOLS = {
     "search_flights": search_flights,
     "rank_flights": rank_flights,
-    "relax_constraint": relax_constraint,
+    "acknowledge_unmet_preference": acknowledge_unmet_preference,
 }
 
 

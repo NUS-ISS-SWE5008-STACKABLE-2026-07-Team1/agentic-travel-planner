@@ -66,8 +66,8 @@ A2A request
 | File | Role |
 | --- | --- |
 | `agent.py` | The graph node. Owns the mode gate, the fallback, and `Option` construction |
-| `domain.py` | Pure functions, no I/O, no langchain. Hard filters, ranking, relaxation gaps |
-| `schemas.py` | Flight contracts. Read the `FlightInventoryItem` and `PreferenceRelaxation` docstrings |
+| `domain.py` | Pure functions, no I/O, no langchain. Hard filters, ranking, preference-acknowledgment gaps |
+| `schemas.py` | Flight contracts. Read the `FlightInventoryItem` and `PreferenceAcknowledgment` docstrings |
 | `adapter.py` | The only file that knows both the shared and flight schemas |
 | `airports.py` | country + city -> every airport serving that city |
 | `guardrails.py` | Input/output screening and flight-ID grounding |
@@ -91,11 +91,13 @@ A2A request
   position is individually nameable, which is what lets `_candidate_to_option` restate
   them honestly as `selection_factors`. `cost` is forced terminal so ties always resolve
   deterministically.
-- **`PreferenceRelaxation.field` is a three-value `Literal`, and that is the actual
-  fence.** The model cannot express a request to relax `max_stops`, budget, a hard
+- **`PreferenceAcknowledgment.field` is a three-value `Literal`, and that is the actual
+  fence.** The model cannot express a request to touch `max_stops`, budget, a hard
   arrival deadline, or accessibility — Pydantic rejects it before `domain.py` sees it.
-  `domain.relaxation_is_valid()` then re-verifies against a real gap; never trust the
-  model's own claim that relaxing something would help.
+  `domain.acknowledgment_is_valid()` then re-verifies a real, unanimous gap exists;
+  never trust the model's own claim. Acknowledging a preference never produces more or
+  different flights — it only discloses that the wish went unmet, which is why it is
+  called `acknowledge_unmet_preference` in the tool loop, not "relax."
 - **`traveller_genders` reaches the model deliberately**, so the XRAI bias audit can vary
   it. Nothing in ranking reads it and nothing should — `test_flight_bias_audit.py`
   asserts deterministic ranking is byte-identical across genders.
@@ -231,5 +233,5 @@ remain in `audit_events`.
 `/admin` (gated by `ADMIN_EMAILS`) shows live agent status, latest structured responses
 and token usage. Every plan returns a `trace_url` for its tamper-evident JSONL chain.
 Useful trace events: `agent_fallback`, `agent_path2_options_stripped`,
-`agent_relaxation_applied` / `_rejected`, `agent_llm_attempt_failed`,
+`agent_acknowledgment_applied` / `_rejected`, `agent_llm_attempt_failed`,
 `agent_tool_rejected`, `agent_budget_exhausted`, `agent_loop_completed`.

@@ -83,12 +83,18 @@ guess at what a search might return.
 How to work:
 
 1. Call `search_flights` for OUTBOUND and for RETURN.
-2. If a leg comes back with no viable options, do something about it before giving
-   up. Either search again with the date moved by a day or two, or use
-   `relax_constraint` to drop ONE soft preference. The exclusion histogram in each
-   search result tells you which is the real problem: dates that do not match, a
-   party too large for the seats left, or a preference nothing satisfies.
-3. Search results arrive ordered by overall cost, which is the right default and
+2. If a leg comes back with NO options at all, the only fix is to search again —
+   move the date by a day or two, or try a different resolved airport. The
+   exclusion histogram in the result tells you the real hard-constraint problem:
+   dates that do not match, a party too large for the seats left, and so on.
+   `acknowledge_unmet_preference` cannot help here — it is not a search, so it
+   cannot turn zero options into more.
+3. If a leg DOES have options, but every single one of them shares the same one
+   drawback the traveller asked to avoid (e.g. all remaining rows are red-eyes),
+   call `acknowledge_unmet_preference` to say so. This never changes which flights
+   are shown or their order — it only tells the traveller their wish could not be
+   honoured, instead of it being silently dropped.
+4. Search results arrive ordered by overall cost, which is the right default and
    wrong for some travellers. Call `rank_flights` when ANY of these is true, and
    say in your answer why you did:
    - they stated a wheelchair or accessibility need — lead with
@@ -103,7 +109,7 @@ How to work:
    is applied after, and cost always breaks ties. If a factor does not apply to
    this traveller the tool will tell you it had no effect — do not call it again
    for the same leg.
-4. Stop as soon as you have viable options for both legs. Searching more than you
+5. Stop as soon as you have viable options for both legs. Searching more than you
    need makes a traveller wait for no benefit.
 
 Limits worth knowing, so you do not waste turns discovering them:
@@ -111,19 +117,19 @@ Limits worth knowing, so you do not waste turns discovering them:
 - A search may move a date by only a few days from the traveller's own, and may
   only use airports serving the cities they chose. A call outside that comes back
   as a refusal telling you what is allowed — correct it rather than repeating it.
-- You may relax at most one soft preference per request, and only
+- You may acknowledge at most one soft preference as unmet per request, and only
   `avoid_red_eye`, `prefer_direct` or `soft_arrival_preference`. Budget,
-  accessibility and maximum stops are never yours to relax.
-- A relaxation is verified against the real inventory gap before it takes effect.
-  Proposing one that does not match a real gap achieves nothing.
+  accessibility and maximum stops are never yours to touch.
+- An acknowledgment is verified against a real, unanimous gap before it takes
+  effect. Proposing one that does not match a real gap achieves nothing.
 - Your turns are limited. If you run out, whatever you have found is what the
   traveller gets, so search in a sensible order.
 
 When you are done, explain your choice for the traveller: why these flights, what
-you traded off, and anything they should check before booking. If you relaxed a
-preference or searched a different date, say so plainly — they asked for something
-slightly different from what you are showing them. If a leg has no options at all,
-say that too; it is a real answer and more useful than a hedge."""
+you traded off, and anything they should check before booking. If you acknowledged
+an unmet preference or searched a different date, say so plainly — they asked for
+something slightly different from what you are showing them. If a leg has no
+options at all, say that too; it is a real answer and more useful than a hedge."""
 
 
 # Prompt pattern: structured-output, not ReAct, per localfolder/llmops_plan.md
@@ -146,21 +152,25 @@ candidates — that has already been done correctly. Your job is to:
    cheaper base fare with pricey seats can cost more overall), referencing only
    flight_ids that appear in the proposal you were given.
 2. If every surviving candidate on a leg still violates one of the traveller's OWN soft
-   preferences, you may propose relaxing exactly that preference via
-   `proposed_relaxation`. You will be shown `relaxable_preference_gaps` — a per-leg list
-   of the soft preferences that, if relaxed, could actually change the result. Only
-   propose a relaxation whose `field` appears in that list for the relevant direction;
-   proposing anything else is pointless (code re-checks and ignores it). Set
-   `suggested_relaxation` to a short human-readable explanation of why. This is a
-   proposal, not a decision — the system re-verifies and applies at most one.
+   preferences, you may propose acknowledging exactly that preference as unmet via
+   `proposed_acknowledgment`. You will be shown `acknowledgeable_preference_gaps` — a
+   per-leg list of the soft preferences that every surviving candidate already fails.
+   Acknowledging one does NOT change the candidates or their order — everything in
+   that list already ties on the criterion, so there is nothing left for it to
+   differentiate. What it changes is disclosure: the traveller is told the wish went
+   unmet, instead of it being silently dropped. Only propose an acknowledgment whose
+   `field` appears in that list for the relevant direction; proposing anything else is
+   pointless (code re-checks and ignores it). Set `suggested_acknowledgment` to a short
+   human-readable explanation of why. This is a proposal, not a decision — the system
+   re-verifies and applies at most one.
    If MORE THAN ONE gap is listed for the same leg, you must choose between them —
    weigh the travelling party's composition (`party` in the trip context) in making that
    choice, not just which gap appears first. For example: a party that includes children
    is often better served landing a bit later in daylight than avoiding an overnight
    flight is worth to them; a solo traveller might reasonably prefer the opposite
    tradeoff. State which factor about the party actually drove your choice in
-   `suggested_relaxation` — not just that a gap existed, but why THIS gap over the other
-   one given who is travelling.
+   `suggested_acknowledgment` — not just that a gap existed, but why THIS gap over the
+   other one given who is travelling.
 3. Set escalate=true only when you judge this negotiation genuinely cannot continue
    automatically (e.g. no plausible path to a feasible itinerary within reasonable
    flexibility) — this should be rare, not routine.
@@ -169,12 +179,13 @@ Rules:
 - Never state a price, time, seat count, or any fact not present in the proposal or
   screening trace you were given. Never invent a flight_id — every id you cite in
   `highlighted_flight_ids` or your rationale must be one that was actually proposed.
-- An EMPTY leg (no candidates at all) is NEVER something you can fix with a relaxation —
-  it means a hard constraint (accessibility, seats, route, date, max_stops, a hard
-  arrival deadline) removed everything. Do not propose a relaxation for an empty leg;
-  if it blocks the trip, that is an escalate=true situation instead.
-- `proposed_relaxation.field` may ONLY be one of: avoid_red_eye, prefer_direct,
-  soft_arrival_preference. You cannot request relaxing accessibility, budget, seats,
-  max_stops, or a hard arrival deadline — those are not yours to touch.
+- An EMPTY leg (no candidates at all) is NEVER something you can fix with an
+  acknowledgment — it means a hard constraint (accessibility, seats, route, date,
+  max_stops, a hard arrival deadline) removed everything, and acknowledging a soft
+  preference cannot bring any of them back. Do not propose an acknowledgment for an
+  empty leg; if it blocks the trip, that is an escalate=true situation instead.
+- `proposed_acknowledgment.field` may ONLY be one of: avoid_red_eye, prefer_direct,
+  soft_arrival_preference. You cannot request acknowledging accessibility, budget,
+  seats, max_stops, or a hard arrival deadline — those are not yours to touch.
 - Be concise — this rationale may be shown directly to a traveller.
 """

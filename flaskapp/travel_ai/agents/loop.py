@@ -76,13 +76,13 @@ class LoopBudget:
     max_llm_turns: int = 3
     max_tool_calls: int = 6
     max_provider_calls: int = 2
-    max_relaxations: int = 1
+    max_acknowledgments: int = 1
     deadline_seconds: float = 45.0
 
     llm_turns: int = 0
     tool_calls: int = 0
     provider_calls: int = 0
-    relaxations: int = 0
+    acknowledgments: int = 0
 
     # Injected so tests can freeze time without patching a module global.
     _clock: Callable[[], float] = field(default=time.monotonic, repr=False)
@@ -100,7 +100,7 @@ class LoopBudget:
             max_llm_turns=self.max_llm_turns,
             max_tool_calls=self.max_tool_calls,
             max_provider_calls=self.max_provider_calls,
-            max_relaxations=self.max_relaxations,
+            max_acknowledgments=self.max_acknowledgments,
             deadline_seconds=self.deadline_seconds,
             _clock=self._clock,
         )
@@ -127,8 +127,8 @@ class LoopBudget:
     def spend_provider_call(self) -> bool:
         return self._spend("provider_calls", self.max_provider_calls)
 
-    def spend_relaxation(self) -> bool:
-        return self._spend("relaxations", self.max_relaxations)
+    def spend_acknowledgment(self) -> bool:
+        return self._spend("acknowledgments", self.max_acknowledgments)
 
     def elapsed_seconds(self) -> float:
         if self._started is None:
@@ -161,7 +161,7 @@ class LoopBudget:
             "llm_turns": self.llm_turns,
             "tool_calls": self.tool_calls,
             "provider_calls": self.provider_calls,
-            "relaxations": self.relaxations,
+            "acknowledgments": self.acknowledgments,
             "elapsed_ms": int(self.elapsed_seconds() * 1000),
         }
 

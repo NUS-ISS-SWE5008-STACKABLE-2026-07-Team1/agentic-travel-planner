@@ -140,7 +140,7 @@ def test_tools_are_offered_to_the_model(stub_tool_llm):
     run_agentic_flight_agent(_context(), llm)
 
     offered = {spec["function"]["name"] for spec in llm.bound_specs}
-    assert offered == {"search_flights", "rank_flights", "relax_constraint"}
+    assert offered == {"search_flights", "rank_flights", "acknowledge_unmet_preference"}
 
 
 # --- Misbehaviour -------------------------------------------------------------
@@ -214,18 +214,18 @@ def test_unknown_tool_does_not_kill_the_loop(stub_tool_llm):
     assert proposal.candidates
 
 
-def test_at_most_one_relaxation_survives_a_loop_that_asks_twice(stub_tool_llm, tracer):
-    """The pre-loop guarantee was "at most one relaxation, ever". Giving the model
+def test_at_most_one_acknowledgment_survives_a_loop_that_asks_twice(stub_tool_llm, tracer):
+    """The pre-loop guarantee was "at most one acknowledgment, ever". Giving the model
     a tool must not quietly turn that into "as many as it asks for".
 
     Whether either proposal is *valid* depends on the inventory gap and is not
-    what this test is about — `relaxation_is_valid` and the budget are covered
+    what this test is about — `acknowledgment_is_valid` and the budget are covered
     separately. What matters here is that two asks cannot become two applications.
     """
     llm = stub_tool_llm([
         [
-            tool_call("relax_constraint", "c1", field="prefer_direct", reason="no options"),
-            tool_call("relax_constraint", "c2", field="avoid_red_eye", reason="still none"),
+            tool_call("acknowledge_unmet_preference", "c1", field="prefer_direct", reason="no options"),
+            tool_call("acknowledge_unmet_preference", "c2", field="avoid_red_eye", reason="still none"),
         ],
         [],
     ])
@@ -237,9 +237,9 @@ def test_at_most_one_relaxation_survives_a_loop_that_asks_twice(stub_tool_llm, t
 
     run_agentic_flight_agent(ctx, llm)
 
-    assert ctx.budget.relaxations <= 1
+    assert ctx.budget.acknowledgments <= 1
     events = _events(tracer)
-    assert events.count("agent_relaxation_applied") <= 1
+    assert events.count("agent_acknowledgment_applied") <= 1
 
 
 def test_model_failure_mid_loop_still_yields_grounded_options(stub_tool_llm):
