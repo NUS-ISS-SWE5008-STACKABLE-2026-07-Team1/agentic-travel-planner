@@ -195,3 +195,113 @@ def test_ensure_planning_job_satisfies_the_agent_runs_foreign_key(tmp_path):
             ("a2a-task-1",),
         ).fetchone()
     assert row["agent"] == "flight_agent"
+
+
+def test_plan_scope_is_persisted_and_defaults_for_older_rows(tmp_path):
+    """The scope decided which specialists ran, so the audit trail must hold it.
+
+    A row written before this column existed reads back as `both`, which is what
+    those runs actually did.
+    """
+    database = tmp_path / "scope.sqlite3"
+    initialize(database)
+    request = TravelRequest(
+        origin="Singapore", destination="Japan", plan_scope="hotel",
+        departure_date="2026-10-10", return_date="2026-10-16", travellers=1,
+        traveller_ages=[30], traveller_genders=["prefer_not_to_say"],
+        traveller_accessibility_needs=[[]], budget=3000,
+    )
+    save_plan(database, request, _plan_response("33333333-3333-4333-8333-333333333333"), [])
+    with sqlite3.connect(database) as connection:
+        stored = connection.execute("SELECT plan_scope FROM travel_requests").fetchone()[0]
+        assert stored == "hotel"
+        default = connection.execute(
+            "SELECT dflt_value FROM pragma_table_info('travel_requests') "
+            "WHERE name = 'plan_scope'"
+        ).fetchone()[0]
+        assert "both" in default
+
+
+def test_a_hotel_only_request_persists_without_an_origin(tmp_path):
+    """`origin` is NOT NULL in every database created before hotel-only scope.
+
+    A fresh database must accept NULL, and an existing one must be migrated —
+    SQLite cannot DROP NOT NULL in place, so the table is rebuilt.
+    """
+    database = tmp_path / "no-origin.sqlite3"
+    initialize(database)
+    request = TravelRequest(
+        origin=None, destination="Japan", destination_city="Tokyo", plan_scope="hotel",
+        departure_date="2026-10-10", return_date="2026-10-16", travellers=1,
+        traveller_ages=[30], traveller_genders=["prefer_not_to_say"],
+        traveller_accessibility_needs=[[]], budget=3000,
+    )
+    save_plan(database, request, _plan_response("44444444-4444-4444-8444-444444444444"), [])
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT origin FROM travel_requests").fetchone()[0] is None
+
+
+def test_a_legacy_database_with_not_null_origin_is_migrated(tmp_path):
+    """The rebuild path, on a realistic table that predates the change.
+
+    The legacy state is produced from the real schema with NOT NULL put back,
+    rather than a hand-written stub: the table has gained columns over time and
+    a four-column fixture would not exercise the copy.
+    """
+    database = tmp_path / "legacy.sqlite3"
+    initialize(database)
+    with sqlite3.connect(database) as connection:
+        columns = connection.execute("PRAGMA table_info(travel_requests)").fetchall()
+        definitions = ", ".join(
+            f"{row[1]} {row[2]}"
+            + (" PRIMARY KEY" if row[5] else "")
+            + (" NOT NULL" if (row[3] or row[1] == "origin") else "")
+            + (f" DEFAULT {row[4]}" if row[4] is not None else "")
+            for row in columns
+        )
+        names = ", ".join(row[1] for row in columns)
+        connection.execute("DROP TABLE travel_requests")
+        connection.execute(f"CREATE TABLE travel_requests ({definitions})")
+        connection.execute(
+            "INSERT INTO travel_requests (id, origin, destination, departure_date, "
+            "return_date, travellers, budget, currency, risk_tolerance) VALUES "
+            "('old', 'Singapore', 'Japan', '2026-01-01', '2026-01-02', 1, 100, 'SGD', 'medium')"
+        )
+        assert connection.execute(
+            "SELECT \"notnull\" FROM pragma_table_info('travel_requests') WHERE name='origin'"
+        ).fetchone()[0] == 1, "fixture must start NOT NULL"
+
+    initialize(database)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT \"notnull\" FROM pragma_table_info('travel_requests') WHERE name='origin'"
+        ).fetchone()[0] == 0, "origin must be nullable after migration"
+        assert connection.execute(
+            "SELECT origin FROM travel_requests WHERE id='old'"
+        ).fetchone()[0] == "Singapore", "the rebuild must not lose rows"
+
+
+def test_option_category_round_trips_and_is_null_for_older_rows(tmp_path):
+    """The category is a fact the specialist asserted, so the audit trail keeps it.
+
+    Nullable rather than defaulted: a row written before builders classified
+    themselves genuinely has no category, and NULL says exactly that.
+    """
+    from flaskapp.travel_ai.schemas import AgentFinding, Option
+
+    database = tmp_path / "category.sqlite3"
+    initialize(database)
+    response = _plan_response("55555555-5555-4555-8555-555555555555")
+    response.agent_findings = [AgentFinding(
+        agent="hotel_transport_agent", summary="s", confidence=0.9,
+        options=[
+            Option(category="hotel", name="Grand", description="d"),
+            Option(category="transport", name="Express", description="d"),
+            Option(name="Uncategorised", description="d"),
+        ],
+    )]
+    save_plan(database, _request(), response, [])
+    with sqlite3.connect(database) as connection:
+        rows = dict(connection.execute("SELECT name, category FROM options").fetchall())
+    assert rows == {"Grand": "hotel", "Express": "transport", "Uncategorised": None}

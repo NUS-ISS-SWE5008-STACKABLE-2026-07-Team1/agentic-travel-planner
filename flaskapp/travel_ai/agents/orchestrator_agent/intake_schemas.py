@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 Gender = Literal["female", "male", "non_binary", "prefer_not_to_say"]
 
-InputKind = Literal["country", "text", "date", "number", "gender"]
+InputKind = Literal["country", "text", "date", "number", "gender", "scope"]
 
 
 class ExtractedIntent(BaseModel):
@@ -33,6 +33,10 @@ class ExtractedIntent(BaseModel):
     # falls back to its prompt-only path with every option stripped.
     destination: str | None = None
     destination_city: str | None = None
+    # Which specialists the trip needs. Null means the traveller has not said,
+    # which the card asks about; it is never inferred from the destination or
+    # from anything else they wrote.
+    plan_scope: Literal["both", "flights", "hotel"] | None = None
     departure_date: date | None = None
     return_date: date | None = None
     travellers: int | None = Field(default=None, ge=1, le=20)
