@@ -192,6 +192,7 @@ if (planner) {
       )
     ];
     return {
+      plan_scope: data.get("plan_scope") || "both",
       origin: data.get("origin"), destination: data.get("destination"),
       // Omitted rather than sent empty when a country has no mapped cities —
       // the API rejects a blank string but accepts an absent city, which the
@@ -271,6 +272,30 @@ if (planner) {
   // Defensive throughout: a stored payload is data from a previous session and
   // may predate any field added since. Anything missing or unparseable leaves
   // the form exactly as it loaded rather than half-filled.
+  // `origin` and `origin_city` are `required`, so a hotel-only trip could not
+  // pass browser validation at all — the traveller would be asked for a
+  // departure country the request no longer has a field for. Hiding the
+  // fieldset is not enough: a hidden `required` control still blocks
+  // submission, so the attribute is removed and the values cleared.
+  const originFieldset = document.querySelector("#origin-fieldset");
+  const scopeSelect = document.querySelector("#plan_scope");
+  const applyScope = () => {
+    if (!originFieldset || !scopeSelect) return;
+    const hotelOnly = scopeSelect.value === "hotel";
+    originFieldset.hidden = hotelOnly;
+    originFieldset.querySelectorAll("select, input").forEach((field) => {
+      field.required = !hotelOnly && field.dataset.wasRequired !== "false";
+      if (hotelOnly) field.value = "";
+    });
+  };
+  if (scopeSelect && originFieldset) {
+    originFieldset.querySelectorAll("select, input").forEach((field) => {
+      field.dataset.wasRequired = String(field.required);
+    });
+    scopeSelect.addEventListener("change", applyScope);
+    applyScope();
+  }
+
   const restoreStoredTrip = () => {
     let payload;
     try {
@@ -283,6 +308,7 @@ if (planner) {
       const field = planner.querySelector(`[name='${name}']`);
       if (field && value !== undefined && value !== null && value !== "") field.value = value;
     };
+    setValue("plan_scope", payload.plan_scope);
     setValue("origin", payload.origin);
     setValue("destination", payload.destination);
     // Cities are populated from the country, so the country must be set first.
@@ -318,6 +344,10 @@ if (planner) {
       genders.forEach((field, index) => { field.value = (payload.traveller_genders || [])[index] || ""; });
       notes.forEach((field, index) => { field.value = byTraveller[index] || ""; });
     }
+    // Re-apply after restoring: the initial applyScope() ran before this, so a
+    // restored hotel-only trip would otherwise show origin fields it no longer
+    // needs — and show them as required.
+    applyScope();
   };
 
   restoreStoredTrip();
