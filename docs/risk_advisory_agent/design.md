@@ -1,167 +1,149 @@
-# Risk & Advisory Agent — Design v1
+# Risk & Advisory Agent — Design
 
-Written 2026-08-24. A proposal for the team to review before building.
-No existing code was changed to produce this document.
+Describes the agent as it is built today. Sources: `flaskapp/travel_ai/
+agents/risk_advisory_agent/` (adapter.py, schemas.py, providers/, domain.py,
+reasoning.py, guardrails.py, prompt.py, agent.py), `flaskapp/database.py`,
+and `flaskapp/travel_ai/agents/flight_agent/` for the pattern this mirrors.
 
 ---
 
-## 1. What this agent does, end to end
+## 1. The core architecture: the tool decides, the model narrates
 
-One request goes through five steps. Nothing here talks to an outside model
-or an outside API except step 3.
+Same governing idea as Flight and Hotel: `domain.py` queries a grounded set
+of facts in plain Python; the model is handed that finished list and asked
+only to prioritise, connect, and narrate it. Removing the model degrades the
+wording, not the underlying facts.
 
 ```
-1. TravelRequest arrives
-   (origin, destination, departure/return dates, budget, traveller profile)
-        │
-        ▼
-2. Look up three local reference tables
-   - Does the traveller's origin country need a visa for the destination?
-   - Is the travel period inside a known seasonal-risk window (typhoon,
-     monsoon, wildfire season...) at the destination?
-   - Is there a known local event (festival, holiday closure...) overlapping
-     the travel dates at the destination?
-   → produces a list of RiskItem, e.g. "visa: not required, 90 days",
-     "seasonal: typhoon tail season, medium severity",
-     "local_event: autumn festival, price surge expected"
-   This step is plain Python. No model call. The three items above are a
-   fact, not a guess — they either match a table row or they don't.
-        │
-        ▼
-3. A model reads that list and writes the traveller-facing explanation
-   Its only job is to pick what matters, put it in plain language, and —
-   where useful — connect two items into one insight (e.g. "typhoon season
-   overlaps a large festival the same week, so hotel prices are likely up
-   and rooms harder to find, not just one or the other").
-   It is NOT allowed to state a risk that isn't in the list from step 2.
-        │
-        ▼
-4. Check that the model didn't make anything up
-   Every specific risk the model's explanation refers to must be traceable
-   back to a row from step 2. Anything it mentions that isn't there gets
-   dropped before it goes any further.
-        │
-        ▼
-5. Package the result as an AgentFinding
-   The traveller-facing explanation + the underlying risk list + a
-   confidence score + (if severe enough) an escalation flag. This is what
-   goes to the Orchestrator, alongside Flight/Hotel/Accessibility's findings.
+providers/     DatabaseRiskProvider          reads the reference tables
+   ↓
+domain.py      propose_risks()               query + date filter — deterministic
+   ↓
+reasoning.py   run_risk_agent()              the LLM narrates OVER that output
+   ↓                                          grounding + escalation enforced
+guardrails.py  screen_input / screen_output  this agent's own, not borrowed
 ```
 
-**Why step 2 exists at all, instead of just asking the model:** right now
-(see §2) there is no step 2 — the model is asked directly, with nothing to
-check its answer against, so "this country requires a visa" or "there's a
-typhoon risk in October" is something the model is inventing on the spot,
-indistinguishable from something it actually knows. Step 2 gives it a fixed,
-inspectable set of facts to work from, and step 4 makes sure it doesn't add
-its own.
+The consequence that matters: if the LLM call fails or fails a check twice,
+`_fallback_response` renders the tool's own items with no narrative
+(`reasoning.py`). The agent degrades to workflow-level reliability rather
+than blocking, exactly like Flight/Hotel's `_fallback_response`.
 
 ---
 
-## 2. What exists today, and why it needs to change
+## 2. Reference data: three tables, grouped by shape
 
-`risk_advisory_agent/` is currently two files: an 11-line `agent.py` that
-just asks a model to answer freely, and a 7-line prompt. There is no step 2,
-no step 4 — the model's claims about visas, weather, or events are never
-checked against anything, because nothing exists to check them against.
-Fabricated travel-safety information is a real-world hazard, not just a
-quality problem: a traveller who trusts a wrong visa or seasonal-risk claim
-can end up denied entry or caught in weather they weren't warned about.
+`flaskapp/database.py` defines three tables — `risk_standing_facts`,
+`risk_seasonal_windows`, `risk_dated_events` — grouped by how they are
+queried, not by which of the ~18 advisory categories (visa, local laws,
+cultural norms, currency/customs, cybersecurity, crime, scams, political
+stability, traveller-group risk, emergency numbers, seasonal weather, local
+events, public holidays, labour action...) a given row belongs to:
 
----
-
-## 3. The three reference tables (step 2's data)
-
-All three are written by the team, not fetched from anywhere — every value in
-them is illustrative, not a live regulatory fact. That has to stay visible
-to the traveller: every `RiskItem` produced from these tables carries a
-`source` note saying so.
-
-| Table | What it holds | Looked up by |
+| Table | Shape | Queried by |
 |---|---|---|
-| `VISA_TABLE` | origin country, destination country, whether a visa is required, max stay | (origin, destination) |
-| `SEASONAL_RISK_TABLE` | destination country, month range, risk type (typhoon/monsoon/...), severity | (destination, travel dates) |
-| `LOCAL_EVENT_TABLE` | destination country/city, event name, date range, effect (price surge/crowding/closure) | (destination city, travel dates) |
+| `risk_standing_facts` | True regardless of travel dates | destination alone |
+| `risk_seasonal_windows` | Recurring, month-bound | destination + month overlap |
+| `risk_dated_events` | A specific date range | destination + date-range overlap |
 
-One assumption worth stating plainly: the visa lookup uses the traveller's
-*origin country* as a stand-in for their *passport nationality* — the two
-aren't always the same person's same thing (someone can fly from Singapore on
-a different country's passport), and the request form has no separate
-nationality field today. This isn't a new problem this design introduces, but
-it's never been written down before, and it changes how much weight a reader
-should put on the visa result.
+`category` is a free-text column, not an enum or a per-category table, so a
+new advisory category is an inserted row, never a migration.
 
----
+`seed_data.py` populates all three for the five destinations the team
+demos and tests against — Singapore, Berlin, Tokyo, Barcelona, and
+Washington, D.C. — researched from real government and travel-advisory
+sources, then written as illustrative reference data: every row's `source`
+column says so explicitly, and that string is never dropped downstream.
+Several dates deliberately overlap a seasonal window (Tokyo's Obon holiday
+inside typhoon season and summer heat; Washington's Independence Day inside
+hurricane-remnant season) so `reasoning.py` has real, data-backed cases for
+connecting more than one risk into a single insight, guarded by
+`tests/test_risk_advisory_seed_data.py` so an edit to the dates can't
+silently break the overlap.
 
-## 4. Making sure the model can't say something it wasn't given
-
-Two checks run around the model call, same idea as the checks already used
-elsewhere in the codebase for Flight and Hotel:
-
-- **Before the call**: the traveller's own free-text input (preferences,
-  notes) is scanned for injection attempts, bias, and toxic language. If it
-  fails, the model is never called with it — a safe placeholder answer is
-  returned instead.
-- **After the call**: the model's generated explanation is checked two ways —
-  scanned the same way as the input for bias/toxicity/injected text, and
-  checked that every specific risk it names actually came from step 2's
-  table lookups (the grounding check from §1 step 4). If either check fails,
-  it retries once, then falls back to showing the plain table results with
-  no narrative rather than showing something unverified.
-
-If the destination isn't covered by any of the three tables at all, the
-agent falls back to today's plain-prompt behaviour, but with a clear warning
-attached saying the answer is a model estimate, not table-backed — the same
-honesty pattern already used elsewhere when there's no real data to check
-against.
+**A stated assumption:** the traveller's *origin country* stands in for
+their *passport nationality* when reasoning about visas — the two aren't
+always the same (someone can fly from Singapore on a different country's
+passport), and `TravelRequest` has no separate nationality field.
 
 ---
 
-## 5. Data shapes (what the pieces look like)
+## 3. Grounding: `risk_id` and the checks around it
 
-```python
-class RiskCategory(str, Enum):
-    VISA = "visa"
-    HEALTH = "health"
-    SEASONAL_WEATHER = "seasonal_weather"
-    LOCAL_EVENT = "local_event"
-    SAFETY = "safety"
-    DISRUPTION = "disruption"
+Every `RiskItem` `domain.py` produces carries a `risk_id` derived from the
+destination and the fact's own content — `fact-<destination>-<category>`,
+`season-<destination>-<label>`, `event-<destination>-<name>` — not from a
+database row's autoincrement id. That matters because
+`seed_risk_reference_data` reseeds by deleting and reinserting everything;
+an autoincrement-based id would renumber on every reseed and silently break
+any `risk_id` a trace or audit log had already recorded. A content-derived
+id stays the same across a reseed as long as the fact itself hasn't changed.
 
-class RiskItem(BaseModel):
-    risk_id: str
-    category: RiskCategory
-    severity: Literal["low", "medium", "high"]
-    likelihood: Literal["low", "medium", "high"]
-    summary: str
-    mitigation: str | None = None
-    source: str          # e.g. "synthetic reference data — illustrative only"
+Two checks use that id to keep the model honest:
 
-class RiskAgentResponse(BaseModel):
-    rationale: str                    # the plain-language explanation
-    highlighted_risk_ids: list[str]   # which RiskItems it actually used
-    escalate: bool = False
-    escalation_reason: str | None = None
-    confidence: float
-```
-
-**One thing this design flags but does not decide on its own:** today, a
-high-severity risk is marked by the model writing the literal word
-`ESCALATE:` at the start of a sentence — there's no real field for it, so
-whether the Orchestrator actually notices and surfaces it depends entirely on
-the model preserving that exact word through its own summarization. (The
-Accessibility agent has the identical problem with its own `VETO:` word.)
-`RiskAgentResponse.escalate` above is written ready to fix this, but actually
-wiring it in means changing the shared `AgentFinding` schema that Accessibility
-and the Orchestrator also use — not something to change unilaterally inside
-this one agent's folder. It's listed as a decision for the team in §7.
+- **`validate_grounded_response`** (`guardrails.py`) — every id in the
+  model's `highlighted_risk_ids` must exist in what `propose_risks()`
+  actually returned. A fabricated citation triggers a retry, then the
+  no-narrative fallback.
+- **`missing_escalation`** — derived from the data alone, never from the
+  model's own wording: any `RiskItem` with `severity == "high"` means the
+  response must have `escalate=True`, or it is rejected the same way.
+  `traveler_group_risk` items are deliberately excluded from this — the
+  model is never told who is travelling, so it cannot judge whether a given
+  legal-status fact is personally relevant, and the prompt tells it not to
+  guess. Escalation is decided by severity alone.
 
 ---
 
-## 6. Leaving room to plug in real data later, without a rebuild
+## 4. Guardrails: this agent's own, not borrowed
 
-The three tables are read through one interface (`RiskDataProvider`, in
-`providers/`) rather than being hard-coded into step 2 directly:
+`guardrails.py` is a self-contained injection/bias/toxicity screen, used
+before the model call (`screen_input`, on the traveller's own preferences
+and refinement notes) and after it (`screen_output`, on the generated
+rationale) — on both the grounded path and the prompt-only fallback, via
+this agent's own `_risk_preflight`/`_risk_postprocess` in `agent.py`, never
+through the generic wrapper that reaches into another agent's detectors.
+
+Bias screening is two-tier, same reasoning as the rest of the codebase's
+guardrails applied to this agent's own subject matter: a protected-attribute
+mention alone (nationality, religion, gender or orientation, disability,
+age) is `medium` and passes — stating that a country's law criminalises a
+protected group is exactly the sourced content this agent exists to
+produce. Attribute **plus** generalising language ("should not", "cannot",
+"all", "never"...) is `high` and blocks — that has stopped being a fact
+about the law and become a generalisation the model produced.
+
+One injection rule is specific to this agent: `fabricate_live_fact` catches
+an attempt to make the model simply assume a real-world regulatory fact
+("assume the border is open") — no other specialist is asked to state
+real-world regulatory facts it cannot verify, so no other agent needs it.
+
+---
+
+## 5. The two paths
+
+`agent.py`'s `risk_node` branches on `provider.covers(request)`:
+
+- **Grounded** — the destination has at least one row in
+  `risk_standing_facts`. `propose_risks()` runs, `reasoning.py` narrates
+  over it, every `RiskItem` becomes an `Option` on the returned
+  `AgentFinding`.
+- **Prompt-only fallback** — an unmapped city, or one outside the five
+  seeded destinations. Falls back to the shared `INSTRUCTION` prompt with
+  nothing to ground against, screened by this agent's own guardrails (not a
+  borrowed generic wrapper), and `ESTIMATE_WARNING` is appended so the
+  answer is never mistaken for reference-data-backed output. On this path
+  there is no grounding check and no data-derived escalation — the same
+  honest trade-off Flight Agent's own no-inventory fallback makes, and
+  worth the same caution: today, this is the path most destinations take,
+  since only five cities are seeded.
+
+---
+
+## 6. Leaving room to plug in real data later
+
+Reference data is read through one interface, `RiskDataProvider` (in
+`providers/`), never accessed directly from `domain.py`:
 
 ```python
 class RiskDataProvider(Protocol):
@@ -169,69 +151,96 @@ class RiskDataProvider(Protocol):
     def fetch(self, request: RiskProposalRequest) -> RiskFetchResult: ...
 ```
 
-v1 has exactly one implementation of this, reading the three local tables.
-The point of having the interface at all is that step 2 never talks to that
-implementation directly — it only knows the interface. So if a real,
-internet-connected data source is added later, it plugs in behind the same
-interface, and steps 2–5 don't need to change at all. Whether and when to
-build that live version is a separate decision, covered next.
+`DatabaseRiskProvider` is the only implementation today, reading whichever
+database `flaskapp/database.py` is configured against — SQLite locally, the
+same schema on Postgres/Supabase once `DATABASE_URL` is set, no code change
+either way. A future live-retrieval provider (mirroring
+`accessibility_agent/retrieval.py`'s bounded-search pattern) plugs in behind
+the same interface with no change to `domain.py`, `reasoning.py`, or
+`agent.py`. `RiskFetchResult.trust_level` already distinguishes `"authored"`
+(today's tables) from `"retrieved"`, unused until that day, so the
+distinction is something code can assert once it matters rather than
+something to retrofit.
 
 ---
 
 ## 7. What's deliberately left for later
 
-### 7.1 Real, live data instead of the local tables
+### 7.1 Country/region-level facts, split out from city-level ones
 
-This design uses local tables on purpose, matching what the team's own
-architecture notes already say for this agent ("visa reference data, seasonal
-risk data, local events data — all explicitly synthetic and illustrative";
-live regulatory/weather feeds are listed as out of scope). Swapping in a real
-source later is possible (§6's interface exists for exactly this), but it's a
-bigger and riskier change than it sounds, for three reasons worth knowing
-before anyone decides to do it:
+Several standing-fact categories today — visa/entry, currency/customs, some
+health advice — are really national or bloc-level facts (Schengen's 90/180
+rule, say), stored once per *city* because that is the granularity the
+table uses uniformly. That is fine at five cities; it stops being fine as
+coverage grows, because adding a second city in an already-covered country
+means re-authoring facts that haven't changed. Splitting standing facts into
+a country/region-level table and a city-level one (crime hotspots, cultural
+norms, seasonal windows — things that are genuinely local) would let
+coverage grow by country, which is far cheaper to author than by city, for
+the categories where that's the honest granularity anyway. Not done now
+because it touches the schema, the provider, and `domain.py`'s query logic
+for a benefit that only matters once more than five cities exist.
 
-1. **Visa/entry** — there isn't one trustworthy place to search; each
-   country publishes its own rules on its own official site. Even "live"
-   lookup would need a table mapping each country to its official domain —
-   which is itself local, hand-maintained data. Live retrieval doesn't remove
-   that dependency, it just moves it.
-2. **Seasonal/weather** — this one is realistic to search live; national
-   weather agencies are a stable, enumerable set of trustworthy sources.
-3. **Local events** — this is the hard one. There's no small set of official
-   sources the way there is for weather. A live search here would either be
-   wide open (and pull in low-quality or fake pages) or need a long,
-   constantly-out-of-date list of per-city sources.
+### 7.2 Confidence tied to data coverage
 
-And whenever live search is added, one thing is not optional: every piece of
-text it retrieves from the internet has to be scanned for injected
-instructions before a model ever reads it — a malicious or compromised web
-page telling the model what to say is a real, known attack, and nothing in
-today's design defends against it because today's design has nothing to
-defend against yet (the three tables are written by the team, not fetched).
+`RiskAgentResponse.confidence` is the model's own self-reported number
+today, unconstrained by how much reference data actually backed the answer
+— unlike Accessibility Agent, whose confidence is capped when its own
+evidence coverage is thin. Every seeded destination currently returns
+10+ standing facts, so there is no real case today where a thin proposal
+and a confident-sounding model response actually diverge. Worth adding a
+coverage-based ceiling the day a destination (or a live provider) can
+legitimately return a sparse result — not before, since there is nothing to
+test it against yet.
 
-### 7.2 A faster, fully offline safety check before the request even gets here
+### 7.3 Live retrieval instead of the local tables
 
-Separate from this agent specifically — this came up while looking at the
-system's existing safety checks in general. Right now, catching a malicious
-or manipulative request either uses a cheap pattern-matching check (which
-misses a lot) or calls out to a model API (which is accurate but adds real
-delay and depends on that API being reachable). A small classifier that runs
-locally, with no network call, sitting in between the two, could catch the
-obvious cases immediately and only bother the API for the unclear ones —
-faster on average, and it keeps working even if the API is down. This is a
-real option worth evaluating, not something this design commits to.
+Matches the team's own architecture notes for this agent ("visa reference
+data, seasonal risk data, local events data — all explicitly synthetic and
+illustrative"; live regulatory/weather feeds are out of scope). Swapping in
+a real source later is possible (§6's interface exists for exactly this),
+but it is a bigger change than it sounds:
+
+1. **Visa/entry** — no single trustworthy place to search; each country
+   publishes its own rules on its own site. Even "live" lookup needs a
+   country-to-official-domain table, which is itself local, hand-maintained
+   data — live retrieval relocates that dependency, it doesn't remove it.
+2. **Seasonal/weather** — realistic to search live; national weather
+   agencies are a stable, enumerable set of trustworthy sources.
+3. **Local events** — the hard case. No small set of official aggregators
+   exists the way it does for weather; a live search here is either wide
+   open (pulls in low-quality or fake pages) or needs a long,
+   constantly-stale per-city source list.
+
+Whenever live search is added, one thing stops being optional: every
+retrieved excerpt must be screened for injected instructions before a
+model reads it, the same way `accessibility_agent.guardrails.
+sanitize_evidence` screens its own search results — today's tables are
+authored by the team, so there is nothing to sanitise yet, but a live
+source is untrusted input from day one.
+
+### 7.4 A faster, fully offline pre-check before a request reaches any agent
+
+Not specific to this agent — a system-wide guardrail idea. Catching a
+malicious request today either uses a cheap pattern-match (misses a lot) or
+calls the L2 classifier (accurate, but a network call). A small classifier
+running locally with no network call, sitting between the two, would catch
+the obvious cases immediately and only escalate the unclear ones to L2 —
+faster on average, and it keeps working if the L2 provider is unreachable.
 
 ---
 
 ## 8. Decisions the team still needs to make
 
 1. Add `escalate`/`escalation_reason` as real fields on the shared
-   `AgentFinding` (§5) — affects Accessibility and the Orchestrator too, not
-   just this agent.
-2. Whether/when to build the live-data version (§7.1) — and if so, update the
-   architecture notes to say so, since they currently say the opposite.
-3. What actually goes in the three reference tables — this design fixes the
-   shape and the lookup logic; the real rows (which countries, which
-   seasons, which sample events) still need to be written.
-4. Whether to build the offline pre-check (§7.2) — timing only, not a
-   blocker for anything above.
+   `AgentFinding` (`flaskapp/travel_ai/schemas.py`) — `RiskAgentResponse`
+   already carries them internally, but they are bridged into the shared
+   schema's `warnings` as an `ESCALATE:`-prefixed string today, the same
+   text convention Accessibility's `VETO:` uses, because changing the
+   shared schema affects Accessibility and the Orchestrator too and isn't
+   this agent's call to make alone.
+2. Whether/when to build the live-data version (§7.3) — if so, the
+   architecture notes need updating, since they currently say the opposite.
+3. Whether to split country/region-level data from city-level data (§7.1)
+   — a scope decision once coverage needs to grow past five cities.
+4. Whether to build the offline pre-check (§7.4) — timing only.

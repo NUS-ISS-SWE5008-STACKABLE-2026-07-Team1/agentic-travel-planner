@@ -192,6 +192,7 @@ if (planner) {
       )
     ];
     return {
+      plan_scope: data.get("plan_scope") || "both",
       origin: data.get("origin"), destination: data.get("destination"),
       // Omitted rather than sent empty when a country has no mapped cities —
       // the API rejects a blank string but accepts an absent city, which the
@@ -271,6 +272,32 @@ if (planner) {
   // Defensive throughout: a stored payload is data from a previous session and
   // may predate any field added since. Anything missing or unparseable leaves
   // the form exactly as it loaded rather than half-filled.
+  // `origin` and `origin_city` are `required`, so a hotel-only trip could not
+  // pass browser validation at all — the traveller would be asked for a
+  // departure country the request no longer has a field for. Hiding the
+  // fieldset is not enough: a hidden `required` control still blocks
+  // submission, so the attribute is removed and the values cleared.
+  const originFieldset = document.querySelector("#origin-fieldset");
+  const scopeInputs = [...document.querySelectorAll("[name='plan_scope']")];
+  const currentScope = () =>
+    document.querySelector("[name='plan_scope']:checked")?.value || "both";
+  const applyScope = () => {
+    if (!originFieldset || !scopeInputs.length) return;
+    const hotelOnly = currentScope() === "hotel";
+    originFieldset.hidden = hotelOnly;
+    originFieldset.querySelectorAll("select, input").forEach((field) => {
+      field.required = !hotelOnly && field.dataset.wasRequired !== "false";
+      if (hotelOnly) field.value = "";
+    });
+  };
+  if (scopeInputs.length && originFieldset) {
+    originFieldset.querySelectorAll("select, input").forEach((field) => {
+      field.dataset.wasRequired = String(field.required);
+    });
+    scopeInputs.forEach((input) => input.addEventListener("change", applyScope));
+    applyScope();
+  }
+
   const restoreStoredTrip = () => {
     let payload;
     try {
@@ -280,9 +307,19 @@ if (planner) {
     }
     if (!payload) return;
     const setValue = (name, value) => {
+      if (value === undefined || value === null || value === "") return;
       const field = planner.querySelector(`[name='${name}']`);
-      if (field && value !== undefined && value !== null && value !== "") field.value = value;
+      if (!field) return;
+      // Assigning `.value` to a radio rewrites its value attribute instead of
+      // selecting it, so the group would silently stay on its default.
+      if (field.type === "radio") {
+        const chosen = planner.querySelector(`[name='${name}'][value='${value}']`);
+        if (chosen) chosen.checked = true;
+        return;
+      }
+      field.value = value;
     };
+    setValue("plan_scope", payload.plan_scope);
     setValue("origin", payload.origin);
     setValue("destination", payload.destination);
     // Cities are populated from the country, so the country must be set first.
@@ -318,6 +355,10 @@ if (planner) {
       genders.forEach((field, index) => { field.value = (payload.traveller_genders || [])[index] || ""; });
       notes.forEach((field, index) => { field.value = byTraveller[index] || ""; });
     }
+    // Re-apply after restoring: the initial applyScope() ran before this, so a
+    // restored hotel-only trip would otherwise show origin fields it no longer
+    // needs — and show them as required.
+    applyScope();
   };
 
   restoreStoredTrip();
@@ -489,106 +530,119 @@ if (agentChat) {
     const summary = document.createElement("p");
     summary.className = "text-body-secondary";
     summary.textContent = plan.summary;
-    const heading = document.createElement("h4");
-    heading.className = "h6 mt-4";
-    heading.textContent = "Suggested itinerary";
-    const itinerary = document.createElement("ol");
-    itinerary.className = "plan-itinerary";
-    plan.itinerary.forEach((step) => {
-      const item = document.createElement("li");
-      item.textContent = step;
-      itinerary.append(item);
-    });
-    result.append(title, summary, heading, itinerary);
+    // The plan's own narrative itinerary and aggregated source list are no
+    // longer rendered. What a traveller reads is the per-specialist sections
+    // below, whose cards carry each option's real figures and references.
+    result.append(title, summary);
     if (plan.estimated_total_cost !== null) {
       const cost = document.createElement("p");
       cost.className = "fw-semibold";
       cost.textContent = `Estimated total: ${plan.currency || ""} ${plan.estimated_total_cost}`;
       result.append(cost);
     }
-    appendListSection("Why this plan was recommended", plan.rationale);
     appendListSection("Alternatives", plan.alternatives);
-    appendListSection("Accessibility evidence and other sources", plan.sources, true);
-    const accessibilityFinding = (response.agent_findings || []).find(
-      (finding) => finding.agent === "accessibility_agent"
-    );
-    if (accessibilityFinding?.options?.length) {
-      const evidenceHeading = document.createElement("h4");
-      evidenceHeading.className = "h6 mt-4";
-      evidenceHeading.textContent = "Accessibility evidence";
-      const evidenceList = document.createElement("div");
-      evidenceList.className = "vstack gap-3 accessibility-evidence-list";
-      accessibilityFinding.options.forEach((option) => {
-        const card = document.createElement("div");
-        card.className = "accessibility-evidence-card";
-        const header = document.createElement("div");
-        header.className = "accessibility-evidence-header";
-        const name = document.createElement("h5");
-        name.className = "h6 mb-0";
-        name.textContent = option.name;
-        const badges = document.createElement("div");
-        badges.className = "accessibility-evidence-badges";
-        const statusFactor = (option.selection_factors || []).find((factor) => /^status:/i.test(factor));
-        const ratingFactor = (option.selection_factors || []).find((factor) => /^accessibility rating:/i.test(factor));
-        [statusFactor, ratingFactor].filter(Boolean).forEach((factor) => {
-          const badge = document.createElement("span");
-          badge.className = `accessibility-evidence-badge ${/verified/i.test(factor) && !/unverified/i.test(factor) ? "is-verified" : ""}`;
-          badge.textContent = factor;
-          badges.append(badge);
-        });
-        header.append(name, badges);
-        const description = document.createElement("p");
-        description.className = "accessibility-evidence-description";
-        description.textContent = option.description;
-        card.append(header, description);
-        const detailFactors = (option.selection_factors || []).filter(
-          (factor) => !/^status:|^accessibility rating:/i.test(factor)
-        );
-        if (detailFactors.length) {
-          const factorsLabel = document.createElement("div");
-          factorsLabel.className = "accessibility-evidence-label";
-          factorsLabel.textContent = "Evidence details";
-          const factors = document.createElement("p");
-          factors.className = "small text-body-secondary mb-3";
-          factors.textContent = detailFactors.join(" · ");
-          card.append(factorsLabel, factors);
-        }
-        if (option.source_urls?.length) {
-          const sourceLabel = document.createElement("div");
-          sourceLabel.className = "accessibility-evidence-label";
-          sourceLabel.textContent = "Web references used";
-          const links = document.createElement("ul");
-          links.className = "accessibility-source-list";
-          option.source_urls.forEach((value) => {
-            try {
-              const url = new URL(value);
-              if (!["http:", "https:"].includes(url.protocol)) return;
-              const item = document.createElement("li");
-              const link = document.createElement("a");
-              link.href = url.href;
-              link.textContent = `Verify on ${url.hostname}`;
-              link.setAttribute("aria-label", `Verify accessibility evidence on ${url.hostname} (opens in a new tab)`);
-              link.target = "_blank";
-              link.rel = "noopener noreferrer";
-              const address = document.createElement("span");
-              address.className = "accessibility-source-address";
-              address.textContent = url.href;
-              item.append(link, address);
-              links.append(item);
-            } catch (_error) { /* Guardrails already remove malformed evidence URLs. */ }
-          });
-          card.append(sourceLabel, links);
-        }
-        if (option.limitations?.length) {
-          const limitations = document.createElement("div");
-          limitations.className = "accessibility-evidence-limitations";
-          limitations.textContent = option.limitations.join(" ");
-          card.append(limitations);
-        }
-        evidenceList.append(card);
+    // One card renderer for every specialist. This was accessibility-only until
+    // sections existed; the badge patterns simply do not match for other agents,
+    // so the same card degrades to name, cost, description and sources. Keeping
+    // two renderers for the same `Option` shape was the alternative.
+    const optionCard = (option) => {
+      const card = document.createElement("div");
+      card.className = "accessibility-evidence-card";
+      const header = document.createElement("div");
+      header.className = "accessibility-evidence-header";
+      const name = document.createElement("h5");
+      name.className = "h6 mb-0";
+      name.textContent = option.name;
+      const badges = document.createElement("div");
+      badges.className = "accessibility-evidence-badges";
+      const statusFactor = (option.selection_factors || []).find((factor) => /^status:/i.test(factor));
+      const ratingFactor = (option.selection_factors || []).find((factor) => /^accessibility rating:/i.test(factor));
+      [statusFactor, ratingFactor].filter(Boolean).forEach((factor) => {
+        const badge = document.createElement("span");
+        badge.className = `accessibility-evidence-badge ${/verified/i.test(factor) && !/unverified/i.test(factor) ? "is-verified" : ""}`;
+        badge.textContent = factor;
+        badges.append(badge);
       });
-      result.append(evidenceHeading, evidenceList);
-    }
+      header.append(name, badges);
+      const description = document.createElement("p");
+      description.className = "accessibility-evidence-description";
+      description.textContent = option.description;
+      card.append(header, description);
+      // Flights and hotels are chosen on price; accessibility evidence has none,
+      // so this is shown only when the specialist costed the option.
+      if (option.estimated_cost !== null && option.estimated_cost !== undefined) {
+        const cost = document.createElement("p");
+        cost.className = "fw-semibold small mb-2";
+        cost.textContent = `Estimated: ${option.currency || ""} ${option.estimated_cost}`;
+        card.append(cost);
+      }
+      const detailFactors = (option.selection_factors || []).filter(
+        (factor) => !/^status:|^accessibility rating:/i.test(factor)
+      );
+      if (detailFactors.length) {
+        const factorsLabel = document.createElement("div");
+        factorsLabel.className = "accessibility-evidence-label";
+        factorsLabel.textContent = "Details";
+        const factors = document.createElement("p");
+        factors.className = "small text-body-secondary mb-3";
+        factors.textContent = detailFactors.join(" \u00b7 ");
+        card.append(factorsLabel, factors);
+      }
+      if (option.source_urls?.length) {
+        const sourceLabel = document.createElement("div");
+        sourceLabel.className = "accessibility-evidence-label";
+        sourceLabel.textContent = "Web references used";
+        const links = document.createElement("ul");
+        links.className = "accessibility-source-list";
+        option.source_urls.forEach((value) => {
+          try {
+            const url = new URL(value);
+            if (!["http:", "https:"].includes(url.protocol)) return;
+            const item = document.createElement("li");
+            const link = document.createElement("a");
+            link.href = url.href;
+            link.textContent = `Verify on ${url.hostname}`;
+            link.setAttribute("aria-label", `Verify this reference on ${url.hostname} (opens in a new tab)`);
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            const address = document.createElement("span");
+            address.className = "accessibility-source-address";
+            address.textContent = url.href;
+            item.append(link, address);
+            links.append(item);
+          } catch (_error) { /* Guardrails already remove malformed evidence URLs. */ }
+        });
+        card.append(sourceLabel, links);
+      }
+      if (option.limitations?.length) {
+        const limitations = document.createElement("div");
+        limitations.className = "accessibility-evidence-limitations";
+        limitations.textContent = option.limitations.join(" ");
+        card.append(limitations);
+      }
+      return card;
+    };
+
+    // Order and omission are decided server-side by `sections.plan_sections`,
+    // so this loop renders what it is given and never asks which agents ran.
+    (response.sections || []).forEach((section) => {
+      const sectionHeading = document.createElement("h4");
+      sectionHeading.className = "h6 mt-4";
+      sectionHeading.textContent = section.title;
+      result.append(sectionHeading);
+      if (section.summary) {
+        const sectionSummary = document.createElement("p");
+        sectionSummary.className = "text-body-secondary";
+        sectionSummary.textContent = section.summary;
+        result.append(sectionSummary);
+      }
+      if (section.options?.length) {
+        const list = document.createElement("div");
+        list.className = "vstack gap-3 accessibility-evidence-list";
+        section.options.forEach((option) => list.append(optionCard(option)));
+        result.append(list);
+      }
+    });
     appendListSection("Assumptions", plan.assumptions);
     appendListSection("Limitations", plan.limitations);
     if (plan.safety) {

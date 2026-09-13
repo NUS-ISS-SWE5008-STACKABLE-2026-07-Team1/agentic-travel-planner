@@ -12,6 +12,7 @@ from flaskapp.travel_ai.schemas import TravelRequest
 
 COMPLETE = {
     "origin": "Singapore", "destination": "Japan", "destination_city": "Tokyo",
+    "plan_scope": "both",
     "departure_date": "2026-10-10", "return_date": "2026-10-24",
     "travellers": 2, "budget": 6000.0, "currency": "SGD",
     "traveller_ages": [34, 32], "traveller_genders": ["male", "female"],
@@ -26,7 +27,7 @@ def keys(missing):
 def test_empty_intent_asks_for_every_scalar_field():
     missing = compute_gaps(ExtractedIntent())
     assert keys(missing) == [
-        "origin", "destination", "destination_city",
+        "plan_scope", "origin", "destination", "destination_city",
         "departure_date", "return_date", "travellers", "budget",
     ]
 

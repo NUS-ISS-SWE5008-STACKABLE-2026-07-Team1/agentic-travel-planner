@@ -141,6 +141,7 @@ def _hotel_candidate_to_option(
         factors.append(f"Amenities: {', '.join(candidate.amenities[:5])}")
 
     return Option(
+        category="hotel",
         name=candidate.name,
         description=(
             f"{candidate.room_type} room at {candidate.name}, "
@@ -165,6 +166,7 @@ def _transport_to_option(option: TransportOption, currency: str) -> Option:
         desc_parts.append(f"~{option.estimated_cost:.2f} {currency}")
 
     return Option(
+        category="transport",
         name=option.name,
         description=", ".join(desc_parts),
         estimated_cost=option.estimated_cost,
