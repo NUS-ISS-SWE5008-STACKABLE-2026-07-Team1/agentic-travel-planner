@@ -1,7 +1,12 @@
 # Selective specialist dispatch
 
-Status: designed
+Status: implemented
 Date: 2026-09-04
+
+Four things changed during implementation and are recorded in "Deviations"
+below. Two were reversed by the traveller-facing result: hotel-only turned out
+to be a stay rather than a trip, and asking a stay where it is flying from is
+not a question it has an answer to.
 
 ## Problem
 
@@ -44,8 +49,8 @@ Out of scope, explicitly:
 | Where the choice lives | `TravelRequest.plan_scope` | A separate intent object |
 | Shape | One `Literal["both","flights","hotel"]` | A list of agent names |
 | Dispatch mechanism | Compose the graph from the selected set | Conditional edges plus a router |
-| Trip brief | Unchanged; scope controls dispatch only | Trimming the questions too |
-| Switchable agents | Flights and hotel only | All four |
+| Trip brief | Trimmed for hotel-only: no origin | Unchanged for every scope |
+| Switchable agents | Flights, hotel, and advisory on hotel-only | All four |
 | Absent scope | Fall back to `both` | Require it of every caller |
 
 Three of these earn an explanation.
@@ -198,6 +203,35 @@ rather than the JSON-list loop above it, whose `DEFAULT '[]'` is wrong here.
 | Scope excludes hotel, needs stated | Accessibility still runs; hotel still skipped |
 | Every selectable agent excluded | Impossible: Risk & Advisory always runs, so the graph always has at least one specialist and the barrier always has a source |
 | Graph and message list disagree | Cannot happen — both derive from one `specialists_for` call |
+
+## Deviations from the design, as built
+
+**1. `both` includes Accessibility unconditionally.** The design said
+accessibility runs "whenever needs are stated" and also that an absent scope
+dispatches all four. Those contradict: a default request with no stated needs
+would have dropped the agent, changing behaviour for every request written
+before this field existed. `both` now means the full set, and narrowing the
+scope is what makes accessibility conditional. Found by a test, not review.
+
+**2. Hotel-only does not ask for an origin.** The design kept the brief
+unchanged and called "Flying from" on a hotel-only trip "mild friction we can
+soften with a label". Using it showed that was wrong: a stay has no departure
+country, and the question has no answer. `TravelRequest.origin` is now optional
+and a `model_validator` requires it for every other scope, so the requirement
+is enforced where it actually depends on another field.
+
+**3. Risk & Advisory does not run for hotel-only.** This reverses "advisory is
+not opt-out", and follows from deviation 2 rather than from preference. The
+agent surfaces visa and entry rules, which are reasoned from the departure
+country; with no origin collected it would be advising on a journey it knows
+nothing about. It still runs for `both` and `flights`. Hotel-only therefore
+dispatches one agent — or two, when accessibility needs are stated — and the
+barrier still has a source.
+
+**4. `origin` needed a real migration.** Dropping NOT NULL is an in-place
+`ALTER COLUMN` on Postgres, but SQLite has no such statement: `_allow_null_origin`
+rebuilds the table, copying rows BY NAME because `travel_requests` has gained
+columns over time and the two shapes need not agree.
 
 ## Known limitations
 

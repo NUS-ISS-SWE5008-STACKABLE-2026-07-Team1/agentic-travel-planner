@@ -273,3 +273,40 @@ def test_a_non_pii_block_still_blocks_even_when_redaction_fired():
         screen_prompt(
             "my card is 4111 1111 1111 1111", 12_000, RecordingGuardrail(verdict)
         )
+
+
+# --- unconsulted specialists must be stated, not inferred from absence -------
+
+from flaskapp.travel_ai.graph import SPECIALISTS  # noqa: E402
+from flaskapp.travel_ai.safeguards import disclose_unconsulted  # noqa: E402
+
+
+def plan_with(limitations=()):
+    return TravelPlan(
+        title="t", summary="s", itinerary=[], rationale=[], limitations=list(limitations)
+    )
+
+
+def test_unconsulted_specialists_are_named_in_the_plan():
+    """Absence is not a signal a traveller can read.
+
+    A plan that never mentions flights looks the same whether the flight agent
+    searched and found nothing or was never asked.
+    """
+    plan = plan_with()
+    unconsulted = disclose_unconsulted(plan, ("hotel_transport_agent", "risk_advisory_agent"))
+    assert unconsulted == ["accessibility_agent", "flight_agent"]
+    assert any("flight_agent" in line for line in plan.limitations)
+
+
+def test_nothing_is_added_when_every_specialist_ran():
+    plan = plan_with(["existing limitation"])
+    assert disclose_unconsulted(plan, SPECIALISTS) == []
+    assert plan.limitations == ["existing limitation"]
+
+
+def test_the_disclosure_is_not_duplicated_on_a_second_call():
+    plan = plan_with()
+    disclose_unconsulted(plan, ("risk_advisory_agent",))
+    disclose_unconsulted(plan, ("risk_advisory_agent",))
+    assert len(plan.limitations) == 1
