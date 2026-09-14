@@ -57,6 +57,10 @@ TABLES = (
     "intake_messages",
     "agent_runs",
     "plan_feedback",
+    # References travel_requests(id) (nullable), so it must come after it —
+    # otherwise identical in kind to agent_runs/audit_events: written by the
+    # running app, not seeded.
+    "flight_agent_eval_runs",
     # No foreign keys in or out — Risk & Advisory's reference data, seeded by
     # flaskapp.database.seed_risk_reference_data rather than written by the
     # running app. Placement in this tuple is arbitrary for that reason;
@@ -79,6 +83,7 @@ IDENTITY_TABLES = (
     "risk_standing_facts",
     "risk_seasonal_windows",
     "risk_dated_events",
+    "flight_agent_eval_runs",
 )
 
 # The primary-key column per table. Most identity tables use "id", but three
@@ -103,6 +108,7 @@ TABLE_PRIMARY_KEYS = {
     "risk_standing_facts": "id",
     "risk_seasonal_windows": "id",
     "risk_dated_events": "id",
+    "flight_agent_eval_runs": "id",
 }
 
 
