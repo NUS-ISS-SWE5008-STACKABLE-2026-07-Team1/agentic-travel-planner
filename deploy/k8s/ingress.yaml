@@ -1,0 +1,18 @@
+# Public entry point: a Google Cloud external HTTP load balancer in front of
+# the web Service. Plain HTTP for now; HTTPS is decided in step 6 (it needs a
+# hostname for a Google-managed certificate). Until then configmap.yaml keeps
+# SESSION_COOKIE_SECURE off, and they must change together.
+#
+# The load balancer takes its health check from web's readinessProbe (/readyz).
+# It can take 5-10 minutes after the first apply before the address serves.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  annotations:
+    kubernetes.io/ingress.class: gce
+spec:
+  defaultBackend:
+    service:
+      name: web
+      port: {name: http}

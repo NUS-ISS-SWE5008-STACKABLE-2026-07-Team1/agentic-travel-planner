@@ -1,0 +1,114 @@
+# The GKE topology on one laptop, for free.
+#
+#   browser -> web :5000 --A2A--> agents :8001
+#                 \                 /
+#                  +-> db (Postgres) <-+
+#                  +-> stub (fake LLM) <-+
+#
+# Same image and same two roles as deploy/k8s/. No real model and no real
+# credentials: `stub` is scripts/ci_stub_provider.py, the fake provider CI's
+# DAST job already runs, so a whole plan crosses the A2A boundary without
+# spending a token.
+#
+#   docker compose -f deploy/docker-compose.yml up --build -d
+#   python deploy/smoke_test.py --base-url http://127.0.0.1:5000
+#   docker compose -f deploy/docker-compose.yml down -v
+
+name: travel-planner-local
+
+# Only `web` builds. Giving every service a `build:` for the same tag makes
+# compose build it three times in parallel, and the second export fails with
+# "image already exists". The others reuse what web built.
+x-image: &image
+  image: travel-planner:local
+  pull_policy: never
+
+# Values here are throwaway by construction — a stub key, a disposable
+# database — so they can sit in a tracked file. Real ones never do.
+x-app-env: &app-env
+  DATABASE_URL: postgresql://travel:travel@db:5432/travel
+  SECRET_KEY: local-compose-only-not-a-secret
+  LLM_PROVIDER: openai_compatible
+  LLM_API_KEY: stub-not-a-real-key
+  LLM_BASE_URL: http://stub:8081/v1
+  LLM_MODEL: stub-model
+  # The stub answers every schema with a synthesised instance, which is not a
+  # meaningful classifier verdict. The deterministic L0/L1 gates still run.
+  GUARDRAIL_LLM_ENABLED: "false"
+  # The address of the agents role, as the web role sees it AND as the agents
+  # role advertises itself in its Agent Card. Both must name the service, not
+  # 127.0.0.1, or the card sends the caller back to itself.
+  A2A_BASE_URL: http://agents:8000
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: travel
+      POSTGRES_PASSWORD: travel
+      POSTGRES_DB: travel
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U travel -d travel"]
+      interval: 2s
+      retries: 30
+
+  stub:
+    <<: *image
+    # ci_stub_provider.py binds 127.0.0.1, which nothing outside its own
+    # container can reach. Reuse its handler on all interfaces rather than
+    # changing a script CI depends on.
+    command:
+      - python
+      - -c
+      - |
+        from http.server import HTTPServer
+        from scripts.ci_stub_provider import PORT, Handler
+        print(f"stub provider on 0.0.0.0:{PORT}", flush=True)
+        HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+
+  web:
+    image: travel-planner:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      <<: *app-env
+      # Route all four specialists to the agents role over A2A.
+      A2A_INTERNAL_ENABLED: "true"
+    ports:
+      - "127.0.0.1:5000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      stub:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 3s
+      start_period: 60s
+      retries: 20
+
+  agents:
+    <<: *image
+    # `-m`, not `python scripts/a2a_server.py`: a script path puts scripts/ on
+    # sys.path instead of /app, and `import flaskapp` fails at startup.
+    command: ["python", "-m", "scripts.a2a_server", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *app-env
+      # The web role sends its request id so specialist trace events join the
+      # parent's audit trail. Safe only because nothing but `web` can reach
+      # this service — the NetworkPolicy enforces that in the cluster.
+      A2A_TRUST_CALLER_REQUEST_ID: "true"
+    ports:
+      - "127.0.0.1:8001:8000"
+    # After web, not alongside it: both roles run create_app(), which creates
+    # the schema and re-seeds risk reference data, and two processes doing
+    # that into an empty database at once can collide.
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/a2a/flight_agent/.well-known/agent-card.json', timeout=3)"]
+      interval: 3s
+      start_period: 60s
+      retries: 20
