@@ -32,9 +32,11 @@ def create_app(config_object: type[Config] = Config) -> Flask:
 
     seed_risk_reference_data(app.config["DATABASE"], STANDING_FACTS, SEASONAL_WINDOWS, DATED_EVENTS)
 
+    from flaskapp.health import health_bp
     from flaskapp.routes import pages_bp
     from flaskapp.travel_ai.api import travel_api_bp
 
+    app.register_blueprint(health_bp)
     app.register_blueprint(pages_bp)
     app.register_blueprint(travel_api_bp, url_prefix="/api/v1")
 
