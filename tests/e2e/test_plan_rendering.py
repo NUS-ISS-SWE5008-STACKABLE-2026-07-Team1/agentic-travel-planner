@@ -39,6 +39,30 @@ MOCK_PLAN_RESPONSE = {
         "safety": {"passed": True, "checks": ["mock-check"], "warnings": []},
     },
     "agent_findings": [],
+    # What a traveller actually reads since 2cfccf5: one card per specialist,
+    # built from `sections`, not the plan's own itinerary (app.js no longer
+    # renders `plan.itinerary`). Shape matches `schemas.PlanSection`; the title
+    # is the real one from `sections.SECTION_ORDER`.
+    "sections": [
+        {
+            "title": "Flight details",
+            "agent": "flight_agent",
+            "summary": "One mocked outbound flight.",
+            "options": [
+                {
+                    "category": "flight",
+                    "name": "SQ 638 Singapore to Tokyo Narita",
+                    "description": "Direct, departs 2026-10-15 23:55.",
+                    "estimated_cost": 780.0,
+                    "currency": "SGD",
+                    "source_urls": [],
+                    "assumptions": [],
+                    "limitations": [],
+                    "selection_factors": ["stops: 0"],
+                },
+            ],
+        },
+    ],
     "trace_url": f"/api/v1/traces/{MOCK_REQUEST_ID}",
 }
 
@@ -91,5 +115,13 @@ def test_submitted_trip_renders_after_polling(live_server, authenticated_context
         "All agents completed their work.", timeout=10_000
     )
     expect(page.locator("#plan-content")).to_contain_text(MOCK_PLAN_RESPONSE["plan"]["title"])
-    expect(page.locator("#plan-content")).to_contain_text("Day 1: Arrive in Tokyo")
+    # The specialist section and its option card, not the itinerary: the plan
+    # page stopped rendering `plan.itinerary` in 2cfccf5, and these cards are
+    # what replaced it.
+    section = MOCK_PLAN_RESPONSE["sections"][0]
+    expect(page.locator("#plan-content")).to_contain_text(section["title"])
+    expect(page.locator("#plan-content .accessibility-evidence-card")).to_have_count(1)
+    expect(page.locator("#plan-content .accessibility-evidence-card")).to_contain_text(
+        section["options"][0]["name"]
+    )
     expect(page.locator("#plan-navigation")).not_to_have_class(re.compile("d-none"))
