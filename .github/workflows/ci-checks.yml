@@ -226,6 +226,21 @@ jobs:
           path: pytest-report.xml
           retention-days: 14
 
+      # ADVISORY. Writes this run's results to ci_test_runs / ci_test_results
+      # in Supabase, for pass/fail history past the 14-day artifact limit. See
+      # scripts/log_test_results.py and docs/handoff/ci-test-logging-supabase.md.
+      #
+      # Cannot fail the job: with no TEST_RESULTS_DATABASE_URL secret, an
+      # unreachable database, or a bad report, it prints a notice and exits 0.
+      # The secret should be an insert-only login, never the app's own
+      # DATABASE_URL.
+      - name: Log test results to Supabase
+        if: always()
+        env:
+          TEST_RESULTS_DATABASE_URL: ${{ secrets.TEST_RESULTS_DATABASE_URL }}
+          TEST_RESULTS_DATABASE_SCHEMA: Travelplanner_schema
+        run: python scripts/log_test_results.py pytest-report.xml --job tests
+
   e2e:
     name: E2E (Playwright)
     runs-on: ubuntu-latest
@@ -238,10 +253,12 @@ jobs:
     # extra billed minutes per run, judged worth it here for catching a
     # broken login/plan-render path before merge rather than after.
     #
-    # Self-contained on purpose: no GH secrets, no service containers. Both
-    # tests spin up their own Flask server (`tests/e2e/conftest.py`'s
-    # `live_server`) against a throwaway SQLite file under pytest's own
-    # tmp_path, never `instance/travel_planner.sqlite3`.
+    # Self-contained on purpose: no service containers, and the tests
+    # themselves need no secret. Both spin up their own Flask server
+    # (`tests/e2e/conftest.py`'s `live_server`) against a throwaway SQLite
+    # file under pytest's own tmp_path, never `instance/travel_planner.sqlite3`.
+    # (One optional secret, TEST_RESULTS_DATABASE_URL, feeds the advisory
+    # logging step at the end; the tests never depend on it.)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -324,6 +341,14 @@ jobs:
           path: test-results/
           retention-days: 14
           if-no-files-found: ignore
+
+      # ADVISORY, same as the step at the end of `tests`: cannot fail the job.
+      - name: Log test results to Supabase
+        if: always()
+        env:
+          TEST_RESULTS_DATABASE_URL: ${{ secrets.TEST_RESULTS_DATABASE_URL }}
+          TEST_RESULTS_DATABASE_SCHEMA: Travelplanner_schema
+        run: python scripts/log_test_results.py e2e-report.xml --job e2e
 
   sast:
     name: SAST
