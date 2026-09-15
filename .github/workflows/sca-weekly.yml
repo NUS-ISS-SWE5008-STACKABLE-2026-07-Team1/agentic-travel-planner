@@ -1,6 +1,6 @@
 # Weekly dependency scan of the release branch.
 #
-# ci-fast.yml already runs pip-audit, but only when someone pushes. A
+# ci-checks.yml already runs pip-audit, but only when someone pushes. A
 # vulnerability published on a quiet week would go unseen until the next push.
 # This runs on a timer instead, against requirements.lock: the exact versions
 # Render deploys.
@@ -12,7 +12,7 @@
 # scans the branch that is actually deployed.
 #
 # When it fails, GitHub emails whoever last changed this file's cron line.
-# Fix it the same way as a pip-audit failure in ci-fast.yml: raise the
+# Fix it the same way as a pip-audit failure in ci-checks.yml: raise the
 # affected version in requirements.txt and regenerate the lock, or, if no
 # fixed version exists yet, add `--ignore-vuln <ID>` with a reason.
 
