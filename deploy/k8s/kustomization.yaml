@@ -1,8 +1,8 @@
 # kubectl apply -k deploy/k8s
 #
 # Kustomize is built into kubectl; nothing else to install.
-# The Secret `app-secrets` is NOT created from this directory — see
-# secrets.env.example for the keys and how to load them.
+# The Secret `app-secrets` is NOT created from this directory. Run
+# deploy/create_secrets.py first; it also creates the database role.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: travel-planner
