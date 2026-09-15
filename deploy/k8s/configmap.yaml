@@ -10,8 +10,15 @@ data:
   LLM_PROVIDER: openai
   LLM_MODEL: gpt-5
 
-  # Supabase keeps its tables outside `public`. Case-sensitive.
-  DATABASE_SCHEMA: Travelplanner_schema
+  # DIFFERS FROM RENDER on purpose. Same Supabase project, separate schema, so
+  # test users, plans and audit events never mix with Render's
+  # `Travelplanner_schema`. Case-sensitive.
+  #
+  # The schema must EXIST before the first pod starts. connect() sets
+  # `search_path TO travelplanner_gke, public, extensions`, and Postgres skips a
+  # missing schema silently — every table would be created in `public` instead,
+  # with no error. Created by hand on 2026-09-15 (CREATE SCHEMA travelplanner_gke).
+  DATABASE_SCHEMA: travelplanner_gke
 
   # Where the agents role lives, as the web role calls it AND as the agents
   # role advertises itself in its Agent Card. The short Service name resolves
