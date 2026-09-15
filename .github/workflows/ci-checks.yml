@@ -285,8 +285,18 @@ jobs:
       # BLOCKING, same tier as `tests` above — see pytest.ini for why
       # `tests/e2e` needs `-m e2e` and its own path rather than living inside
       # the default `pytest -q` collection.
+      #
+      # --screenshot/--video/--tracing are pytest-playwright's own flags.
+      # "only-on-failure"/"retain-on-failure" mean a clean run produces
+      # nothing, so the upload below only fills in when a test fails. Added
+      # because a failure used to leave only an assertion message: on
+      # 2026-09-15 "Planning stopped." had to be reproduced on a laptop to see
+      # what the page actually did.
       - name: Run Playwright E2E tests
-        run: python -m pytest tests/e2e -m e2e --browser chromium -q --junitxml=e2e-report.xml
+        run: >-
+          python -m pytest tests/e2e -m e2e --browser chromium -q
+          --junitxml=e2e-report.xml
+          --screenshot=only-on-failure --video=retain-on-failure --tracing=retain-on-failure
 
       - name: Upload E2E report
         if: always()
@@ -295,6 +305,25 @@ jobs:
           name: e2e-report
           path: e2e-report.xml
           retention-days: 14
+
+      # Screenshots, video and trace land under test-results/, pytest-playwright's
+      # default output directory. Open a trace at https://trace.playwright.dev
+      # or with `playwright show-trace <file>.zip`.
+      #
+      # A trace records network traffic, cookies included. Safe to publish
+      # here only because everything in it is throwaway: a per-run SQLite file,
+      # the fixed test SECRET_KEY in tests/e2e/conftest.py, the public demo
+      # account, and the stub LLM. Revisit before pointing E2E at any real
+      # service or credential. if-no-files-found: ignore because a passing run
+      # leaves the folder empty by design.
+      - name: Upload E2E screenshots, video and trace (failures only)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-artifacts
+          path: test-results/
+          retention-days: 14
+          if-no-files-found: ignore
 
   sast:
     name: SAST
