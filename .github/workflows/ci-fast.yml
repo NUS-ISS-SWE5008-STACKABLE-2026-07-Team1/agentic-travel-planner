@@ -251,14 +251,17 @@ jobs:
           fi
 
       # Cached on Playwright's own version: the browser binary doesn't
-      # change between runs unless requirements.txt bumps pytest-playwright,
-      # so a cache hit skips the ~300MB Chromium download entirely.
+      # change between runs unless the installed playwright version does, so a
+      # cache hit skips the ~300MB Chromium download entirely. That version is
+      # decided by requirements.lock, so the lock is in the key: keyed on
+      # requirements.txt alone, a lock bump would restore a browser built for
+      # the previous playwright and the E2E tests would fail to launch it.
       - name: Cache Playwright browsers
         id: playwright-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.lock', 'requirements.txt') }}
 
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
@@ -304,6 +307,13 @@ jobs:
             python -m pip install -r requirements.txt
           fi
 
+      # BLOCKING. requirements.txt is what people edit; requirements.lock is
+      # what CI and Render install. This fails when the two have drifted apart,
+      # instead of CI quietly testing and scanning the old versions. Runs
+      # before the scanners install, so their own dependencies cannot mask it.
+      - name: requirements.lock matches requirements.txt
+        run: python scripts/check_requirements_lock.py
+
       - name: Install scanners
         run: python -m pip install semgrep bandit pip-audit
 
@@ -331,16 +341,23 @@ jobs:
         continue-on-error: true
         run: bandit -r flaskapp -l -f json -o bandit-report.json
 
-      # Item 12 — stays advisory until requirements.lock exists. Gating an
-      # unpinned tree means someone else's release breaks our build.
+      # Item 12 — BLOCKING, now that requirements.lock exists. It was advisory
+      # only because gating unpinned ranges meant someone else's release could
+      # break our build; the lock removes that.
+      #
+      # --disable-pip audits the lock file as written rather than installing it
+      # a second time, so it checks exactly the versions Render deploys and
+      # finishes in seconds.
+      #
+      # If a finding has no fixed version yet and must not block merging, add
+      # `--ignore-vuln <ID>` below with a comment saying why and when to
+      # revisit it. Never put continue-on-error back.
       - name: pip-audit (dependency vulnerability scan)
-        continue-on-error: true
-        run: |
-          if [ -f requirements.lock ]; then
-            pip-audit -r requirements.lock
-          else
-            pip-audit -r requirements.txt
-          fi
+        shell: bash
+        run: >
+          pip-audit -r requirements.lock --require-hashes --disable-pip
+          --progress-spinner off 2>&1
+          | tee pip-audit-report.txt
 
       - name: Upload scan reports
         if: always()
@@ -351,4 +368,5 @@ jobs:
             semgrep-report.json
             semgrep-llm-report.json
             bandit-report.json
+            pip-audit-report.txt
           retention-days: 14

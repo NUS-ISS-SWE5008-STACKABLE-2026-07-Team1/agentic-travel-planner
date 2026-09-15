@@ -17,7 +17,11 @@ services:
     # the Render dashboard too, or resync the blueprint. Until both agree, this
     # line describes an intention rather than a fact.
     branch: release
-    buildCommand: pip install -r requirements.txt
+    # requirements.lock, not requirements.txt: exact versions with checksums, so
+    # Render installs the same packages CI tested and pip-audit scanned, and a
+    # download that does not match its checksum fails the build instead of
+    # deploying. See the header of requirements.txt for how to regenerate it.
+    buildCommand: pip install --require-hashes -r requirements.lock
     # ONE ASGI worker, deliberately. flaskapp/travel_ai/jobs.py keeps planning
     # jobs in a module-level dict, so a second worker would answer
     # GET /api/v1/travel-plans/<id>/status for a job it never ran and return 404
