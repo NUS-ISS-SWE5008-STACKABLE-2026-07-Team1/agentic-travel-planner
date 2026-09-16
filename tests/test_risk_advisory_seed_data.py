@@ -14,25 +14,16 @@ from datetime import date
 
 import pytest
 
-from flaskapp.database import initialize, seed_risk_reference_data
 from flaskapp.travel_ai.agents.risk_advisory_agent.domain import propose_risks
-from flaskapp.travel_ai.agents.risk_advisory_agent.providers.database import DatabaseRiskProvider
+from flaskapp.travel_ai.agents.risk_advisory_agent.providers.seed import SeedRiskProvider
 from flaskapp.travel_ai.agents.risk_advisory_agent.schemas import RiskProposalRequest
-from flaskapp.travel_ai.agents.risk_advisory_agent.seed_data import (
-    DATED_EVENTS,
-    SEASONAL_WINDOWS,
-    STANDING_FACTS,
-)
 
 CITIES = ("sg-singapore", "de-berlin", "jp-tokyo", "es-barcelona", "us-washington")
 
 
 @pytest.fixture(scope="module")
-def provider(tmp_path_factory):
-    path = tmp_path_factory.mktemp("risk-seed") / "seed.sqlite3"
-    initialize(path)
-    seed_risk_reference_data(path, STANDING_FACTS, SEASONAL_WINDOWS, DATED_EVENTS)
-    return DatabaseRiskProvider(path)
+def provider():
+    return SeedRiskProvider()
 
 
 def _request(slug: str, departure: date, return_: date) -> RiskProposalRequest:

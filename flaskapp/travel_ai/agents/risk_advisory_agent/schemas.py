@@ -14,10 +14,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-# Free text, not a Literal/Enum: `database.py`'s risk_standing_facts.category
-# is deliberately a plain column so a new advisory category is an inserted
-# row, never a migration (see the schema comment there). Constraining this to
-# a closed Python type would just move that same rigidity into a second place.
+# Free text, not a Literal/Enum: `risk_standing_facts.csv`'s `category` column
+# is deliberately unconstrained so a new advisory category is an inserted
+# row, never a code change. Constraining this to a closed Python type would
+# just move that same rigidity into a second place.
 RiskCategory = str
 
 RiskKind = Literal["standing_fact", "seasonal_window", "dated_event"]

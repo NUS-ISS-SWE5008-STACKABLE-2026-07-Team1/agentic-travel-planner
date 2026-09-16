@@ -23,9 +23,9 @@ class AdaptedRequest:
 def to_risk_request(travel_request: TravelRequest) -> AdaptedRequest:
     """Resolve a destination slug when possible; never fail without one.
 
-    A slug lets `domain.py` query the reference tables directly. Its absence
+    A slug lets `domain.py` query the reference data directly. Its absence
     is not an error — an unresolved or unmapped destination is a normal
-    outcome (see `providers.database.DatabaseRiskProvider.covers`), handled by
+    outcome (see `providers.seed.SeedRiskProvider.covers`), handled by
     falling back to the prompt-only path exactly like Flight/Hotel do for an
     unstocked route.
     """
