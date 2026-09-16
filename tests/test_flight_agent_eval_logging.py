@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import uuid4
 
-from flaskapp.database import connect, initialize
+from flaskapp.database import connect, ensure_planning_job, initialize
 from flaskapp.travel_ai.a2a import request_message
 from flaskapp.travel_ai.agents.flight_agent.agent import NAME, create_node
 from flaskapp.travel_ai.agents.flight_agent.providers.base import InventoryResult
@@ -82,23 +82,12 @@ def _state(db_path, payload: dict) -> tuple[str, dict]:
         correlation_id=correlation_id, sender="orchestrator_agent", recipient=NAME,
         payload_type="TravelRequest", payload=request,
     )
-    # Both FKs must be satisfied before flight_node runs, same as production:
-    # flight_agent_eval_runs.request_id -> travel_requests(id), and
-    # save_agent_run's own pre-existing write -> agent_runs.request_id ->
-    # planning_jobs(request_id) (this node calls save_agent_run before it
-    # ever reaches the new eval-logging call).
-    with connect(db_path) as db:
-        db.execute(
-            """INSERT INTO travel_requests
-               (id, destination, departure_date, return_date, travellers, currency, risk_tolerance)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (request_id, request.destination, str(request.departure_date),
-             str(request.return_date), request.travellers, request.currency, "moderate"),
-        )
-        db.execute(
-            "INSERT INTO planning_jobs (request_id, status, request_json) VALUES (?, 'processing', '{}')",
-            (request_id,),
-        )
+    # Only what production has when flight_node runs: the planning_jobs row
+    # (from jobs.submit_plan, or the A2A entry point's ensure_planning_job).
+    # Deliberately NOT a travel_requests row — save_plan writes that after the
+    # whole graph finishes, and a fixture that pre-inserted it is what let an
+    # FK onto travel_requests pass here while failing every live run.
+    ensure_planning_job(db_path, request_id, None, request.model_dump(mode="json"))
     return request_id, {
         "request_id": request_id,
         "request": request.model_dump(mode="json"),
@@ -172,3 +161,30 @@ def test_a_tracer_without_a_database_path_does_not_raise(tmp_path):
     }
     result = create_node(_llm(), tracer)(state)
     assert result["findings"][0].options
+
+
+def test_the_eval_row_lands_before_save_plan_has_written_travel_requests(tmp_path):
+    """The live ordering, with SQLite foreign keys enforced.
+
+    flight_node runs mid-plan; `travel_requests` only gains its row in
+    `save_plan`, after the whole graph. An FK onto that table failed every
+    production write (swallowed into `agent_eval_log_failed`), so this pins
+    both halves: the row lands, and nothing was quietly swallowed.
+    """
+    db_path = tmp_path / "eval.sqlite3"
+    initialize(db_path)
+    tracer = AuditTracer(tmp_path, "req-before-save-plan", database_path=db_path)
+    request_id, state = _state(db_path, SEED_TRIP)
+
+    with connect(db_path) as db:
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert db.execute(
+            "SELECT COUNT(*) FROM travel_requests WHERE id = ?", (request_id,)
+        ).fetchone()[0] == 0, "precondition: save_plan has not run yet"
+
+    create_node(_llm(), tracer)(state)
+
+    assert "agent_eval_log_failed" not in tracer.path.read_text(encoding="utf-8")
+    rows = _eval_rows(db_path, request_id)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "success"

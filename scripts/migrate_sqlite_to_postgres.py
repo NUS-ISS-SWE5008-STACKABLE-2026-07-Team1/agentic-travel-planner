@@ -57,7 +57,7 @@ TABLES = (
     "intake_messages",
     "agent_runs",
     "plan_feedback",
-    # References travel_requests(id) (nullable), so it must come after it —
+    # References planning_jobs(request_id) (nullable), so it must come after it —
     # otherwise identical in kind to agent_runs/audit_events: written by the
     # running app, not seeded.
     "flight_agent_eval_runs",
