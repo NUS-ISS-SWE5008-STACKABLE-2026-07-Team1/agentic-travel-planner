@@ -1,0 +1,49 @@
+# Everything that makes the public Ingress safe: IAP on the backend, HTTPS, and
+# an HTTP -> HTTPS redirect. Kept in one file so it cannot be half-applied.
+
+# IAP on the web backend. The OAuth client is the one created by hand in the
+# Google Auth Platform console (External, Testing), loaded as the `iap-oauth`
+# Secret by deploy/create_iap_secret.py. Who may pass is IAM, not this file:
+#   gcloud projects add-iam-policy-binding <project> \
+#     --member=user:<email> --role=roles/iap.httpsResourceAccessor
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: web
+spec:
+  iap:
+    enabled: true
+    oauthclientCredentials:
+      secretName: iap-oauth
+  # Explicit rather than inferred from the readiness probe, so the load
+  # balancer's check cannot drift from it. Health checks bypass IAP.
+  healthCheck:
+    type: HTTP
+    requestPath: /readyz
+    port: 8000
+    checkIntervalSec: 15
+    timeoutSec: 5
+  # Plan submission runs the L2 input guardrail inside the request (up to its
+  # 8s budget, 10s observed). The 30s default is enough; 60s leaves headroom.
+  timeoutSec: 60
+---
+# Google-managed TLS certificate. Issues once the name resolves to the Ingress
+# IP and the load balancer is serving: typically 15-60 minutes after first apply.
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: web
+spec:
+  domains:
+    - 8-232-99-251.sslip.io
+---
+# Plain HTTP only ever answers with a redirect, so a session cookie is never
+# sent unencrypted (configmap.yaml sets SESSION_COOKIE_SECURE).
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: web
+spec:
+  redirectToHttps:
+    enabled: true
+    responseCodeName: MOVED_PERMANENTLY_DEFAULT

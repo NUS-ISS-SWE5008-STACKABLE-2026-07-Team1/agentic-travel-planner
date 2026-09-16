@@ -25,11 +25,11 @@ data:
   # because both roles share the namespace.
   A2A_BASE_URL: http://agents:8000
 
-  # DIFFERS FROM RENDER, temporarily. Render terminates TLS so it sets "true".
-  # Until the Ingress has a certificate (step 6), the site is plain HTTP, and a
-  # Secure cookie is never sent back over HTTP — login would silently fail.
-  # Flip to "true" in the same change that adds HTTPS.
-  SESSION_COOKIE_SECURE: "false"
+  # The public site is HTTPS-only (iap.yaml redirects HTTP), so the session
+  # cookie is marked Secure, as on Render. Browsers still send Secure cookies
+  # to http://localhost, so `kubectl port-forward` logins keep working;
+  # deploy/smoke_test.py relaxes the flag itself for localhost.
+  SESSION_COOKIE_SECURE: "true"
 
   # --- L2 guardrails: same values and reasoning as render.yaml ------------
   GUARDRAIL_LLM_ENABLED: "true"
