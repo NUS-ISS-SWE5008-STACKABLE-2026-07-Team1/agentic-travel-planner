@@ -19,3 +19,6 @@ docs/potentialImprovements.md
 docs/security/cicd-owner-notes.md
 docs/security/cicd-summary-for-team.md
 docs/security/cicd-status.html
+
+# pytest-playwright failure screenshots, videos and traces (see ci-checks.yml).
+test-results/

@@ -1,3 +1,12 @@
+# Ranges, for local development. Render and CI install requirements.lock
+# instead, which pins every package (including the ones these pull in) to an
+# exact version with checksums. After changing anything in this file,
+# regenerate the lock and commit both together:
+#
+#   uv pip compile requirements.txt --universal --python-version 3.11 --generate-hashes --output-file requirements.lock
+#
+# CI fails if the two disagree (scripts/check_requirements_lock.py).
+
 # Web application
 Flask>=3.1,<4
 Werkzeug>=3.1,<4

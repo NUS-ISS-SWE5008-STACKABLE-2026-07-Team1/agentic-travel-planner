@@ -262,7 +262,7 @@ and the stub provider. `./run_tck.py --sut-host … --transport jsonrpc`.
 Expect to fail first on: card not at origin root (blocks everything else),
 then the streaming claim, then cancel/get error codes, then malformed-request
 codes. Add as a **separate non-blocking workflow**, modelled on `ci-dast.yml`,
-not in `ci-fast.yml` (which is deliberately kept at ~2 minutes). Gate on
+not in `ci-checks.yml` (which is deliberately kept at ~2 minutes). Gate on
 "MUST-level failures == 0" parsed from `compatibility.json`.
 
 **10. Deployment and docs.** `render.yaml` → `uvicorn asgi:application`;
