@@ -305,3 +305,56 @@ def test_option_category_round_trips_and_is_null_for_older_rows(tmp_path):
     with sqlite3.connect(database) as connection:
         rows = dict(connection.execute("SELECT name, category FROM options").fetchall())
     assert rows == {"Grand": "hotel", "Express": "transport", "Uncategorised": None}
+
+
+def test_a_legacy_flight_eval_runs_fk_is_repointed_at_planning_jobs(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` never touches an existing table, so a
+    database created under the old FK (onto travel_requests, which does not
+    exist yet mid-plan) must be migrated by `initialize` — keeping its rows and
+    its indexes, and nulling only ids that no planning job backs."""
+    from flaskapp.database import connect, ensure_planning_job
+
+    database = tmp_path / "legacy.sqlite3"
+    initialize(database)
+    legacy_schema = SCHEMA_SQLITE.replace(
+        "request_id TEXT REFERENCES planning_jobs(request_id) ON DELETE SET NULL",
+        "request_id TEXT REFERENCES travel_requests(id) ON DELETE SET NULL",
+    )
+    assert legacy_schema != SCHEMA_SQLITE, "fixture must actually restore the old FK"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE flight_agent_eval_runs")
+        connection.executescript(legacy_schema)
+        connection.execute("PRAGMA foreign_keys = OFF")
+        for request_id in ("job-backed", "no-job"):
+            connection.execute(
+                "INSERT INTO flight_agent_eval_runs (run_type, request_id, flight_agent_mode, "
+                "inventory_source, latency_ms, outcome, trace_id) "
+                "VALUES ('production', ?, 'auto', 'seed', 5, 'success', ?)",
+                (request_id, request_id),
+            )
+    ensure_planning_job(database, "job-backed", None, {})
+
+    initialize(database)
+    initialize(database)  # and idempotent once migrated
+
+    with connect(database) as db:
+        assert [row["table"] for row in db.execute(
+            "PRAGMA foreign_key_list(flight_agent_eval_runs)"
+        ).fetchall()] == ["planning_jobs"]
+        assert {row["trace_id"]: row["request_id"] for row in db.execute(
+            "SELECT trace_id, request_id FROM flight_agent_eval_runs"
+        ).fetchall()} == {"job-backed": "job-backed", "no-job": None}
+        indexes = {row["name"] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND tbl_name = 'flight_agent_eval_runs'"
+        ).fetchall()}
+    assert {"idx_flight_eval_created", "idx_flight_eval_run_type",
+            "idx_flight_eval_outcome", "idx_flight_eval_scenario"} <= indexes
+
+    # The live write now lands with only a planning job behind it.
+    from flaskapp.database import save_flight_eval_run
+    ensure_planning_job(database, "mid-plan", None, {})
+    save_flight_eval_run(
+        database, run_type="production", request_id="mid-plan",
+        flight_agent_mode="auto", inventory_source="seed", outcome="success", latency_ms=1,
+    )
