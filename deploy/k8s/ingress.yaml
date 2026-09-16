@@ -1,16 +1,28 @@
-# Public entry point: a Google Cloud external HTTP load balancer in front of
-# the web Service. Plain HTTP for now; HTTPS is decided in step 6 (it needs a
-# hostname for a Google-managed certificate). Until then configmap.yaml keeps
-# SESSION_COOKIE_SECURE off, and they must change together.
+# Public entry point, gated by Identity-Aware Proxy (access option D).
 #
-# The load balancer takes its health check from web's readinessProbe (/readyz).
-# It can take 5-10 minutes after the first apply before the address serves.
+#   https://8-232-99-251.sslip.io
+#
+# A Google Cloud external HTTPS load balancer on the reserved global IP
+# `travel-planner-ip`. Every request must pass Google sign-in AND belong to an
+# account granted roles/iap.httpsResourceAccessor on the project before it can
+# reach Flask — including /register and the login page. See backendconfig.yaml.
+#
+# The hostname is sslip.io's wildcard DNS for that IP, because a
+# Google-managed certificate needs a name and there is no domain. Change it in
+# managedcertificate.yaml if a real domain is ever used.
+#
+# NEVER apply this without backendconfig.yaml and the `iap-oauth` Secret
+# (deploy/create_iap_secret.py) already in place: without IAP the load balancer
+# would serve the app to the internet, public demo login included.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: web
   annotations:
     kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.global-static-ip-name: travel-planner-ip
+    networking.gke.io/managed-certificates: web
+    networking.gke.io/v1beta1.FrontendConfig: web
 spec:
   defaultBackend:
     service:

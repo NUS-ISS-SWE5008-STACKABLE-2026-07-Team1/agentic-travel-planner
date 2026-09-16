@@ -79,6 +79,12 @@ def login(base: str, email: str, password: str) -> tuple[requests.Session, str]:
     }, timeout=30)
     # The login form's token is bound to the pre-login session; the API needs
     # the one rendered on an authenticated page.
+    if base.startswith(("http://127.0.0.1", "http://localhost")):
+        # SESSION_COOKIE_SECURE is on in the cluster, and requests (unlike a
+        # browser) never returns a Secure cookie over plain HTTP, even to
+        # localhost. Through `kubectl port-forward` the hop is local, so relax it.
+        for cookie in http.cookies:
+            cookie.secure = False
     main = http.get(f"{base}/main", timeout=30, allow_redirects=False)
     api_token = re.search(r'name="csrf-token" content="([^"]+)"', main.text)
     if main.status_code != 200 or not api_token:
