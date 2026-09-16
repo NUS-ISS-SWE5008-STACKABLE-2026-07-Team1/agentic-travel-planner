@@ -13,6 +13,7 @@ resources:
   - web.yaml
   - agents.yaml
   - networkpolicy.yaml
+  - pdb.yaml
   # Access option A: private. No Ingress means no public address and no load
   # balancer; reach the site with
   #   kubectl port-forward -n travel-planner svc/web 5000:80

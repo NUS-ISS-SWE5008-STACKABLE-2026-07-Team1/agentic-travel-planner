@@ -18,6 +18,8 @@ spec:
   template:
     metadata:
       labels: {app: agents}
+      # Eviction protection is pdb.yaml, not the safe-to-evict annotation; see
+      # the note in web.yaml for why.
     spec:
       terminationGracePeriodSeconds: 90
       securityContext:
@@ -54,15 +56,22 @@ spec:
             httpGet: {path: /a2a/flight_agent/.well-known/agent-card.json, port: a2a}
             periodSeconds: 5
             failureThreshold: 36
+          # More tolerant than web's, from measurement. During a real four-
+          # specialist plan this static card took over 5s to serve (liveness
+          # and readiness both failed at 2026-09-16 16:55:35) while per-minute
+          # CPU stayed under the 250m request — a short stall, likely GIL
+          # contention from the specialist threads plus the A2A client's 50ms
+          # GetTask polling. A restart here kills every task in flight, so
+          # liveness now needs two minutes of failure, not one slow response.
           livenessProbe:
             httpGet: {path: /a2a/flight_agent/.well-known/agent-card.json, port: a2a}
             periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 6
           readinessProbe:
             httpGet: {path: /a2a/flight_agent/.well-known/agent-card.json, port: a2a}
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 10
 ---
 apiVersion: v1
 kind: Service
