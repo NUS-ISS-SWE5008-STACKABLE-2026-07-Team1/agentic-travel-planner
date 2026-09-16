@@ -431,10 +431,29 @@ live agent status, each agent's latest structured response, and Azure-reported i
 output, and total token usage. Monitoring data is recorded for new requests after
 this feature is enabled; older trace-only requests do not contain token metadata.
 
-For the bundled demo login, use `demo@example.com` and `TravelDemo2026!`.
-Replace `SECRET_KEY`, `LOGIN_EMAIL`, and `LOGIN_PASSWORD_HASH` in `.env` before
-deployment. Production systems should replace this demo identity layer with SSO or
-another managed identity provider.
+The bundled demo login, `demo@example.com` / `TravelDemo2026!`, is **for local
+development and tests only.** It is what the app creates when `LOGIN_EMAIL` and
+`LOGIN_PASSWORD_HASH` are unset. The pytest and Playwright suites log in with it
+against their own throwaway databases, so leave the defaults in `config.py` as
+they are.
+
+**Never leave it active on a shared or deployed server: the password is public.**
+Set these in the host's environment (on Render, the service's Environment page)
+along with `SECRET_KEY`:
+
+- `LOGIN_EMAIL` and `LOGIN_PASSWORD_HASH`: the account created at startup. Make
+  the hash without the password landing in your shell history:
+  `python -c "from werkzeug.security import generate_password_hash; import getpass; print(generate_password_hash(getpass.getpass()))"`
+- `ADMIN_EMAIL`: set it explicitly. When unset it defaults to `LOGIN_EMAIL`, which
+  makes the startup account an administrator. That check is made before the
+  database, so `users.is_admin = 0` does not override it.
+
+Setting these does not change an account that already exists, because startup
+only inserts the demo user when its email is missing. If a server has ever run
+without them, also reset that account's password and `is_admin` in the database.
+
+Production systems should replace this demo identity layer with SSO or another
+managed identity provider.
 
 ## API
 
