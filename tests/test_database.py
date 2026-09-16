@@ -1,5 +1,6 @@
 import sqlite3
 
+import pytest
 from werkzeug.security import generate_password_hash
 
 from flaskapp import create_app
@@ -247,25 +248,47 @@ def test_a_legacy_database_with_not_null_origin_is_migrated(tmp_path):
     The legacy state is produced from the real schema with NOT NULL put back,
     rather than a hand-written stub: the table has gained columns over time and
     a four-column fixture would not exercise the copy.
+
+    The request also has a row in every table that cascades off it. With
+    foreign keys on, SQLite's DROP TABLE deletes through ON DELETE CASCADE, so
+    a rebuild that forgets to switch them off keeps the request and silently
+    empties its plan, findings, options and messages.
     """
     database = tmp_path / "legacy.sqlite3"
     initialize(database)
     with sqlite3.connect(database) as connection:
-        columns = connection.execute("PRAGMA table_info(travel_requests)").fetchall()
-        definitions = ", ".join(
-            f"{row[1]} {row[2]}"
-            + (" PRIMARY KEY" if row[5] else "")
-            + (" NOT NULL" if (row[3] or row[1] == "origin") else "")
-            + (f" DEFAULT {row[4]}" if row[4] is not None else "")
-            for row in columns
-        )
-        names = ", ".join(row[1] for row in columns)
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='travel_requests'"
+        ).fetchone()[0]
+        legacy_sql = table_sql.replace("origin TEXT,", "origin TEXT NOT NULL,", 1)
+        assert legacy_sql != table_sql, "fixture must find the origin column"
+        index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='idx_requests_user_created'"
+        ).fetchone()[0]
         connection.execute("DROP TABLE travel_requests")
-        connection.execute(f"CREATE TABLE travel_requests ({definitions})")
+        connection.execute(legacy_sql)
+        connection.execute(index_sql)
+        connection.execute("INSERT INTO users (id, email, password_hash) VALUES (7, 'a@b.c', 'x')")
         connection.execute(
-            "INSERT INTO travel_requests (id, origin, destination, departure_date, "
+            "INSERT INTO travel_requests (id, user_id, origin, destination, departure_date, "
             "return_date, travellers, budget, currency, risk_tolerance) VALUES "
-            "('old', 'Singapore', 'Japan', '2026-01-01', '2026-01-02', 1, 100, 'SGD', 'medium')"
+            "('old', 7, 'Singapore', 'Japan', '2026-01-01', '2026-01-02', 1, 100, 'SGD', 'medium')"
+        )
+        connection.execute(
+            "INSERT INTO travel_plans (request_id, title, summary, itinerary_json, "
+            "rationale_json, safety_passed) VALUES ('old', 't', 's', '[]', '[]', 1)"
+        )
+        connection.execute(
+            "INSERT INTO agent_findings (id, request_id, agent, summary, confidence) "
+            "VALUES (1, 'old', 'flight_agent', 's', 0.5)"
+        )
+        connection.execute(
+            "INSERT INTO options (finding_id, name, description) VALUES (1, 'n', 'd')"
+        )
+        connection.execute(
+            "INSERT INTO a2a_messages (message_id, request_id, protocol_version, sender, "
+            "recipient, message_type, status, created_at, payload_type) VALUES "
+            "('m1', 'old', '1', 'a', 'b', 'request', 'ok', '2026-01-01', 'p')"
         )
         assert connection.execute(
             "SELECT \"notnull\" FROM pragma_table_info('travel_requests') WHERE name='origin'"
@@ -280,6 +303,21 @@ def test_a_legacy_database_with_not_null_origin_is_migrated(tmp_path):
         assert connection.execute(
             "SELECT origin FROM travel_requests WHERE id='old'"
         ).fetchone()[0] == "Singapore", "the rebuild must not lose rows"
+        for table in ("travel_plans", "agent_findings", "a2a_messages"):
+            assert connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE request_id='old'"
+            ).fetchone()[0] == 1, f"the rebuild must not cascade-delete {table}"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM options WHERE finding_id=1"
+        ).fetchone()[0] == 1, "the rebuild must not cascade-delete options"
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_requests_user_created'"
+        ).fetchone(), "the rebuild must recreate the table's indexes"
+        assert connection.execute(
+            "SELECT \"table\", on_delete FROM pragma_foreign_key_list('travel_requests')"
+        ).fetchall() == [("users", "SET NULL")], "the rebuild must keep the user_id foreign key"
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE travel_requests SET travellers = 0 WHERE id='old'")
 
 
 def test_option_category_round_trips_and_is_null_for_older_rows(tmp_path):

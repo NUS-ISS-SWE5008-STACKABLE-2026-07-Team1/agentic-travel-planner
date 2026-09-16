@@ -1,9 +1,17 @@
 # =============================================================================
 # Replaces the secrets + tests + sast jobs of .github/workflows/security.yml.
-# Split from DAST per backlog item 17: this tier is ~2 minutes, DAST is not.
-# Addresses items 6, 7, 9, 12, 15, 17.
+# Split from DAST per backlog item 17: this tier runs on every push/PR, DAST
+# does not (push-only, see ci-dast.yml). Addresses items 6, 7, 9, 12, 15, 17.
+#
+# Renamed from "CI — fast checks" (2026-09-06): "fast" was relative to DAST's
+# runtime, not a claim about thoroughness, but read out of context — e.g. by
+# someone reviewing the Actions tab with no prior context on why there are two
+# workflows — as "the quick/shortcut tier," implying a more thorough one exists
+# elsewhere. It doesn't; this file (secrets scan, tests, SAST, E2E) and
+# ci-dast.yml (the dynamic scan) are the whole pipeline. Named for contents
+# instead.
 # =============================================================================
-name: CI — fast checks
+name: CI — Static & Functional Checks
 
 on:
   # Item 6, and the team decision of 2026-08-17: the pipeline runs on pull
@@ -218,6 +226,21 @@ jobs:
           path: pytest-report.xml
           retention-days: 14
 
+      # ADVISORY. Writes this run's results to ci_test_runs / ci_test_results
+      # in Supabase, for pass/fail history past the 14-day artifact limit. See
+      # scripts/log_test_results.py and docs/handoff/ci-test-logging-supabase.md.
+      #
+      # Cannot fail the job: with no TEST_RESULTS_DATABASE_URL secret, an
+      # unreachable database, or a bad report, it prints a notice and exits 0.
+      # The secret should be an insert-only login, never the app's own
+      # DATABASE_URL.
+      - name: Log test results to Supabase
+        if: always()
+        env:
+          TEST_RESULTS_DATABASE_URL: ${{ secrets.TEST_RESULTS_DATABASE_URL }}
+          TEST_RESULTS_DATABASE_SCHEMA: Travelplanner_schema
+        run: python scripts/log_test_results.py pytest-report.xml --job tests
+
   e2e:
     name: E2E (Playwright)
     runs-on: ubuntu-latest
@@ -230,10 +253,12 @@ jobs:
     # extra billed minutes per run, judged worth it here for catching a
     # broken login/plan-render path before merge rather than after.
     #
-    # Self-contained on purpose: no GH secrets, no service containers. Both
-    # tests spin up their own Flask server (`tests/e2e/conftest.py`'s
-    # `live_server`) against a throwaway SQLite file under pytest's own
-    # tmp_path, never `instance/travel_planner.sqlite3`.
+    # Self-contained on purpose: no service containers, and the tests
+    # themselves need no secret. Both spin up their own Flask server
+    # (`tests/e2e/conftest.py`'s `live_server`) against a throwaway SQLite
+    # file under pytest's own tmp_path, never `instance/travel_planner.sqlite3`.
+    # (One optional secret, TEST_RESULTS_DATABASE_URL, feeds the advisory
+    # logging step at the end; the tests never depend on it.)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -251,14 +276,17 @@ jobs:
           fi
 
       # Cached on Playwright's own version: the browser binary doesn't
-      # change between runs unless requirements.txt bumps pytest-playwright,
-      # so a cache hit skips the ~300MB Chromium download entirely.
+      # change between runs unless the installed playwright version does, so a
+      # cache hit skips the ~300MB Chromium download entirely. That version is
+      # decided by requirements.lock, so the lock is in the key: keyed on
+      # requirements.txt alone, a lock bump would restore a browser built for
+      # the previous playwright and the E2E tests would fail to launch it.
       - name: Cache Playwright browsers
         id: playwright-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.lock', 'requirements.txt') }}
 
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
@@ -274,8 +302,18 @@ jobs:
       # BLOCKING, same tier as `tests` above — see pytest.ini for why
       # `tests/e2e` needs `-m e2e` and its own path rather than living inside
       # the default `pytest -q` collection.
+      #
+      # --screenshot/--video/--tracing are pytest-playwright's own flags.
+      # "only-on-failure"/"retain-on-failure" mean a clean run produces
+      # nothing, so the upload below only fills in when a test fails. Added
+      # because a failure used to leave only an assertion message: on
+      # 2026-09-15 "Planning stopped." had to be reproduced on a laptop to see
+      # what the page actually did.
       - name: Run Playwright E2E tests
-        run: python -m pytest tests/e2e -m e2e --browser chromium -q --junitxml=e2e-report.xml
+        run: >-
+          python -m pytest tests/e2e -m e2e --browser chromium -q
+          --junitxml=e2e-report.xml
+          --screenshot=only-on-failure --video=retain-on-failure --tracing=retain-on-failure
 
       - name: Upload E2E report
         if: always()
@@ -284,6 +322,33 @@ jobs:
           name: e2e-report
           path: e2e-report.xml
           retention-days: 14
+
+      # Screenshots, video and trace land under test-results/, pytest-playwright's
+      # default output directory. Open a trace at https://trace.playwright.dev
+      # or with `playwright show-trace <file>.zip`.
+      #
+      # A trace records network traffic, cookies included. Safe to publish
+      # here only because everything in it is throwaway: a per-run SQLite file,
+      # the fixed test SECRET_KEY in tests/e2e/conftest.py, the public demo
+      # account, and the stub LLM. Revisit before pointing E2E at any real
+      # service or credential. if-no-files-found: ignore because a passing run
+      # leaves the folder empty by design.
+      - name: Upload E2E screenshots, video and trace (failures only)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-artifacts
+          path: test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # ADVISORY, same as the step at the end of `tests`: cannot fail the job.
+      - name: Log test results to Supabase
+        if: always()
+        env:
+          TEST_RESULTS_DATABASE_URL: ${{ secrets.TEST_RESULTS_DATABASE_URL }}
+          TEST_RESULTS_DATABASE_SCHEMA: Travelplanner_schema
+        run: python scripts/log_test_results.py e2e-report.xml --job e2e
 
   sast:
     name: SAST
@@ -303,6 +368,13 @@ jobs:
           else
             python -m pip install -r requirements.txt
           fi
+
+      # BLOCKING. requirements.txt is what people edit; requirements.lock is
+      # what CI and Render install. This fails when the two have drifted apart,
+      # instead of CI quietly testing and scanning the old versions. Runs
+      # before the scanners install, so their own dependencies cannot mask it.
+      - name: requirements.lock matches requirements.txt
+        run: python scripts/check_requirements_lock.py
 
       - name: Install scanners
         run: python -m pip install semgrep bandit pip-audit
@@ -331,16 +403,23 @@ jobs:
         continue-on-error: true
         run: bandit -r flaskapp -l -f json -o bandit-report.json
 
-      # Item 12 — stays advisory until requirements.lock exists. Gating an
-      # unpinned tree means someone else's release breaks our build.
+      # Item 12 — BLOCKING, now that requirements.lock exists. It was advisory
+      # only because gating unpinned ranges meant someone else's release could
+      # break our build; the lock removes that.
+      #
+      # --disable-pip audits the lock file as written rather than installing it
+      # a second time, so it checks exactly the versions Render deploys and
+      # finishes in seconds.
+      #
+      # If a finding has no fixed version yet and must not block merging, add
+      # `--ignore-vuln <ID>` below with a comment saying why and when to
+      # revisit it. Never put continue-on-error back.
       - name: pip-audit (dependency vulnerability scan)
-        continue-on-error: true
-        run: |
-          if [ -f requirements.lock ]; then
-            pip-audit -r requirements.lock
-          else
-            pip-audit -r requirements.txt
-          fi
+        shell: bash
+        run: >
+          pip-audit -r requirements.lock --require-hashes --disable-pip
+          --progress-spinner off 2>&1
+          | tee pip-audit-report.txt
 
       - name: Upload scan reports
         if: always()
@@ -351,4 +430,5 @@ jobs:
             semgrep-report.json
             semgrep-llm-report.json
             bandit-report.json
+            pip-audit-report.txt
           retention-days: 14
