@@ -25,4 +25,4 @@ resources:
 images:
   - name: travel-planner
     newName: us-west1-docker.pkg.dev/project-931fd286-f1d2-4105-9e5/travel-planner/app
-    newTag: v1
+    newTag: v2
