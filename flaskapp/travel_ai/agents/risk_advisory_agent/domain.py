@@ -24,15 +24,22 @@ _NON_WORD = re.compile(r"[^a-z0-9]+")
 def _slug(*parts: str) -> str:
     """A stable id component from human-readable text.
 
-    `risk_id` is built from destination and content, not from a database
-    row's autoincrement `id` — the reference tables are reseeded wholesale
-    (`seed_risk_reference_data` deletes and reinserts everything), which
-    would renumber every row and silently break any `risk_id` a trace or an
-    audit log had already recorded. A slug of what the fact actually is
-    stays the same across a reseed as long as the fact itself hasn't
-    changed, which is the property an audit trail needs.
+    `risk_id` is built from destination and content, not from a row's
+    position in the CSV — inserting a new row anywhere in
+    `risk_standing_facts.csv` (say) must not change what an existing row's
+    id means, or a `risk_id` a trace or audit log already recorded would
+    silently point at a different fact after the next edit. A slug of what
+    the fact actually is stays the same regardless of row order, which is
+    the property an audit trail needs.
     """
     return "-".join(_NON_WORD.sub("-", part.lower()).strip("-") for part in parts)
+
+
+def _dates_overlap(a_start: str, a_end: str, b_start: date, b_end: date) -> bool:
+    """Standard interval-overlap test: two ranges overlap unless one ends
+    before the other starts. ISO date strings compare correctly as text, so
+    no parsing is needed for the CSV side."""
+    return a_start <= str(b_end) and a_end >= str(b_start)
 
 
 def _months_covered(departure: date, return_: date) -> set[int]:
@@ -50,8 +57,8 @@ def _months_covered(departure: date, return_: date) -> set[int]:
 
 def _window_covers_any(start_month: int, end_month: int, months: set[int]) -> bool:
     """True if the window's month range (which may wrap the year end) touches
-    any month the trip is in. Same wrap handling `database.py`'s schema
-    comment documents: (11, 3) means Nov-Mar, stored as-is, not split."""
+    any month the trip is in: (11, 3) means Nov-Mar, stored as-is in the CSV,
+    not split into two rows."""
     if start_month <= end_month:
         window_months = set(range(start_month, end_month + 1))
     else:
@@ -60,9 +67,10 @@ def _window_covers_any(start_month: int, end_month: int, months: set[int]) -> bo
 
 
 def propose_risks(request: RiskProposalRequest, provider: RiskDataProvider) -> RiskProposal:
-    """The tool. Deterministic, no model call: query, filter by date, done.
+    """The tool. Deterministic, no model call: filter by destination, filter
+    by date, done.
 
-    Every `RiskItem` traces back to one database row via `risk_id`
+    Every `RiskItem` traces back to one seed-data row via `risk_id`
     (`fact-<destination>-<category>`, `season-<destination>-<label>`,
     `event-<destination>-<name>`) — that is what
     `reasoning.validate_grounded_response` checks membership against. Sorted
@@ -92,10 +100,9 @@ def propose_risks(request: RiskProposalRequest, provider: RiskDataProvider) -> R
             source=row.get("source") or "synthetic reference data — illustrative only",
         ))
 
-    # Dated events: the provider already filtered to the trip's date range
-    # (`DatabaseRiskProvider.fetch` calls `get_risk_dated_events` with
-    # departure/return as the overlap bounds), so every row here is in range.
     for row in result.dated_events:
+        if not _dates_overlap(row["start_date"], row["end_date"], request.departure_date, request.return_date):
+            continue
         items.append(RiskItem(
             risk_id=_slug("event", slug, row["name"]), kind="dated_event", category=row["category"],
             severity=None, title=row["name"], detail=row.get("detail") or "",

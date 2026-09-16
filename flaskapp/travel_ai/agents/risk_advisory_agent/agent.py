@@ -15,9 +15,9 @@ Flow:
                             -> reasoning.run_risk_agent   model narrates; grounding enforced
                 -> AgentFinding                    back onto the shared contract
 
-Reference data comes from a `RiskDataProvider` (see `providers/`), not a
-module-level dataset — today that is `DatabaseRiskProvider`, reading the
-tables `flaskapp/database.py` defines; a future live-retrieval provider would
+Reference data comes from a `RiskDataProvider` (see `providers/`) rather than
+being read here directly — today that is `SeedRiskProvider`, reading the
+CSV-loaded content in `seed_data.py`; a future live-retrieval provider would
 plug in behind the same interface with no change to this file.
 
 Fallback: when the destination has no reference data (an unmapped city, or

@@ -8,9 +8,8 @@ from datetime import date
 
 import pytest
 
-from flaskapp.database import initialize, seed_risk_reference_data
 from flaskapp.travel_ai.agents.risk_advisory_agent.domain import propose_risks
-from flaskapp.travel_ai.agents.risk_advisory_agent.providers.database import DatabaseRiskProvider
+from flaskapp.travel_ai.agents.risk_advisory_agent.providers.base import RiskFetchResult
 from flaskapp.travel_ai.agents.risk_advisory_agent.schemas import RiskProposalRequest
 
 STANDING = [
@@ -21,9 +20,9 @@ STANDING = [
 ]
 SEASONAL = [
     # Wraps the year end: Nov (11) through Feb (2).
-    {"destination_slug": "zz-testland", "label": "Winter storms",
+    {"destination_slug": "zz-testland", "category": "seasonal_weather", "label": "Winter storms",
      "start_month": 11, "end_month": 2, "severity": "medium", "detail": "Storms disrupt travel."},
-    {"destination_slug": "zz-testland", "label": "Monsoon",
+    {"destination_slug": "zz-testland", "category": "seasonal_weather", "label": "Monsoon",
      "start_month": 6, "end_month": 8, "severity": "high", "detail": "Heavy flooding risk."},
 ]
 DATED = [
@@ -32,12 +31,31 @@ DATED = [
 ]
 
 
+class FakeProvider:
+    """A `RiskDataProvider` over a plain in-memory list — same shape as
+    `SeedRiskProvider`, minus the CSV file, so this file tests `domain.py`'s
+    query/date logic without depending on the real `seed_data.py` content."""
+
+    def __init__(self, standing=STANDING, seasonal=SEASONAL, dated=DATED):
+        self._standing = standing
+        self._seasonal = seasonal
+        self._dated = dated
+
+    def covers(self, request: RiskProposalRequest) -> bool:
+        return any(f["destination_slug"] == request.destination_slug for f in self._standing)
+
+    def fetch(self, request: RiskProposalRequest) -> RiskFetchResult:
+        slug = request.destination_slug
+        return RiskFetchResult(
+            standing_facts=[f for f in self._standing if f["destination_slug"] == slug],
+            seasonal_windows=[w for w in self._seasonal if w["destination_slug"] == slug],
+            dated_events=[e for e in self._dated if e["destination_slug"] == slug],
+        )
+
+
 @pytest.fixture
-def provider(tmp_path):
-    path = tmp_path / "test.sqlite3"
-    initialize(path)
-    seed_risk_reference_data(path, STANDING, SEASONAL, DATED)
-    return DatabaseRiskProvider(path)
+def provider():
+    return FakeProvider()
 
 
 def _request(departure: date, return_: date, slug="zz-testland") -> RiskProposalRequest:
@@ -100,21 +118,14 @@ def test_risk_ids_are_kind_prefixed_and_content_derived(provider):
     assert ids["Founders Festival"] == "event-zz-testland-founders-festival"
 
 
-def test_risk_ids_survive_a_reseed_that_reorders_rows(tmp_path):
-    """The point of a content-derived id: reseeding (delete-all, insert-all)
-    renumbers every row's autoincrement id, but must not change what a
-    previously-recorded risk_id means."""
-    path = tmp_path / "reseed.sqlite3"
-    initialize(path)
-    seed_risk_reference_data(path, STANDING, SEASONAL, DATED)
-    before = propose_risks(_request(date(2026, 7, 10), date(2026, 7, 14)), DatabaseRiskProvider(path))
-
-    # Reseed with unrelated rows inserted first, shifting every autoincrement id.
-    padding = [{"destination_slug": "zz-other", "category": "visa_entry", "severity": "low",
-                "title": "padding", "detail": "d", "mitigation": None}]
-    seed_risk_reference_data(path, padding + STANDING, SEASONAL, DATED)
-    after = propose_risks(_request(date(2026, 7, 10), date(2026, 7, 14)), DatabaseRiskProvider(path))
-
+def test_risk_ids_are_independent_of_row_order():
+    """The point of a content-derived id: nothing about it depends on a
+    row's position in the source list, unlike a positional or autoincrement
+    id would — inserting a new row anywhere in the CSV must not change what
+    an existing risk_id means."""
+    reordered = FakeProvider(standing=list(reversed(STANDING)))
+    before = propose_risks(_request(date(2026, 1, 1), date(2026, 1, 5)), FakeProvider())
+    after = propose_risks(_request(date(2026, 1, 1), date(2026, 1, 5)), reordered)
     assert {item.risk_id for item in before.items} == {item.risk_id for item in after.items}
 
 
