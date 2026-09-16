@@ -20,6 +20,13 @@ spec:
   template:
     metadata:
       labels: {app: web}
+      # Eviction protection is pdb.yaml, deliberately NOT the
+      # `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation.
+      # On Autopilot that annotation makes an extended-duration pod: it raised
+      # the CPU request to 500m and required a dedicated node, whose creation
+      # failed on the trial's SSD_TOTAL_GB quota and left both pods Pending
+      # (2026-09-17). A PodDisruptionBudget stops the same scale-down
+      # evictions without either cost.
     spec:
       # A plan takes 30-90s. Give a running one the chance to finish before
       # the container is killed on deploy or node maintenance.
