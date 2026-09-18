@@ -105,7 +105,11 @@ CREATE TABLE IF NOT EXISTS options (
     -- What kind of option this is, as asserted by the builder that made it.
     -- Nullable: rows written before builders classified themselves genuinely
     -- have no category, and NULL says that rather than guessing one.
-    category TEXT
+    category TEXT,
+    -- Which airport an option lands at or serves. Defaulted rather than
+    -- nullable: rows written before packages existed served no airport, and ''
+    -- says that without a caller needing to handle None.
+    airport TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -327,7 +331,11 @@ CREATE TABLE IF NOT EXISTS options (
     -- What kind of option this is, as asserted by the builder that made it.
     -- Nullable: rows written before builders classified themselves genuinely
     -- have no category, and NULL says that rather than guessing one.
-    category TEXT
+    category TEXT,
+    -- Which airport an option lands at or serves. Defaulted rather than
+    -- nullable: rows written before packages existed served no airport, and ''
+    -- says that without a caller needing to handle None.
+    airport TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -704,6 +712,10 @@ def initialize(target: Path | str) -> None:
         # falling back to the country's main gateway.
         if "category" not in existing_columns("options"):
             connection.execute("ALTER TABLE options ADD COLUMN category TEXT")
+        if "airport" not in existing_columns("options"):
+            connection.execute(
+                "ALTER TABLE options ADD COLUMN airport TEXT NOT NULL DEFAULT ''"
+            )
         # `origin` was NOT NULL until hotel-only scope existed: a stay has no
         # departure country. Postgres can relax the constraint in place;
         # SQLite cannot, so the table is rebuilt with its rows copied across.
@@ -850,12 +862,14 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
                 db.execute(
                     """INSERT INTO options
                        (finding_id, name, description, estimated_cost, currency, source_urls_json,
-                        assumptions_json, limitations_json, selection_factors_json, category)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        assumptions_json, limitations_json, selection_factors_json, category,
+                        airport)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (finding_id, option.name, option.description, option.estimated_cost,
                      option.currency, _json(option.source_urls), _json(option.assumptions),
                      _json(option.limitations), _json(option.selection_factors),
-                     getattr(option, "category", None)),
+                     getattr(option, "category", None),
+                     getattr(option, "airport", "") or ""),
                 )
         for message in messages:
             item = message.model_dump(mode="json") if hasattr(message, "model_dump") else message

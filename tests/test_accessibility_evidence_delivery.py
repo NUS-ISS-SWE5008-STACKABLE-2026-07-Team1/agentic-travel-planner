@@ -38,7 +38,10 @@ def test_chatbot_renders_sources_as_safe_clickable_links():
     # The evidence cards are no longer looked up by agent name in JS: they arrive
     # as one of the ordered sections `sections.plan_sections` builds, and the
     # heading is a Python constant asserted below rather than a string in here.
-    assert 'section.options.forEach((option) => list.append(optionCard(option)))' in javascript
+    # Evidence now arrives as a section's single unlabelled tier rather than a
+    # flat option list, but `optionCard` — which renders the vetted URLs — is
+    # still the only thing between the finding and the traveller.
+    assert 'tiers[0].options.forEach((option) => list.append(optionCard(option)))' in javascript
     assert '`Verify on ${url.hostname}`' in javascript
     assert 'sourceLabel.textContent = "Web references used"' in javascript
     assert 'accessibility-source-address' in javascript
@@ -53,6 +56,6 @@ def test_the_accessibility_evidence_section_is_named_and_ordered_server_side():
     """
     from flaskapp.travel_ai.sections import SECTION_ORDER
 
-    titles = [title for title, _agent, _category in SECTION_ORDER]
+    titles = [title for title, _icon, _agent, _category in SECTION_ORDER]
     assert "Accessibility evidence" in titles
     assert titles.index("Accessibility evidence") < titles.index("Risk and advisory")

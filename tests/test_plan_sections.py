@@ -55,16 +55,22 @@ def test_a_specialist_that_did_not_run_produces_no_section():
     assert not any("Flight" in title for title in titles(sections))
 
 
-def test_one_hotel_finding_splits_into_hotel_and_transport():
-    sections = plan_sections([finding("hotel_transport_agent", [
+def test_one_hotel_finding_splits_across_a_package_and_a_section():
+    """The split survives the move to tier columns: hotels are banded into
+    packages, transport stays an unbanded section, and neither takes the
+    other's options."""
+    from flaskapp.travel_ai.sections import plan_packages
+
+    one = finding("hotel_transport_agent", [
         option("Grand Hotel", "hotel"),
         option("Airport Express", "transport"),
-    ])])
-    assert len(sections) == 2
-    hotel, transport = sections
-    assert [o.name for o in hotel.options] == ["Grand Hotel"]
-    assert [o.name for o in transport.options] == ["Airport Express"]
-    assert "transport" in transport.title.lower()
+    ])
+    sections = plan_sections([one])
+    assert [s.title for s in sections] == ["Arrival and local transport"]
+    assert [o.name for o in sections[0].options] == ["Airport Express"]
+
+    packaged = [o.name for p in plan_packages([one]) for g in p.groups for o in g.options]
+    assert packaged == ["Grand Hotel"]
 
 
 def test_a_finding_with_no_options_still_renders_its_summary():

@@ -82,6 +82,23 @@ class TravelRequest(BaseModel):
         return self
 
 
+class OptionSchedule(BaseModel):
+    """The timed facts an airline site shows, for options that have them.
+
+    Only grounded flights carry one: the prompt-only fallback has no flight
+    number and no timestamps to give. `depart` and `arrive` are ISO-8601 with
+    each airport's own offset, because they are wall-clock times in two
+    different places.
+    """
+
+    reference: str
+    depart: str
+    arrive: str
+    dest_code: str = ""
+    direction: str = ""          # OUTBOUND | RETURN
+    stops: int = 0
+
+
 class Option(BaseModel):
     """A transparent option proposed by a specialist agent."""
 
@@ -92,6 +109,18 @@ class Option(BaseModel):
     # description, a format nothing enforces. Defaulted to None so every stored
     # row and A2A artifact written before this field stays valid.
     category: Literal["flight", "hotel", "transport", "accessibility", "advisory"] | None = None
+    # The airport this option lands at, or serves. Set by the flight builder
+    # from the candidate's destination and by the transport builder from the
+    # pair it came from — it is what lets a package pair a flight with the right
+    # transfer, instead of matching on prose in a description.
+    airport: str = ""
+    # Present only where a specialist had real scheduled inventory to report.
+    schedule: OptionSchedule | None = None
+    # The same schedule, formatted for display. Set on the COPY that reaches a
+    # tier column, never on the option the specialist returned, so
+    # `agent_findings` keeps exactly what was found. Formatting lives on the
+    # server because the next-day marker has to be computed, not eyeballed.
+    schedule_display: dict[str, str] | None = None
     name: str
     description: str
     estimated_cost: float | None = None
@@ -144,6 +173,47 @@ class TravelPlan(BaseModel):
     safety: SafetyAssessment = Field(default_factory=pending_safety_assessment)
 
 
+class PlanTier(BaseModel):
+    """One price band within a section. An empty `label` means no banding."""
+
+    label: str
+    options: list[Option] = Field(default_factory=list)
+
+
+class PlanRecommendation(BaseModel):
+    """One combination that fits the traveller's stated budget, or why none does.
+
+    Always present on a response: when nothing fits, `items` is empty and `note`
+    carries the reason. "This trip does not fit your budget, by 400 SGD" is more
+    use than silence.
+    """
+
+    items: list[Option] = Field(default_factory=list)
+    total: float = 0.0
+    currency: str = ""
+    remaining: float = 0.0
+    note: str = ""
+
+
+class PlanGroup(BaseModel):
+    """One section's contribution to one price tier."""
+
+    title: str
+    icon: str = ""
+    options: list[Option] = Field(default_factory=list)
+
+
+class PlanPackage(BaseModel):
+    """One tier column, holding every section that contributed to it.
+
+    Not a costed bundle: it shows the cheapest flights beside the cheapest
+    hotels and makes no claim that they add up to a trip within budget.
+    """
+
+    label: str
+    groups: list[PlanGroup] = Field(default_factory=list)
+
+
 class PlanSection(BaseModel):
     """One specialist's contribution to the plan, as a traveller reads it."""
 
@@ -151,6 +221,10 @@ class PlanSection(BaseModel):
     agent: str
     summary: str
     options: list[Option] = Field(default_factory=list)
+    # Both defaulted, so a caller constructing a PlanResponse by hand — and the
+    # A2A artifact written before tiers existed — stays valid.
+    icon: str = ""
+    tiers: list[PlanTier] = Field(default_factory=list)
 
 
 class PlanResponse(BaseModel):
@@ -163,6 +237,8 @@ class PlanResponse(BaseModel):
     # with the first. Defaulted so an older caller constructing a PlanResponse
     # by hand stays valid.
     sections: list[PlanSection] = Field(default_factory=list)
+    packages: list[PlanPackage] = Field(default_factory=list)
+    recommendation: PlanRecommendation = Field(default_factory=PlanRecommendation)
     trace_url: str
 
 

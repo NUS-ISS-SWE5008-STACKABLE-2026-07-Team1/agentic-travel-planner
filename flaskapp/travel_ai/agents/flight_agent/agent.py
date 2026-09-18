@@ -47,7 +47,7 @@ from flaskapp.travel_ai.agents.flight_agent.tools import ToolContext, budget_fro
 from flaskapp.travel_ai.agents.loop import EVENT_BUDGET_EXHAUSTED
 from flaskapp.travel_ai.guardrails.specialist import make_postprocess, make_preflight
 from flaskapp.travel_ai.agents.flight_agent.schemas import FlightCandidate, FlightProposal
-from flaskapp.travel_ai.schemas import AgentFinding, Option, TravelRequest
+from flaskapp.travel_ai.schemas import AgentFinding, Option, OptionSchedule, TravelRequest
 from flaskapp.travel_ai.terminal import log_payload
 from flaskapp.travel_ai.usage import TokenUsageCallback
 
@@ -192,10 +192,29 @@ def _candidate_to_option(candidate: FlightCandidate, currency: str, assumption: 
 
     return Option(
         category="flight",
+        # Where this leg lands. The shared key a package uses to pair the flight
+        # with the transfer that actually serves that airport.
+        airport=candidate.dest_airport,
+        # The same values the description sentence already carried, given
+        # structure so the card can show them the way an airline site does.
+        schedule=OptionSchedule(
+            reference=candidate.flight_id,
+            depart=candidate.dep_ts,
+            arrive=candidate.arr_ts,
+            dest_code=candidate.dest_airport,
+            # Outbound or return, so a package can take one of each rather than
+            # parsing "(Outbound)" back out of the name.
+            direction=candidate.direction,
+            stops=candidate.stops,
+        ),
         name=f"{candidate.flight_id} ({candidate.direction.title()})",
+        # No timestamps here: `schedule` carries them, and the card renders
+        # them as an airline site would. Repeating them as ISO prose underneath
+        # is exactly what the card replaced.
         description=(
-            f"{candidate.direction.title()} to {candidate.dest_airport}, departing "
-            f"{candidate.dep_ts}, arriving {candidate.arr_ts}."
+            f"{candidate.direction.title()} to {candidate.dest_airport}, "
+            + ("non-stop." if candidate.stops == 0
+               else f"{candidate.stops} stop{'s' if candidate.stops > 1 else ''}.")
         ),
         estimated_cost=candidate.price + candidate.seat_fee_estimate,
         currency=currency,

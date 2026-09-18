@@ -155,6 +155,50 @@ def _hotel_candidate_to_option(
     )
 
 
+def transport_options_for_city(
+    destination: str, destination_city: str | None, currency: str
+) -> list[Option]:
+    """Transport for every airport the destination city has.
+
+    Resolved from the city rather than from the flight agent's findings. Those
+    findings are empty when this agent runs — both start from START — which is
+    why `transport_option_count` was 0 on every grounded run while 46 seed
+    options sat unused.
+
+    Fetching for ALL of the city's airports also avoids a question staging could
+    not answer: one flight finding spans several arrival airports, so choosing
+    one would pair a Haneda arrival with the Narita Express. Each option carries
+    the airport it serves, and the package picks the matching one.
+    """
+    from flaskapp.places import find_city
+
+    if not destination_city:
+        return []
+    city = find_city(destination, destination_city)
+    if city is None:
+        return []
+    options: list[Option] = []
+    for transport in transport_for_city(destination, destination_city):
+        options.append(_transport_to_option(transport, currency))
+    return options
+
+
+def transport_for_city(destination: str, destination_city: str | None):
+    """Every seeded transfer for the destination city, tagged with its airport."""
+    from flaskapp.places import find_city
+
+    if not destination_city:
+        return []
+    city = find_city(destination, destination_city)
+    if city is None:
+        return []
+    return [
+        transport.model_copy(update={"airport": airport})
+        for airport in city.airports
+        for transport in transport_for(city.slug, airport)
+    ]
+
+
 def _transport_to_option(option: TransportOption, currency: str) -> Option:
     """Transport option as a shared-contract Option."""
     desc_parts = [f"{option.mode} — {option.name}"]
@@ -167,6 +211,7 @@ def _transport_to_option(option: TransportOption, currency: str) -> Option:
 
     return Option(
         category="transport",
+        airport=option.airport,
         name=option.name,
         description=", ".join(desc_parts),
         estimated_cost=option.estimated_cost,
@@ -228,9 +273,12 @@ def create_node(llm, tracer, provider=None, config=None):
 
         # Transport seed data is static — no provider abstraction yet.
         ctx = adapted.request.trip_context
-        arrival_airport = ctx.arrival_airport
-        if arrival_airport and ctx.dest_city_slug:
-            transport_options = transport_for(ctx.dest_city_slug, arrival_airport)
+        # Resolved from the destination CITY, not from the flight agent's
+        # findings: those are empty here because both agents start from START,
+        # which is why this lookup never once returned anything in production.
+        transport_options = transport_for_city(
+            travel_request.destination, travel_request.destination_city
+        )
         if not transport_options:
             notes.append(
                 "No verified transport options are available for the selected arrival airport."
