@@ -48,7 +48,7 @@ risk_advisory_agent/
 ├── agent.py        entry point: decides grounded vs. fallback, assembles the result
 ├── adapter.py       translates the shared trip request into this agent's own shape
 ├── schemas.py        this agent's own data shapes (RiskItem, RiskProposal, ...)
-├── providers/         where reference data comes from (today: the database)
+├── providers/         where reference data comes from (today: CSV files)
 ├── domain.py          looks up reference data — plain code, no model call
 ├── reasoning.py       the model narrates over what domain.py found
 ├── guardrails.py      this agent's own safety checks (see below)
@@ -68,7 +68,7 @@ Each file has exactly one job, and the model only ever touches one of them
      agent's own `guardrails.py`, not skipped) and labels the result
      accordingly. Stop here.
    - **Yes** → continue.
-3. **`domain.py`** queries the reference tables for that destination and
+3. **`domain.py`** filters the reference data for that destination and
    trip dates and returns a list of grounded facts. No model involved.
 4. **`guardrails.py`** screens the traveller's own free-text input before
    it goes anywhere near the model.
@@ -123,6 +123,14 @@ The one thing worth knowing if you're consuming its output programmatically:
 it never negotiates or revises — it's an evaluator, not a proposer. It
 produces one finding per request; it doesn't take follow-up refinement
 requests the way Flight or Hotel do.
+
+**It doesn't run on every request.** `flaskapp/travel_ai/dispatch.py` decides
+which specialists a request needs based on `plan_scope`: this agent runs for
+a full trip or a flights-only request, but not for a hotel-only one — a
+hotel-only request collects no departure country, so there's nothing for it
+to reason about entry from. Not this agent's own logic; if you're wondering
+why a response has no Risk & Advisory finding, check the request's scope
+before assuming something broke.
 
 ## Known limitation, stated plainly
 

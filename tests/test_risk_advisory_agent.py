@@ -142,3 +142,13 @@ def test_fallback_path_uses_its_own_screening_not_a_borrowed_one(tracer):
     finding = create_node(_llm(), tracer, provider=FakeProvider(covers=False))(_state(trip))["findings"][0]
     assert finding.confidence == 0.0
     assert "screening failed" in finding.summary
+
+
+def test_default_provider_needs_no_config_or_database(tracer):
+    """`provider=None`, `config=None`: exactly how `graph.py` builds this
+    node for the normal in-process path. Reference data is CSV-loaded at
+    import time, so this must work with no environment set up at all —
+    unlike a database-backed source, there is no "which environment is this
+    request actually running against" question to get wrong."""
+    finding = create_node(_llm(), tracer)(_state(TRIP))["findings"][0]
+    assert finding.options, "should have found jp-tokyo's seeded facts with zero configuration"
