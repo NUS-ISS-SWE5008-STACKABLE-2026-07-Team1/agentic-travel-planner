@@ -1,4 +1,4 @@
-"""v1's only `RiskDataProvider`: the CSV-loaded reference tables, unfiltered
+"""v1's only `RiskDataProvider`: the CSV-loaded reference data, unfiltered
 by date — `domain.py` does that filtering, the same way it already filters
 `flight_agent`'s and `hotel_transport_agent`'s seed inventory by date.
 

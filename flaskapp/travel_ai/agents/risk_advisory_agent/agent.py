@@ -1,7 +1,7 @@
 """Risk & Advisory Agent's LangGraph node — the grounded path.
 
 This node does NOT ask a model to think of risks. `domain.py` queries the
-reference tables in code first; the model is then given that finished list
+reference data in code first; the model is then given that finished list
 and asked only to prioritise, connect, and narrate it, with `guardrails`
 rejecting any risk_id it invents. Removing the model degrades the wording,
 not the underlying facts.
