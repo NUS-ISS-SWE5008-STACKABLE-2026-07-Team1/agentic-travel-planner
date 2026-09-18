@@ -161,6 +161,10 @@ class TransportOption(BaseModel):
 
     name: str
     mode: str
+    # Which airport this transfer serves. Carried on the domain object rather
+    # than attached afterwards, because ranking reorders these and any mapping
+    # built outside would have to survive that reordering.
+    airport: str = ""
     duration_minutes: int | None = None
     distance_km: float | None = None
     estimated_cost: float | None = None
