@@ -2,8 +2,9 @@
 
 Describes the agent as it is built today. Sources: `flaskapp/travel_ai/
 agents/risk_advisory_agent/` (adapter.py, schemas.py, providers/, domain.py,
-reasoning.py, guardrails.py, prompt.py, agent.py), `flaskapp/database.py`,
-and `flaskapp/travel_ai/agents/flight_agent/` for the pattern this mirrors.
+reasoning.py, guardrails.py, prompt.py, agent.py, seed_data.py and the three
+CSVs next to it), and `flaskapp/travel_ai/agents/flight_agent/`/
+`hotel_transport_agent/` for the pattern this mirrors.
 
 ---
 
@@ -15,7 +16,7 @@ only to prioritise, connect, and narrate it. Removing the model degrades the
 wording, not the underlying facts.
 
 ```
-providers/     DatabaseRiskProvider          reads the reference tables
+providers/     SeedRiskProvider              reads the CSV-loaded reference data
    ↓
 domain.py      propose_risks()               query + date filter — deterministic
    ↓
@@ -31,35 +32,40 @@ than blocking, exactly like Flight/Hotel's `_fallback_response`.
 
 ---
 
-## 2. Reference data: three tables, grouped by shape
+## 2. Reference data: three CSVs, grouped by shape
 
-`flaskapp/database.py` defines three tables — `risk_standing_facts`,
-`risk_seasonal_windows`, `risk_dated_events` — grouped by how they are
-queried, not by which of the ~18 advisory categories (visa, local laws,
-cultural norms, currency/customs, cybersecurity, crime, scams, political
-stability, traveller-group risk, emergency numbers, seasonal weather, local
-events, public holidays, labour action...) a given row belongs to:
+Three plain CSV files next to `seed_data.py` — `risk_standing_facts.csv`,
+`risk_seasonal_windows.csv`, `risk_dated_events.csv` — the same pattern
+Flight (`seed_data_extended.csv`) and Hotel & Transport
+(`hotel_seed_data.csv`) already use: data files loaded once into memory at
+import time, no database involved. Grouped by how they are queried, not by
+which of the ~18 advisory categories (visa, local laws, cultural norms,
+currency/customs, cybersecurity, crime, scams, political stability,
+traveller-group risk, emergency numbers, seasonal weather, local events,
+public holidays, labour action...) a given row belongs to:
 
-| Table | Shape | Queried by |
+| File | Shape | Filtered by |
 |---|---|---|
-| `risk_standing_facts` | True regardless of travel dates | destination alone |
-| `risk_seasonal_windows` | Recurring, month-bound | destination + month overlap |
-| `risk_dated_events` | A specific date range | destination + date-range overlap |
+| `risk_standing_facts.csv` | True regardless of travel dates | destination alone |
+| `risk_seasonal_windows.csv` | Recurring, month-bound | destination + month overlap |
+| `risk_dated_events.csv` | A specific date range | destination + date-range overlap |
 
-`category` is a free-text column, not an enum or a per-category table, so a
-new advisory category is an inserted row, never a migration.
+`category` is a free-text column, not an enum, so a new advisory category is
+an inserted row, never a code change.
 
-`seed_data.py` populates all three for the five destinations the team
-demos and tests against — Singapore, Berlin, Tokyo, Barcelona, and
+`seed_data.py` loads all three (`_load_standing_facts`, `_load_seasonal_
+windows`, `_load_dated_events`) into the module-level `STANDING_FACTS`/
+`SEASONAL_WINDOWS`/`DATED_EVENTS` lists, covering the five destinations the
+team demos and tests against — Singapore, Berlin, Tokyo, Barcelona, and
 Washington, D.C. — researched from real government and travel-advisory
-sources, then written as illustrative reference data: every row's `source`
-column says so explicitly, and that string is never dropped downstream.
-Several dates deliberately overlap a seasonal window (Tokyo's Obon holiday
-inside typhoon season and summer heat; Washington's Independence Day inside
-hurricane-remnant season) so `reasoning.py` has real, data-backed cases for
-connecting more than one risk into a single insight, guarded by
-`tests/test_risk_advisory_seed_data.py` so an edit to the dates can't
-silently break the overlap.
+sources, then written as illustrative reference data: every row gets the
+same `source` string stamped on at load time, and that string is never
+dropped downstream. Several dates deliberately overlap a seasonal window
+(Tokyo's Obon holiday inside typhoon season and summer heat; Washington's
+Independence Day inside hurricane-remnant season) so `reasoning.py` has
+real, data-backed cases for connecting more than one risk into a single
+insight, guarded by `tests/test_risk_advisory_seed_data.py` so an edit to
+the CSV dates can't silently break the overlap.
 
 **A stated assumption:** the traveller's *origin country* stands in for
 their *passport nationality* when reasoning about visas — the two aren't
@@ -73,11 +79,12 @@ passport), and `TravelRequest` has no separate nationality field.
 Every `RiskItem` `domain.py` produces carries a `risk_id` derived from the
 destination and the fact's own content — `fact-<destination>-<category>`,
 `season-<destination>-<label>`, `event-<destination>-<name>` — not from a
-database row's autoincrement id. That matters because
-`seed_risk_reference_data` reseeds by deleting and reinserting everything;
-an autoincrement-based id would renumber on every reseed and silently break
+CSV row's position. That matters because nothing guarantees row order in
+`risk_standing_facts.csv` stays fixed across an edit — a row inserted,
+deleted, or reordered would renumber a position-based id and silently break
 any `risk_id` a trace or audit log had already recorded. A content-derived
-id stays the same across a reseed as long as the fact itself hasn't changed.
+id stays the same regardless of row order, as long as the fact itself
+hasn't changed.
 
 Two checks use that id to keep the model honest:
 
@@ -125,7 +132,7 @@ real-world regulatory facts it cannot verify, so no other agent needs it.
 `agent.py`'s `risk_node` branches on `provider.covers(request)`:
 
 - **Grounded** — the destination has at least one row in
-  `risk_standing_facts`. `propose_risks()` runs, `reasoning.py` narrates
+  `risk_standing_facts.csv`. `propose_risks()` runs, `reasoning.py` narrates
   over it, every `RiskItem` becomes an `Option` on the returned
   `AgentFinding`.
 - **Prompt-only fallback** — an unmapped city, or one outside the five
@@ -151,16 +158,17 @@ class RiskDataProvider(Protocol):
     def fetch(self, request: RiskProposalRequest) -> RiskFetchResult: ...
 ```
 
-`DatabaseRiskProvider` is the only implementation today, reading whichever
-database `flaskapp/database.py` is configured against — SQLite locally, the
-same schema on Postgres/Supabase once `DATABASE_URL` is set, no code change
-either way. A future live-retrieval provider (mirroring
-`accessibility_agent/retrieval.py`'s bounded-search pattern) plugs in behind
-the same interface with no change to `domain.py`, `reasoning.py`, or
-`agent.py`. `RiskFetchResult.trust_level` already distinguishes `"authored"`
-(today's tables) from `"retrieved"`, unused until that day, so the
-distinction is something code can assert once it matters rather than
-something to retrofit.
+`SeedRiskProvider` is the only implementation today, reading the three CSVs
+loaded into memory by `seed_data.py` at import time — the same pattern
+Flight and Hotel & Transport use for their own inventories, chosen
+specifically so this agent needs no database and no environment
+configuration to produce grounded output. A future live-retrieval provider
+(mirroring `accessibility_agent/retrieval.py`'s bounded-search pattern)
+plugs in behind the same interface with no change to `domain.py`,
+`reasoning.py`, or `agent.py`. `RiskFetchResult.trust_level` already
+distinguishes `"authored"` (today's CSVs) from `"retrieved"`, unused until
+that day, so the distinction is something code can assert once it matters
+rather than something to retrofit.
 
 ---
 
@@ -170,16 +178,17 @@ something to retrofit.
 
 Several standing-fact categories today — visa/entry, currency/customs, some
 health advice — are really national or bloc-level facts (Schengen's 90/180
-rule, say), stored once per *city* because that is the granularity the
-table uses uniformly. That is fine at five cities; it stops being fine as
-coverage grows, because adding a second city in an already-covered country
-means re-authoring facts that haven't changed. Splitting standing facts into
-a country/region-level table and a city-level one (crime hotspots, cultural
-norms, seasonal windows — things that are genuinely local) would let
-coverage grow by country, which is far cheaper to author than by city, for
-the categories where that's the honest granularity anyway. Not done now
-because it touches the schema, the provider, and `domain.py`'s query logic
-for a benefit that only matters once more than five cities exist.
+rule, say), stored once per *city* because that is the granularity
+`risk_standing_facts.csv` uses uniformly. That is fine at five cities; it
+stops being fine as coverage grows, because adding a second city in an
+already-covered country means re-authoring facts that haven't changed.
+Splitting standing facts into a country/region-level CSV and a city-level
+one (crime hotspots, cultural norms, seasonal windows — things that are
+genuinely local) would let coverage grow by country, which is far cheaper
+to author than by city, for the categories where that's the honest
+granularity anyway. Not done now because it touches the CSV columns, the
+provider, and `domain.py`'s filtering logic for a benefit that only matters
+once more than five cities exist.
 
 ### 7.2 Confidence tied to data coverage
 
@@ -215,7 +224,7 @@ but it is a bigger change than it sounds:
 Whenever live search is added, one thing stops being optional: every
 retrieved excerpt must be screened for injected instructions before a
 model reads it, the same way `accessibility_agent.guardrails.
-sanitize_evidence` screens its own search results — today's tables are
+sanitize_evidence` screens its own search results — today's CSVs are
 authored by the team, so there is nothing to sanitise yet, but a live
 source is untrusted input from day one.
 

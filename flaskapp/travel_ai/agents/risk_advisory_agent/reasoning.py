@@ -40,7 +40,7 @@ MAX_ATTEMPTS = 2
 
 FALLBACK_RATIONALE = (
     "Automated narrative unavailable this round; showing the underlying reference "
-    "data directly. Every item listed is still fully grounded in the reference tables."
+    "data directly. Every item listed is still fully grounded in that reference data."
 )
 
 

@@ -61,14 +61,6 @@ TABLES = (
     # otherwise identical in kind to agent_runs/audit_events: written by the
     # running app, not seeded.
     "flight_agent_eval_runs",
-    # No foreign keys in or out — Risk & Advisory's reference data, seeded by
-    # flaskapp.database.seed_risk_reference_data rather than written by the
-    # running app. Placement in this tuple is arbitrary for that reason;
-    # kept last rather than interleaved with the request-lifecycle tables
-    # above.
-    "risk_standing_facts",
-    "risk_seasonal_windows",
-    "risk_dated_events",
 )
 
 # Tables whose id is generated, and whose sequence therefore needs resetting.
@@ -80,9 +72,6 @@ IDENTITY_TABLES = (
     "intake_messages",
     "agent_runs",
     "plan_feedback",
-    "risk_standing_facts",
-    "risk_seasonal_windows",
-    "risk_dated_events",
     "flight_agent_eval_runs",
 )
 
@@ -105,9 +94,6 @@ TABLE_PRIMARY_KEYS = {
     "intake_messages": "id",
     "agent_runs": "id",
     "plan_feedback": "id",
-    "risk_standing_facts": "id",
-    "risk_seasonal_windows": "id",
-    "risk_dated_events": "id",
     "flight_agent_eval_runs": "id",
 }
 

@@ -3,7 +3,7 @@
 Two prompts, matching Hotel & Transport's split (`hotel_transport_agent/
 prompt.py`): `INSTRUCTION` is the prompt-only fallback path with nothing to
 ground against; `RISK_ADVISORY_SYSTEM_PROMPT` is the grounded path, where
-`domain.py` has already queried the reference tables and the model is
+`domain.py` has already queried the reference data and the model is
 explaining and connecting what it found, never searching for new risks.
 """
 
