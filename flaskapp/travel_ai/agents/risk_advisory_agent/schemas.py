@@ -43,7 +43,7 @@ class RiskItem(BaseModel):
 
 
 class RiskProposalRequest(BaseModel):
-    """What `domain.py` needs to query the reference tables — nothing more."""
+    """What `domain.py` needs to query the reference data — nothing more."""
 
     destination_slug: str | None
     destination: str
