@@ -14,12 +14,12 @@ resources:
   - agents.yaml
   - networkpolicy.yaml
   - pdb.yaml
-  # Access option A: private. No Ingress means no public address and no load
-  # balancer; reach the site with
-  #   kubectl port-forward -n travel-planner svc/web 5000:80
-  # Re-enable this line together with HTTPS and IAP (option D) when teammates
-  # need browser access.
-  # - ingress.yaml
+  # Access option D: public, behind Identity-Aware Proxy. These two belong
+  # together — iap.yaml carries the BackendConfig that puts Google sign-in in
+  # front of the app, so an Ingress without it would expose the site. Comment
+  # BOTH out to go back to private port-forward access (option A).
+  - iap.yaml
+  - ingress.yaml
 
 # Both Deployments name the image `travel-planner`; this is the one place the
 # registry path and tag are decided. Bump newTag for each pushed build.
