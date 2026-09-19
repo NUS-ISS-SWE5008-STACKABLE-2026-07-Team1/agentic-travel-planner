@@ -396,3 +396,72 @@ def test_a_legacy_flight_eval_runs_fk_is_repointed_at_planning_jobs(tmp_path):
         database, run_type="production", request_id="mid-plan",
         flight_agent_mode="auto", inventory_source="seed", outcome="success", latency_ms=1,
     )
+
+
+def test_a_rebuild_that_cannot_make_its_change_refuses_instead_of_looping(tmp_path):
+    """`_rebuild_sqlite_table` drops and recreates the table, so an edit that
+    matched nothing would leave the old definition in place and run again on
+    every startup. Both migrations pass an edit that raises instead."""
+    import pytest
+
+    from flaskapp.database import _rebuild_sqlite_table, connect, initialize
+
+    db_path = tmp_path / "rebuild.sqlite3"
+    initialize(db_path)
+    with connect(db_path) as db:
+        with pytest.raises(RuntimeError):
+            _rebuild_sqlite_table(db, "planning_jobs", lambda sql: sql.replace("nothing", "x"))
+        # The table survived the refusal intact.
+        assert db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='planning_jobs'"
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='planning_jobs_migrated'"
+        ).fetchone()[0] == 0
+
+
+def test_repointing_the_eval_fk_keeps_rows_indexes_and_cascades(tmp_path):
+    """The rebuild copies data, restores indexes, and does not let the DROP
+    fire cascades on other tables."""
+    from flaskapp.database import connect, ensure_planning_job, initialize
+
+    db_path = tmp_path / "legacy.sqlite3"
+    initialize(db_path)
+    request_id = "11111111-1111-4111-8111-111111111111"
+    ensure_planning_job(db_path, request_id, None, {"origin": "Singapore"})
+
+    with connect(db_path) as db:
+        # The pre-fix shape: the real table, with only the reference pointed
+        # back at travel_requests. Built from the shipped CREATE rather than a
+        # hand-written one, so `initialize`'s own indexes still apply to it.
+        table_sql = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='flight_agent_eval_runs'"
+        ).fetchone()[0]
+        legacy_sql = table_sql.replace(
+            "REFERENCES planning_jobs(request_id)", "REFERENCES travel_requests(id)"
+        )
+        assert legacy_sql != table_sql, "fixture must find the reference to point back"
+        db.execute("DROP TABLE flight_agent_eval_runs")
+        db.execute(legacy_sql)
+        db.execute("CREATE INDEX idx_legacy_eval_run_type ON flight_agent_eval_runs(run_type)")
+        db.execute(
+            "INSERT INTO flight_agent_eval_runs"
+            " (run_type, request_id, flight_agent_mode, inventory_source, outcome,"
+            "  latency_ms, trace_id)"
+            " VALUES ('production', NULL, 'auto', 'seed', 'success', 1234, ?)", (request_id,)
+        )
+        jobs_before = db.execute("SELECT COUNT(*) FROM planning_jobs").fetchone()[0]
+
+    initialize(db_path)  # runs the migration
+
+    with connect(db_path) as db:
+        parents = {row[2] for row in db.execute("PRAGMA foreign_key_list(flight_agent_eval_runs)")}
+        assert parents == {"planning_jobs"}
+        assert db.execute("SELECT COUNT(*) FROM flight_agent_eval_runs").fetchone()[0] == 1
+        assert db.execute(
+            "SELECT trace_id FROM flight_agent_eval_runs"
+        ).fetchone()[0] == request_id
+        assert db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_legacy_eval_run_type'"
+        ).fetchone()[0] == 1, "indexes died with the DROP and must be recreated"
+        assert db.execute("SELECT COUNT(*) FROM planning_jobs").fetchone()[0] == jobs_before

@@ -69,6 +69,8 @@ def _run_plan(request_id: str, request: TravelRequest, settings: dict,
             guardrail_settings=settings.get("guardrail"),
             input_guardrail=settings.get("input_guardrail"),
             a2a_base_url=settings.get("a2a_base_url"),
+            flight_agent_transport=settings.get("flight_agent_transport"),
+            flight_agent_a2a_url=settings.get("flight_agent_a2a_url"),
         )
         response = service.create_plan(request, request_id=request_id)
         with _lock:

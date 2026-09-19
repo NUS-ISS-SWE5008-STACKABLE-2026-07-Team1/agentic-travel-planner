@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import time
 
-from flaskapp.config import Config
+from flaskapp.config import Config, get_llm_settings
 from flaskapp.database import save_agent_run, save_flight_eval_run
 from flaskapp.travel_ai.a2a import response_message
 from flaskapp.travel_ai.agents.base import make_specialist_node
@@ -364,8 +364,16 @@ def create_node(llm, tracer, provider=None, config=None):
     # Resolved once here, same as `mode` and `provider` — eval logging records
     # what actually ran, not what the current settings say, so a config change
     # mid-deployment doesn't retroactively relabel earlier rows.
-    llm_provider_name = str(settings.get("LLM_PROVIDER", "")).strip().lower() or None
-    llm_model_name = settings.get("LLM_MODEL") or None
+    #
+    # Through `get_llm_settings`, not the raw keys: LLM_PROVIDER defaults to
+    # "auto" and LLM_MODEL is usually blank, so reading them directly recorded
+    # provider="auto", model=NULL on a deployment that in fact ran openai/gpt-5.
+    # These columns exist to compare runs across providers and models, which
+    # "auto"/NULL cannot do. A configuration error leaves both None rather than
+    # failing: this is telemetry, and the request itself fails elsewhere.
+    _llm_settings, _llm_settings_error = get_llm_settings(settings)
+    llm_provider_name = (_llm_settings or {}).get("provider")
+    llm_model_name = (_llm_settings or {}).get("model")
 
     def flight_node(state) -> dict:
         node_start = time.perf_counter()
@@ -501,13 +509,20 @@ def create_node(llm, tracer, provider=None, config=None):
                     tracer.database_path, state["request_id"], NAME, "completed",
                     usage.as_dict(), finding,
                 )
-            # Loop-only counts: the single-shot path (`run_flight_agent`) makes
-            # its own LLM call(s) without spending this budget, and doesn't
-            # currently report how many — left at 0 rather than guessed.
-            loop_counts = ctx.budget.as_counts() if use_loop else {}
+            # The budget's own counts, on both paths. `provider_calls` is real
+            # either way — the inventory fetch above goes through `ctx.cache`,
+            # which spends one — and on Duffel that is a billed search, so
+            # zeroing it here under-reported what the single-shot path costs.
+            # `llm_turns` and `tool_calls` are genuinely 0 without the loop:
+            # `run_flight_agent` calls the model without spending this budget
+            # and does not report how many calls it made.
+            loop_counts = ctx.budget.as_counts()
             escalation_reason = (
                 "empty_leg" if mode == "auto" and use_loop
-                else "mode_agentic" if mode == "agentic"
+                # `and use_loop`, because a model without tool calling turns the
+                # loop off above; without it the row said the loop ran for its
+                # own reason while escalated_to_loop stayed 0.
+                else "mode_agentic" if mode == "agentic" and use_loop
                 else None
             )
             _log_eval_run(

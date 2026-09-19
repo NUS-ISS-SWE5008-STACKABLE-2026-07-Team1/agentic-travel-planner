@@ -95,6 +95,11 @@ def create_travel_plan():
                 if current_app.config.get("A2A_INTERNAL_ENABLED", False)
                 else None
             ),
+            # The flight-only transport seam. Independent of the setting above:
+            # that one routes every specialist over A2A, this one just the
+            # flight agent (ADR-0004).
+            "flight_agent_transport": current_app.config.get("FLIGHT_AGENT_TRANSPORT"),
+            "flight_agent_a2a_url": current_app.config.get("FLIGHT_AGENT_A2A_URL"),
         }
         job = (
             submit_plan(travel_request, settings, session.get("user_id"), intake_request_id)

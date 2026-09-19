@@ -624,27 +624,88 @@ def close_db(_error: BaseException | None = None) -> None:
         connection.close()
 
 
+def _rebuild_sqlite_table(connection, table: str, edit) -> None:
+    """SQLite's twelve-step table rebuild, with `edit` applied to the CREATE.
+
+    SQLite has no `ALTER COLUMN` and no way to alter a constraint, so changing
+    either means recreating the table
+    (https://www.sqlite.org/lang_altertable.html#otheralter). `edit` takes the
+    stored CREATE statement and returns the version to build; it must raise if
+    it cannot make the change, because a rebuild that silently changed nothing
+    still drops and recreates the table and would run again on every startup.
+
+    Shared by the two migrations below so the steps that are easy to omit live
+    in one place:
+
+    * Foreign keys go OFF first. `connect()` turns them on, and with them on
+      `DROP TABLE` runs an implicit DELETE that fires every `ON DELETE CASCADE`
+      pointing at the table. The pragma is a silent no-op inside a transaction,
+      hence the commit before it.
+    * The new table comes from the stored CREATE, not from `PRAGMA table_info`,
+      which carries neither foreign keys nor CHECK constraints. Indexes and
+      triggers die with the DROP, so they are recreated from their own SQL.
+    * Rows are copied BY NAME: these tables have gained columns over time and
+      the two shapes need not agree.
+    * `PRAGMA foreign_key_check` at the end, inside the transaction, so a
+      rebuild that broke a reference rolls back instead of persisting.
+    """
+    columns = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    table_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()[0]
+    edited = edit(table_sql)
+    if edited == table_sql:
+        # An edit that changed nothing would drop and recreate the table
+        # identically, leave the old definition in place, and do it again on
+        # every startup. Callers raise their own, more specific error first;
+        # this is the backstop for the one that forgets.
+        raise RuntimeError(f"Cannot rebuild {table}: the edit changed nothing")
+    migrated_sql, renamed = re.subn(
+        rf"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"`\[]?{table}\b[\"`\]]?",
+        f"CREATE TABLE {table}_migrated", edited, flags=re.IGNORECASE,
+    )
+    if renamed != 1:
+        raise RuntimeError(f"Cannot rebuild {table}: unrecognised table definition")
+    dependents = [
+        row[0] for row in connection.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name = ? "
+            "AND type IN ('index', 'trigger') AND sql IS NOT NULL", (table,)
+        ).fetchall()
+    ]
+    names = ", ".join(row[1] for row in columns)
+
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("BEGIN")
+        connection.execute(migrated_sql)
+        connection.execute(
+            f"INSERT INTO {table}_migrated ({names}) SELECT {names} FROM {table}"
+        )
+        connection.execute(f"DROP TABLE {table}")
+        connection.execute(f"ALTER TABLE {table}_migrated RENAME TO {table}")
+        for statement in dependents:
+            connection.execute(statement)
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(
+                f"Rebuilding {table} left {len(violations)} foreign-key violation(s)"
+            )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+
+
 def _allow_null_origin(connection) -> None:
     """Drop the NOT NULL constraint on `travel_requests.origin`.
 
     A hotel-only request has no departure country, so the column must accept
-    NULL. Postgres alters in place. SQLite has no `ALTER COLUMN`, so this
-    follows SQLite's documented twelve-step rebuild
-    (https://www.sqlite.org/lang_altertable.html#otheralter): create the
-    relaxed table, copy every row across by name, drop the original, rename.
-    Three details are load-bearing:
-
-    * Foreign keys go OFF first. `connect()` turns them on, and with them on
-      `DROP TABLE travel_requests` runs an implicit DELETE that fires every
-      `ON DELETE CASCADE` pointing at it — travel_plans, agent_findings (and
-      through it options) and a2a_messages would all be emptied. The pragma is
-      a silent no-op inside a transaction, hence the commit before it.
-    * The new table comes from the stored CREATE statement with only the
-      origin constraint edited, not from `PRAGMA table_info`, which carries
-      neither the `user_id` foreign key nor the `travellers` CHECK. Indexes
-      and triggers die with the DROP, so they are recreated from their SQL.
-    * Copying BY NAME rather than positionally — this table has gained columns
-      over time and the two shapes need not agree.
+    NULL. Postgres alters in place; SQLite rebuilds the table through
+    `_rebuild_sqlite_table`, which carries the foreign-key and transaction
+    safeguards that rebuild needs.
     """
     if connection.dialect == "postgres":
         connection.execute(
@@ -654,52 +715,21 @@ def _allow_null_origin(connection) -> None:
     columns = connection.execute("PRAGMA table_info(travel_requests)").fetchall()
     if not columns or not any(row[1] == "origin" and row[3] for row in columns):
         return  # Already nullable, or the table does not exist yet.
-    table_sql = connection.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'travel_requests'"
-    ).fetchone()[0]
-    table_sql, relaxed = re.subn(
-        r"\borigin(\s+TEXT)\s+NOT\s+NULL\b", r"origin\1", table_sql, flags=re.IGNORECASE
-    )
-    table_sql, renamed = re.subn(
-        r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"`\[]?travel_requests\b[\"`\]]?",
-        "CREATE TABLE travel_requests_migrated", table_sql, flags=re.IGNORECASE,
-    )
-    if relaxed != 1 or renamed != 1:
-        # Refuse rather than guess: every schema that ever shipped declared
-        # `origin TEXT NOT NULL`, so anything else is a table this was not
-        # written for.
-        raise RuntimeError("Cannot relax travel_requests.origin: unrecognised table definition")
-    dependents = [
-        row[0] for row in connection.execute(
-            "SELECT sql FROM sqlite_master WHERE tbl_name = 'travel_requests' "
-            "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
-        ).fetchall()
-    ]
-    names = ", ".join(row[1] for row in columns)
 
-    connection.commit()
-    connection.execute("PRAGMA foreign_keys = OFF")
-    try:
-        connection.execute("BEGIN")
-        connection.execute(table_sql)
-        connection.execute(
-            f"INSERT INTO travel_requests_migrated ({names}) SELECT {names} FROM travel_requests"
+    def relax_origin(table_sql: str) -> str:
+        table_sql, relaxed = re.subn(
+            r"\borigin(\s+TEXT)\s+NOT\s+NULL\b", r"origin\1", table_sql, flags=re.IGNORECASE
         )
-        connection.execute("DROP TABLE travel_requests")
-        connection.execute("ALTER TABLE travel_requests_migrated RENAME TO travel_requests")
-        for statement in dependents:
-            connection.execute(statement)
-        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
-        if violations:
+        if relaxed != 1:
+            # Refuse rather than guess: every schema that ever shipped declared
+            # `origin TEXT NOT NULL`, so anything else is a table this was not
+            # written for.
             raise RuntimeError(
-                f"Rebuilding travel_requests left {len(violations)} foreign-key violation(s)"
+                "Cannot relax travel_requests.origin: unrecognised column definition"
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
-    finally:
-        connection.execute("PRAGMA foreign_keys = ON")
+        return table_sql
+
+    _rebuild_sqlite_table(connection, "travel_requests", relax_origin)
 
 
 def _repoint_flight_eval_run_fk(connection) -> None:
@@ -747,35 +777,27 @@ def _repoint_flight_eval_run_fk(connection) -> None:
     references = connection.execute("PRAGMA foreign_key_list(flight_agent_eval_runs)").fetchall()
     if not any(row[2] == "travel_requests" for row in references):
         return
-    # SQLite cannot alter a constraint, so rebuild: the stored CREATE statement
-    # with only the REFERENCES clause swapped (so any column added since is kept),
-    # rows copied by name, then the indexes the DROP took with it recreated.
-    table_sql = connection.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'flight_agent_eval_runs'"
-    ).fetchone()[0]
-    index_sql = [row[0] for row in connection.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'index' "
-        "AND tbl_name = 'flight_agent_eval_runs' AND sql IS NOT NULL"
-    ).fetchall()]
-    names = ", ".join(
-        row[1] for row in connection.execute("PRAGMA table_info(flight_agent_eval_runs)")
-    )
+    # Before the rebuild, not inside it: the new constraint would reject any
+    # request_id with no planning_jobs row, and this is what ON DELETE SET NULL
+    # would have left behind anyway.
     connection.execute(orphan_update)
-    migrated_sql = re.sub(
-        r"REFERENCES\s+travel_requests\s*\(\s*id\s*\)",
-        "REFERENCES planning_jobs(request_id)", table_sql, count=1,
-    ).replace("flight_agent_eval_runs", "flight_agent_eval_runs_migrated", 1)
-    connection.execute(migrated_sql)
-    connection.execute(
-        f"INSERT INTO flight_agent_eval_runs_migrated ({names}) "
-        f"SELECT {names} FROM flight_agent_eval_runs"
-    )
-    connection.execute("DROP TABLE flight_agent_eval_runs")
-    connection.execute(
-        "ALTER TABLE flight_agent_eval_runs_migrated RENAME TO flight_agent_eval_runs"
-    )
-    for statement in index_sql:
-        connection.execute(statement)
+
+    def repoint(table_sql: str) -> str:
+        migrated, swapped = re.subn(
+            r"REFERENCES\s+[\"`\[]?travel_requests[\"`\]]?\s*\(\s*[\"`\[]?id[\"`\]]?\s*\)",
+            "REFERENCES planning_jobs(request_id)", table_sql, count=1, flags=re.IGNORECASE,
+        )
+        if swapped != 1:
+            # PRAGMA foreign_key_list said the old reference is there, so not
+            # finding it in the CREATE means a definition this was not written
+            # for. Refusing keeps the table as it is; guessing would drop and
+            # recreate it unchanged on every startup.
+            raise RuntimeError(
+                "Cannot repoint flight_agent_eval_runs.request_id: unrecognised reference"
+            )
+        return migrated
+
+    _rebuild_sqlite_table(connection, "flight_agent_eval_runs", repoint)
 
 
 def initialize(target: Path | str) -> None:
