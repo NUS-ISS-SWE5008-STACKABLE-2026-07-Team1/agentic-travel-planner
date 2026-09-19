@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import uuid4
 
+from flaskapp.config import Config
 from flaskapp.database import connect, ensure_planning_job, initialize
 from flaskapp.travel_ai.a2a import request_message
 from flaskapp.travel_ai.agents.flight_agent.agent import NAME, create_node
@@ -188,3 +189,88 @@ def test_the_eval_row_lands_before_save_plan_has_written_travel_requests(tmp_pat
     rows = _eval_rows(db_path, request_id)
     assert len(rows) == 1
     assert rows[0]["outcome"] == "success"
+
+
+def _settings(**overrides) -> dict:
+    """Config as the node sees it, with the LLM keys a deployment would set."""
+    return {
+        **{k: v for k, v in vars(Config).items() if not k.startswith("__")},
+        "LLM_PROVIDER": "auto", "LLM_MODEL": None, "OPENAI_API_KEY": "sk-test-not-used",
+        "ANTHROPIC_API_KEY": None, "GOOGLE_API_KEY": None, "AZURE_OPENAI_API_KEY": None,
+        "DEEPSEEK_API_KEY": None, "XAI_API_KEY": None, "META_API_KEY": None,
+        "LLM_API_KEY": None,
+        **overrides,
+    }
+
+
+def test_the_eval_row_records_the_resolved_provider_and_model(tmp_path):
+    """Not the raw settings.
+
+    LLM_PROVIDER defaults to "auto" and LLM_MODEL is usually blank, so reading
+    them directly wrote provider="auto", model=NULL on a deployment that ran
+    openai/gpt-5 — useless for the cross-provider comparison these columns exist
+    for.
+    """
+    db_path = tmp_path / "eval.sqlite3"
+    initialize(db_path)
+    tracer = AuditTracer(tmp_path, "req-provider", database_path=db_path)
+    request_id, state = _state(db_path, SEED_TRIP)
+
+    create_node(_llm(), tracer, config=_settings())(state)
+
+    row = _eval_rows(db_path, request_id)[0]
+    assert row["llm_provider"] == "openai"
+    assert row["llm_model"] == "gpt-5"
+
+
+def test_an_unresolvable_llm_config_leaves_provider_and_model_null(tmp_path):
+    """Telemetry never fails the request: two credentials means `auto` cannot
+    choose, and the row records nothing rather than a guess."""
+    db_path = tmp_path / "eval.sqlite3"
+    initialize(db_path)
+    tracer = AuditTracer(tmp_path, "req-ambiguous", database_path=db_path)
+    request_id, state = _state(db_path, SEED_TRIP)
+
+    config = _settings(OPENAI_API_KEY="sk-a", ANTHROPIC_API_KEY="sk-b")
+    create_node(_llm(), tracer, config=config)(state)
+
+    row = _eval_rows(db_path, request_id)[0]
+    assert row["llm_provider"] is None
+    assert row["llm_model"] is None
+
+
+def test_the_single_shot_path_records_the_provider_call_it_spent(tmp_path):
+    """The inventory fetch goes through ctx.cache on both paths and spends one
+    provider call — a billed search on Duffel. Zeroing it off-loop under-reported
+    what a structured run costs."""
+    db_path = tmp_path / "eval.sqlite3"
+    initialize(db_path)
+    tracer = AuditTracer(tmp_path, "req-structured", database_path=db_path)
+    request_id, state = _state(db_path, SEED_TRIP)
+
+    create_node(_llm(), tracer, config=_settings(FLIGHT_AGENT_MODE="structured"))(state)
+
+    row = _eval_rows(db_path, request_id)[0]
+    assert not row["escalated_to_loop"]
+    assert row["provider_calls"] == 1
+    # Genuinely zero without the loop: run_flight_agent spends neither.
+    assert row["llm_turns"] == 0
+    assert row["tool_calls"] == 0
+
+
+def test_no_escalation_reason_when_the_loop_could_not_run(tmp_path):
+    """`agentic` with a model that has no bind_tools turns the loop off. The row
+    used to claim escalation_reason="mode_agentic" while escalated_to_loop was
+    0, so any grouping by reason counted a single-shot run as a loop run."""
+    db_path = tmp_path / "eval.sqlite3"
+    initialize(db_path)
+    tracer = AuditTracer(tmp_path, "req-no-tools", database_path=db_path)
+    request_id, state = _state(db_path, SEED_TRIP)
+
+    llm = _llm()
+    assert not hasattr(llm, "bind_tools"), "precondition: this stub cannot tool-call"
+    create_node(llm, tracer, config=_settings(FLIGHT_AGENT_MODE="agentic"))(state)
+
+    row = _eval_rows(db_path, request_id)[0]
+    assert not row["escalated_to_loop"]
+    assert row["escalation_reason"] is None

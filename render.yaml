@@ -94,7 +94,9 @@ services:
       # after ~75s of planning has already elapsed. Can afford the better model.
       - key: GUARDRAIL_OUTPUT_LLM_MODEL
         value: gpt-5
-      # Input gate budget.
+      # Input gate budget. The WHOLE budget: both gates are built with
+      # max_retries=0, so this is what a traveller waits, not one attempt of
+      # three (guardrails/classifier.py:guardrail_settings).
       - key: GUARDRAIL_LLM_TIMEOUT_SECONDS
         value: "8"
       # Output gate budget, independent of the one above.
