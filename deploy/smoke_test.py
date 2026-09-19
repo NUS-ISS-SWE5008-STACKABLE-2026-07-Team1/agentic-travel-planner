@@ -68,23 +68,39 @@ def get_json(http: requests.Session, url: str, attempts: int = 5) -> dict:
     raise AssertionError("unreachable")
 
 
+class _PortForwardSession(requests.Session):
+    """A session that treats the local port-forward hop as secure.
+
+    See deploy/load_test.py for the full reasoning: the cluster marks the
+    session cookie Secure, requests will not send that over plain HTTP even to
+    localhost, and the jar has to be relaxed while a request is being PREPARED
+    (a response hook runs before requests stores the new cookie).
+    """
+
+    def prepare_request(self, request):
+        for cookie in self.cookies:
+            cookie.secure = False
+        return super().prepare_request(request)
+
+
+def _new_session(base: str) -> requests.Session:
+    local = base.startswith(("http://127.0.0.1", "http://localhost"))
+    return _PortForwardSession() if local else requests.Session()
+
+
 def login(base: str, email: str, password: str) -> tuple[requests.Session, str]:
-    http = requests.Session()
+    http = _new_session(base)
     page = http.get(f"{base}/", timeout=30)
     token = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', page.text)
     if not token:
         fail(f"no CSRF token on the login page (HTTP {page.status_code})")
+    # allow_redirects=False is load-bearing: see deploy/load_test.py. Chasing
+    # the 302 loses the authenticated session cookie.
     http.post(f"{base}/", data={
         "csrf_token": token.group(1), "email": email, "password": password,
-    }, timeout=30)
+    }, timeout=30, allow_redirects=False)
     # The login form's token is bound to the pre-login session; the API needs
     # the one rendered on an authenticated page.
-    if base.startswith(("http://127.0.0.1", "http://localhost")):
-        # SESSION_COOKIE_SECURE is on in the cluster, and requests (unlike a
-        # browser) never returns a Secure cookie over plain HTTP, even to
-        # localhost. Through `kubectl port-forward` the hop is local, so relax it.
-        for cookie in http.cookies:
-            cookie.secure = False
     main = http.get(f"{base}/main", timeout=30, allow_redirects=False)
     api_token = re.search(r'name="csrf-token" content="([^"]+)"', main.text)
     if main.status_code != 200 or not api_token:
