@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from collections.abc import Callable
 from typing import Any
 
 from flaskapp.travel_ai.agents.flight_agent.domain import (
@@ -426,6 +427,25 @@ def _nearby_dates(
     ]
 
 
+# --- The callable half of the registry ------------------------------------
+#
+# `TOOL_SPECS` below is what the model is shown; this is what `dispatch` runs.
+# The two used to be written out separately, so a name could be spelled one way
+# in the schema and another in the dict — a drift that costs nothing at import
+# and surfaces as "unknown tool" mid-loop, which the model then spends turns
+# trying to correct. Registering each tool under its own `__name__` removes one
+# of the two hand-written name lists; `tests/test_flight_tools.py` asserts the
+# remaining one still agrees with it, in both directions.
+_TOOLS: dict[str, Callable[..., dict]] = {}
+
+
+def _tool(func):
+    """Expose a function to the model under its own name."""
+    _TOOLS[func.__name__] = func
+    return func
+
+
+@_tool
 def search_flights(
     ctx: ToolContext,
     *,
@@ -492,6 +512,7 @@ def search_flights(
     return result
 
 
+@_tool
 def rank_flights(
     ctx: ToolContext,
     *,
@@ -550,6 +571,7 @@ def rank_flights(
     }
 
 
+@_tool
 def acknowledge_unmet_preference(ctx: ToolContext, *, field: str, direction: str | None = None, reason: str) -> dict:
     """Admit that one soft preference is unanimously unmet. Verified before it
     takes effect, and never changes which flights are shown — see the module
@@ -691,12 +713,6 @@ TOOL_SPECS: list[dict] = [
         },
     },
 ]
-
-_TOOLS = {
-    "search_flights": search_flights,
-    "rank_flights": rank_flights,
-    "acknowledge_unmet_preference": acknowledge_unmet_preference,
-}
 
 
 def dispatch(ctx: ToolContext, name: str, args: dict) -> dict:
