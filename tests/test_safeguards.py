@@ -62,6 +62,20 @@ def test_assessment_flags_missing_evidence_and_alternatives():
     assert len(result.warnings) == 3
 
 
+def test_assessment_checks_per_traveller_accessibility_needs():
+    request = validate_request({
+        **BASE_REQUEST,
+        "traveller_accessibility_needs": [["wheelchair assistance"]],
+        "accessibility_needs": [],
+    }, 12_000)
+    plan = TravelPlan(
+        title="Plan", summary="Summary", itinerary=["Day 1"],
+        rationale=["Budget"], alternatives=["Alternative"], sources=["https://example.com"],
+    )
+    result = assess_plan(request, plan, [])
+    assert any("Accessibility requirements" in warning for warning in result.warnings)
+
+
 # --- Provenance disclosure -------------------------------------------------
 # End-to-end testing showed a specialist's "these are estimates" warning does
 # not reliably survive orchestrator synthesis, so the flag is now written into

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from flask import Flask
-from flask_wtf.csrf import CSRFProtect
+from flask import Flask, jsonify, request
+from flask_wtf.csrf import CSRFError, CSRFProtect
 
 from flaskapp.config import Config
 
@@ -25,6 +25,16 @@ def create_app(config_object: type[Config] = Config) -> Flask:
 
     app.register_blueprint(pages_bp)
     app.register_blueprint(travel_api_bp, url_prefix="/api/v1")
+
+    @app.errorhandler(CSRFError)
+    def handle_csrf_error(error):
+        """Keep API failures JSON so browser code never parses an HTML error page."""
+        if request.path.startswith("/api/"):
+            return jsonify(
+                error="Your session security token expired. Refresh the page and try again.",
+                code="csrf_token_invalid",
+            ), 400
+        return error.description, 400
 
     @app.after_request
     def set_security_headers(response):

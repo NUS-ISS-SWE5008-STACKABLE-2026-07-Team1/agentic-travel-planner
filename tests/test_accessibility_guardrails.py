@@ -127,6 +127,22 @@ def test_partial_retrieval_caps_confidence():
     assert any("partial" in warning for warning in guarded.warnings)
 
 
+def test_stale_evidence_cannot_remain_verified_or_receive_top_rating():
+    trusted = "https://accessable.co.uk/venue"
+    guarded = enforce_accessibility_output(finding(
+        source_urls=[trusted], factors=["[E1] Status: verified"],
+    ), {
+        "status": "available",
+        "results": [{
+            "evidence_id": "E1", "url": trusted,
+            "source_type": "specialist", "freshness": "stale",
+        }],
+    })
+    assert any("Status: unverified" in item for item in guarded.options[0].selection_factors)
+    assert "Accessibility rating: 3/5" in guarded.options[0].selection_factors
+    assert any("12 months old" in item for item in guarded.options[0].limitations)
+
+
 def test_unsafe_generated_output_is_withheld():
     guarded = enforce_accessibility_output(
         finding(summary="Disabled travellers should not travel"),

@@ -703,6 +703,24 @@ def authenticate_user(email: str, password: str) -> sqlite3.Row | None:
     return user if user and check_password_hash(user["password_hash"], password) else None
 
 
+def get_user_for_password_reset(email: str) -> sqlite3.Row | None:
+    """Return only the authentication material needed to issue a reset token."""
+    return get_db().execute(
+        "SELECT email, password_hash FROM users WHERE email = ?", (email.strip().lower(),)
+    ).fetchone()
+
+
+def replace_password(email: str, expected_hash: str, new_hash: str) -> bool:
+    """Atomically replace a password once, invalidating the token that authorized it."""
+    db = get_db()
+    cursor = db.execute(
+        "UPDATE users SET password_hash = ? WHERE email = ? AND password_hash = ?",
+        (new_hash, email.strip().lower(), expected_hash),
+    )
+    db.commit()
+    return cursor.rowcount == 1
+
+
 def create_user(name: str, email: str, password_hash: str, country: str,
                 birthday: str) -> sqlite3.Row | None:
     """Create an account, returning None when its normalized email already exists."""

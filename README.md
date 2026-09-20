@@ -83,7 +83,8 @@ when a prompt requires a new output field, update the Pydantic contract in
 
 `agents/__init__.py` is the specialist registry consumed by `graph.py`. Register a
 new specialist there and add its allowed name to `schemas.AgentFinding`. The current
-graph runs the four specialists in parallel and then runs the orchestrator. The
+graph runs discovery specialists in parallel, sends their concrete candidates to
+the Accessibility Agent for audit, and then runs the orchestrator. The
 orchestrator prompt identifies unresolved conflicts for a future negotiation cycle;
 an actual retry/negotiation loop must be added in `graph.py` when that feature is
 developed.
@@ -101,22 +102,24 @@ Its runtime flow is:
    service-animal, medical-equipment, dietary, or other requirements.
 2. It builds up to four searches using the destination and normalized functional
    category. Raw medical details and free-text requirements are not sent to Serper.
-3. `retrieval.py` calls `https://google.serper.dev/search`, requesting at most four
+3. Flight, hotel, transport, and advisory findings are supplied as candidate
+   context, including over A2A, so the agent audits actual proposed options.
+4. `retrieval.py` calls `https://google.serper.dev/search`, requesting at most four
    results per query and eight results for the complete agent run. Transient network
    failures are retried once.
-4. Each accepted HTTPS result receives an evidence ID (`E1`, `E2`, ...), title,
+5. Each accepted allowlisted HTTPS result receives an evidence ID (`E1`, `E2`, ...), title,
    excerpt, URL, query scope, retrieval time, and provenance classification:
    official, specialist, crowdsourced, or unknown.
-5. `guardrails.py` screens retrieved titles/excerpts as untrusted content. Generated
+6. `guardrails.py` screens retrieved titles/excerpts and peer candidates as untrusted content. Generated
    claims must cite an evidence ID and its exact retrieved URL. Fabricated, malformed,
    insecure, or unmatched links are removed.
-6. Unknown sources and unsupported claims are marked unverified and cannot receive a
-   high deterministic accessibility rating. Factual content is withheld when it
+7. Unknown, stale, and unsupported evidence is marked unverified and cannot receive a
+   high deterministic accessibility rating. Evidence older than 12 months is downgraded. Factual content is withheld when it
    claims web support but has no valid reference link.
-7. Options marked `Status: unmet` are removed by the agent and recorded in an
-   `ACCESSIBILITY VETO` warning. Missing evidence produces precise questions for the
-   airport, transport operator, hotel, venue, or other supplier.
-8. Vetted URLs are copied into the final plan even if the orchestrator omits them.
+8. A peer candidate named in `VETO: <candidate> — <reason>` is removed
+   deterministically before orchestration and recommendation. Missing evidence
+   produces precise supplier questions.
+9. Vetted URLs are copied into the final plan even if the orchestrator omits them.
    The chatbot presents each Accessibility Agent option with status, rating, evidence
    details, limitations, website hostname, full URL, and a safe clickable verification
    link.
@@ -350,9 +353,15 @@ Serper `X-API-KEY` request header; it is never included in search text, model
 prompts, stored evidence, or chatbot output. Without the key, planning continues
 with an explicit “accessibility evidence unavailable” warning. Search queries use
 the destination and normalized functional categories rather than raw medical
-details. Returned HTTPS pages are treated as untrusted evidence, screened by the
+details. Returned allowlisted HTTPS pages are treated as untrusted evidence, screened by the
 agent guardrails, cited by URL, and labelled as official, specialist,
 crowdsourced, or unknown provenance.
+
+Add destination-specific official/operator domains when needed:
+
+```dotenv
+ACCESSIBILITY_EXTRA_DOMAINS=transportnsw.info,sydneyairport.com.au
+```
 
 For local development, set `FLASK_DEBUG=true` in the ignored `.env` file. Running
 `python app.py` then automatically restarts the server when application code or

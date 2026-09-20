@@ -157,12 +157,13 @@ def _option_text(option) -> str:
 
 
 def _deterministic_rating(*, grounded: int, requirement_count: int,
-                          veto: bool, has_conflict: bool, unknown_source: bool) -> int:
+                          veto: bool, has_conflict: bool, unknown_source: bool,
+                          stale_source: bool = False) -> int:
     if veto:
         return 1
     if not grounded:
         return 2
-    if unknown_source or has_conflict or grounded < max(1, requirement_count):
+    if unknown_source or stale_source or has_conflict or grounded < max(1, requirement_count):
         return 3
     # Five is reserved for complete, current, measured evidence. Search
     # excerpts generally cannot establish that by themselves.
@@ -202,6 +203,9 @@ def enforce_accessibility_output(finding: AgentFinding, evidence: Any) -> AgentF
         unknown_source = any(
             evidence_by_id[item].get("source_type") == "unknown" for item in valid_ids
         )
+        stale_source = any(
+            evidence_by_id[item].get("freshness") == "stale" for item in valid_ids
+        )
         original = list(option.source_urls)
         # A URL is grounded only when the option also identifies the exact
         # retrieved evidence record supporting its claim.
@@ -219,6 +223,14 @@ def enforce_accessibility_output(finding: AgentFinding, evidence: Any) -> AgentF
             ]
             option.limitations.append(
                 "UNVERIFIED: cited evidence is not a recognized official or specialist source."
+            )
+        if stale_source and "verified" in statuses:
+            option.selection_factors = [
+                STATUS_PATTERN.sub("Status: unverified", factor)
+                for factor in option.selection_factors
+            ]
+            option.limitations.append(
+                "UNVERIFIED: cited accessibility evidence is more than 12 months old."
             )
         if veto:
             vetoed_options += 1
@@ -246,6 +258,7 @@ def enforce_accessibility_output(finding: AgentFinding, evidence: Any) -> AgentF
             _deterministic_rating(
                 grounded=grounded, requirement_count=requirement_count,
                 veto=veto, has_conflict=has_conflict, unknown_source=unknown_source,
+                stale_source=stale_source,
             ),
         )
 
