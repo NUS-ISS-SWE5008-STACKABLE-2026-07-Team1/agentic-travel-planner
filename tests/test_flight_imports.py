@@ -42,6 +42,7 @@ LANGCHAIN_FREE_MODULES = [
     "flaskapp/travel_ai/agents/flight_agent/guardrails.py",
     "flaskapp/travel_ai/agents/flight_agent/reasoning.py",
     "flaskapp/travel_ai/agents/flight_agent/schemas.py",
+    "flaskapp/travel_ai/agents/flight_agent/structured_call.py",
     "flaskapp/travel_ai/agents/flight_agent/tools.py",
 ]
 

@@ -42,7 +42,7 @@ and this module is the intended exception.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from typing import Annotated
 
 from langchain_core.messages import (
     AIMessage, HumanMessage, SystemMessage, ToolMessage,
@@ -55,11 +55,11 @@ from typing_extensions import TypedDict
 from flaskapp.travel_ai.agents.flight_agent import tools
 from flaskapp.travel_ai.agents.flight_agent.domain import propose_flights
 from flaskapp.travel_ai.agents.flight_agent.guardrails import (
-    screen_input_text, screen_output_text, validate_grounded_ids,
+    screen_input_text, validate_grounded_ids,
 )
 from flaskapp.travel_ai.agents.flight_agent.prompt import FLIGHT_AGENT_TOOL_LOOP_PROMPT
-from flaskapp.travel_ai.agents.flight_agent.reasoning import (
-    MAX_ATTEMPTS, _blocked_input_response, _fallback_response,
+from flaskapp.travel_ai.agents.flight_agent.structured_call import (
+    blocked_input_response, invoke_structured,
 )
 from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightAgentResponse, FlightProposal, FlightProposalRequest,
@@ -168,35 +168,15 @@ def _terminal_response(
         "Now give your final answer for the traveller. Reference only flights that "
         "appeared in a tool result above."
     ))]
-
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            response = structured.invoke(closing)
-        except Exception as exc:  # noqa: BLE001 - any model failure falls back
-            if tracer is not None:
-                tracer.record("agent_llm_attempt_failed", AGENT, {
-                    "attempt": attempt, "error_type": type(exc).__name__,
-                })
-            continue
-
-        ungrounded = validate_grounded_ids(
+    return invoke_structured(
+        structured, closing,
+        ground=lambda response: validate_grounded_ids(
             response.highlighted_flight_ids, ctx.cache.seen_ids
-        )
-        screened = screen_output_text(response.rationale)
-        if not ungrounded and not screened["flagged"]:
-            return response
-
-        if tracer is not None:
-            details: dict[str, Any] = {"attempt": attempt}
-            if ungrounded:
-                details["ungrounded_flight_ids"] = ungrounded
-            if screened["flagged"]:
-                details["output_policy_violation"] = {
-                    "bias": screened["bias"], "toxicity": screened["toxicity"],
-                }
-            tracer.record("agent_llm_attempt_failed", AGENT, details)
-
-    return _fallback_response(proposal)
+        ),
+        proposal=proposal,
+        tracer=tracer,
+        agent=AGENT,
+    )
 
 
 def run_agentic_flight_agent(
@@ -244,7 +224,7 @@ def run_agentic_flight_agent(
             })
         rows, _notes = ctx.cache.rows_for(request)
         proposal = propose_flights(request, rows)
-        return proposal, _blocked_input_response(proposal, screened)
+        return proposal, blocked_input_response(proposal, screened)
 
     graph = build_flight_subgraph(llm, ctx)
     messages = _opening_messages(ctx)
