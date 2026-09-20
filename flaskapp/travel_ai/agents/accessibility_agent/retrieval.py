@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -38,10 +39,33 @@ def _allowed_domains() -> tuple[str, ...]:
 
 
 def _allowed_url(url: str, domains: tuple[str, ...] | None = None) -> bool:
-    """Accept public HTTPS evidence; known domains receive stronger provenance."""
+    """Accept HTTPS evidence only from the configured accessibility allowlist."""
     host = (urlparse(url).hostname or "").lower()
     parsed = urlparse(url)
-    return parsed.scheme == "https" and bool(host) and parsed.username is None
+    allowed = domains or _allowed_domains()
+    trusted_host = any(host == item or host.endswith(f".{item}") for item in allowed)
+    return (
+        parsed.scheme == "https" and bool(host) and parsed.username is None
+        and trusted_host
+    )
+
+
+def _freshness(value: object, *, now: datetime | None = None) -> str:
+    """Classify dated evidence deterministically; missing/unparseable dates stay unknown."""
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+    try:
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return "unknown"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    reference = now or datetime.now(timezone.utc)
+    return "stale" if parsed < reference - timedelta(days=365) else "current"
 
 
 def _query(state: TravelGraphState) -> str:
@@ -140,6 +164,7 @@ def retrieve_accessibility_evidence(state: TravelGraphState) -> dict:
                 ),
                 source_type=_source_type(url), query_scope=query,
                 published_or_updated_at=item.get("date"),
+                freshness=_freshness(item.get("date")),
             )
             results.append(evidence.model_dump())
             if len(results) >= MAX_RESULTS:

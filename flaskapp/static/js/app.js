@@ -223,7 +223,12 @@ if (planner) {
         },
         body: JSON.stringify(payload)
       });
-      const body = await response.json();
+      const contentType = response.headers.get("content-type") || "";
+      const body = contentType.includes("application/json")
+        ? await response.json()
+        : {error: response.ok
+          ? "The server returned an unexpected response."
+          : "The server could not process the request. Refresh the page and try again."};
       if (!response.ok) throw new Error(body.error || "Unable to build your travel plan.");
       latestPayload = payload;
       sessionStorage.setItem("atlas-plan-payload", JSON.stringify(payload));

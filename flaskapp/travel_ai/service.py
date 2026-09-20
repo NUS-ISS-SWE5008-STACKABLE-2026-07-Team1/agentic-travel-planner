@@ -18,6 +18,7 @@ from flaskapp.travel_ai.safeguards import assess_plan, disclose_unconsulted
 from flaskapp.travel_ai.schemas import PlanPackage, PlanResponse, PlanSection, TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.terminal import log_payload
+from flaskapp.travel_ai.agents.accessibility_agent.integration import enforce_cross_agent_vetoes
 
 
 def merge_accessibility_sources(plan, findings) -> None:
@@ -118,8 +119,15 @@ class TravelPlanningService:
             "findings": [],
             "messages": messages,
         })
-        findings = result["findings"]
+        findings, vetoed_candidates = enforce_cross_agent_vetoes(result["findings"])
         plan = result["plan"]
+        if vetoed_candidates:
+            disclosure = (
+                "Accessibility review excluded candidate(s) with unmet critical requirements: "
+                + ", ".join(vetoed_candidates)
+            )
+            if disclosure not in plan.limitations:
+                plan.limitations.insert(0, disclosure)
         # The orchestrator is asked to preserve sources, but accessibility
         # evidence must not depend on generative compliance. Copy its vetted
         # URLs into the user-visible plan deterministically.

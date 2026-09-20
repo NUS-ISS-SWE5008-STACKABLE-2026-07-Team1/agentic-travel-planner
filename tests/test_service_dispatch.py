@@ -82,6 +82,7 @@ def test_a_default_request_still_runs_every_specialist(planned):
         "flight_agent", "hotel_transport_agent",
         "accessibility_agent", "risk_advisory_agent",
     ])
+    assert called[-1] == "accessibility_agent"
 
 
 def test_the_plan_states_which_specialists_were_skipped(planned):

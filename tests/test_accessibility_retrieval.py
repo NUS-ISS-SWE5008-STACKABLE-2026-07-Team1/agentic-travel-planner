@@ -62,11 +62,10 @@ def test_retrieval_uses_serper_and_returns_https_sources(monkeypatch):
 
     assert result["status"] == "available"
     assert [item["url"] for item in result["results"]] == [
-        "https://www.accessable.co.uk/venue", "https://example.com/accessibility",
+        "https://www.accessable.co.uk/venue",
     ]
     assert result["results"][0]["evidence_id"] == "E1"
     assert result["results"][0]["source_type"] == "specialist"
-    assert result["results"][1]["source_type"] == "unknown"
     assert captured["url"] == retrieval.SERPER_SEARCH_URL
     assert captured["api_key"] == "test-key"
     assert "api_key" not in captured["body"]
@@ -76,9 +75,23 @@ def test_retrieval_uses_serper_and_returns_https_sources(monkeypatch):
 
 def test_only_safe_https_urls_are_accepted():
     assert retrieval._allowed_url("https://news.wheelmap.org/place")
-    assert retrieval._allowed_url("https://other-accessibility.example/place")
+    assert not retrieval._allowed_url("https://other-accessibility.example/place")
     assert not retrieval._allowed_url("http://wheelmap.org/place")
     assert not retrieval._allowed_url("https://user:pass@example.com/place")
+
+
+def test_extra_domains_extend_the_allowlist(monkeypatch):
+    monkeypatch.setenv("ACCESSIBILITY_EXTRA_DOMAINS", "transportnsw.info")
+    assert retrieval._allowed_url("https://transportnsw.info/accessibility")
+
+
+def test_evidence_freshness_is_deterministic():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+    assert retrieval._freshness("2026-08-01", now=now) == "current"
+    assert retrieval._freshness("2024-01-01", now=now) == "stale"
+    assert retrieval._freshness(None, now=now) == "unknown"
 
 
 def test_timeout_is_retried_and_reported_without_crashing(monkeypatch):

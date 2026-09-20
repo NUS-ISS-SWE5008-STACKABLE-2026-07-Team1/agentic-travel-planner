@@ -303,7 +303,11 @@ def assess_plan(
         )
     else:
         checks.append("Every specialist's options were verified against real data")
-    if request.accessibility_needs:
+    has_accessibility_needs = bool(
+        request.accessibility_needs
+        or any(request.traveller_accessibility_needs)
+    )
+    if has_accessibility_needs:
         access = next((f for f in findings if f.agent == "accessibility_agent"), None)
         if not access or access.confidence < 0.5:
             warnings.append("Accessibility requirements require direct provider verification")

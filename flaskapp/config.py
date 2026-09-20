@@ -20,6 +20,7 @@ def _optional_float(name: str) -> float | None:
     value = os.getenv(name, "").strip()
     return float(value) if value else None
 
+
 _DEMO_PASSWORD_HASH = (
     "scrypt:32768:8:1$99T3BfVwYO8CnqNC$"
     "c85a15f2f167616564085724c37c79fc2ad151e306e5ec0414759a0f8a6eba28"
