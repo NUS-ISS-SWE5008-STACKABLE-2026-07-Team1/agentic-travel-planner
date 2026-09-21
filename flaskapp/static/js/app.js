@@ -773,8 +773,13 @@ if (agentChat) {
         sectionSummary.textContent = section.summary;
         result.append(sectionSummary);
       }
-      const tiers = section.tiers || [];
-      if (!tiers.length) return;
+      // `tiers` was added after `options`. Stored responses and older A2A
+      // callers can legitimately provide only the original options array, so
+      // treat it as one unlabelled tier instead of silently hiding the cards.
+      const tiers = section.tiers?.length
+        ? section.tiers
+        : [{label: "", options: section.options || []}];
+      if (!tiers[0].options?.length) return;
       // One rule: a grid when any tier carries a label, the plain list
       // otherwise. Which tiers exist, and their order, were decided server-side.
       const list = document.createElement("div");
