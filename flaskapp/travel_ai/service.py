@@ -8,15 +8,17 @@ from uuid import UUID, uuid4
 from dataclasses import asdict
 
 from flaskapp.travel_ai.dispatch import specialists_for
-from flaskapp.travel_ai.sections import plan_sections
+from flaskapp.travel_ai.recommendation import recommend_package
+from flaskapp.travel_ai.sections import plan_packages, plan_sections
 from flaskapp.travel_ai.graph import build_travel_graph
 from flaskapp.travel_ai.guardrails import LlmGuardrail
 from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.a2a import request_message
 from flaskapp.travel_ai.safeguards import assess_plan, disclose_unconsulted
-from flaskapp.travel_ai.schemas import PlanResponse, PlanSection, TravelRequest
+from flaskapp.travel_ai.schemas import PlanPackage, PlanResponse, PlanSection, TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.terminal import log_payload
+from flaskapp.travel_ai.agents.accessibility_agent.integration import enforce_cross_agent_vetoes
 
 
 def merge_accessibility_sources(plan, findings) -> None:
@@ -127,8 +129,15 @@ class TravelPlanningService:
             "findings": [],
             "messages": messages,
         })
-        findings = result["findings"]
+        findings, vetoed_candidates = enforce_cross_agent_vetoes(result["findings"])
         plan = result["plan"]
+        if vetoed_candidates:
+            disclosure = (
+                "Accessibility review excluded candidate(s) with unmet critical requirements: "
+                + ", ".join(vetoed_candidates)
+            )
+            if disclosure not in plan.limitations:
+                plan.limitations.insert(0, disclosure)
         # The orchestrator is asked to preserve sources, but accessibility
         # evidence must not depend on generative compliance. Copy its vetted
         # URLs into the user-visible plan deterministically.
@@ -152,6 +161,12 @@ class TravelPlanningService:
             sections=[
                 PlanSection(**asdict(section)) for section in plan_sections(findings)
             ],
+            packages=[
+                PlanPackage(**asdict(package)) for package in plan_packages(findings)
+            ],
+            # Arithmetic over options the specialists already returned, so a
+            # figure here cannot disagree with the card it came from.
+            recommendation=recommend_package(request, findings),
             trace_url=f"/api/v1/traces/{request_id}",
         )
         log_payload(f"REQUEST {request_id} | FINAL RECOMMENDATION", response)

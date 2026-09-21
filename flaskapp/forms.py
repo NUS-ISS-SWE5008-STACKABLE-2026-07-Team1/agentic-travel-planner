@@ -45,3 +45,15 @@ class RegistrationForm(FlaskForm):
         validators=[DataRequired(), EqualTo("password", message="Passwords must match.")],
     )
     submit = SubmitField("Create account")
+
+
+class ResetPasswordForm(FlaskForm):
+    email = StringField("Email address", validators=[DataRequired(), Email(), Length(max=254)])
+    password = PasswordField(
+        "New password", validators=[DataRequired(), Length(max=128), strong_password]
+    )
+    confirm_password = PasswordField(
+        "Confirm new password",
+        validators=[DataRequired(), EqualTo("password", message="Passwords must match.")],
+    )
+    submit = SubmitField("Reset password")

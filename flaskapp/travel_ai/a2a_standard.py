@@ -244,6 +244,22 @@ def _screen_request(context: RequestContext, executor_context: ExecutorContext) 
     return request
 
 
+def _candidate_findings_from_context(context: RequestContext) -> list[AgentFinding]:
+    """Validate optional upstream findings carried by an orchestrator A2A call."""
+    if context.message is None:
+        return []
+    data_parts = get_data_parts(context.message.parts)
+    if len(data_parts) != 1 or not isinstance(data_parts[0], dict):
+        return []
+    raw = data_parts[0].get("candidate_findings", [])
+    if not isinstance(raw, list) or len(raw) > 20:
+        raise InvalidParamsError("candidate_findings must be a bounded list")
+    try:
+        return [AgentFinding.model_validate(item) for item in raw]
+    except ValidationError as exc:
+        raise InvalidParamsError("candidate_findings failed validation") from exc
+
+
 class SpecialistAgentExecutor(AgentExecutor):
     """Bridge an existing synchronous specialist node to an A2A task."""
 
@@ -346,7 +362,7 @@ class SpecialistAgentExecutor(AgentExecutor):
             state = {
                 "request_id": request_id,
                 "request": request.model_dump(mode="json"),
-                "findings": [],
+                "findings": _candidate_findings_from_context(context),
                 "messages": [legacy_request],
             }
             # Before the node runs, not after: the node's own first act is to

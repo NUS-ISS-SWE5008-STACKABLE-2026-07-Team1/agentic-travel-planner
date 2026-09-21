@@ -121,13 +121,13 @@ class _InnerTracer:
 
 
 def _hotel_candidate_to_option(
-    candidate: HotelCandidate, currency: str, assumption: str
+    candidate: HotelCandidate, assumption: str
 ) -> Option:
     """One ranked candidate as a shared-contract `Option`."""
     factors = [
         f"{candidate.star_rating or 'N/A'} star rating" if candidate.star_rating else "Unrated",
-        f"Price per night: {candidate.price_per_night:.2f} {currency}",
-        f"Total estimated: {candidate.estimated_total_cost:.2f} {currency}" if candidate.estimated_total_cost else "",
+        f"Price per night: {candidate.price_per_night:.2f} {candidate.currency or 'SGD'}",
+        f"Total estimated: {candidate.estimated_total_cost:.2f} {candidate.currency or 'SGD'}" if candidate.estimated_total_cost else "",
     ]
     if candidate.distance_to_center_km is not None:
         factors.append(f"{candidate.distance_to_center_km:.1f} km from centre")
@@ -149,28 +149,104 @@ def _hotel_candidate_to_option(
             f"{candidate.star_rating or 'N/A'} star rating."
         ),
         estimated_cost=candidate.estimated_total_cost,
-        currency=currency,
+        currency=candidate.currency or "SGD",
         assumptions=[assumption],
         selection_factors=[f for f in factors if f],
     )
 
 
+def transport_options_for_city(
+    destination: str, destination_city: str | None, currency: str,
+    arrival_airport: str | None = None,
+) -> list[Option]:
+    """Transport for every airport the destination city has.
+
+    Resolved from the city rather than from the flight agent's findings. Those
+    findings are empty when this agent runs — both start from START — which is
+    why `transport_option_count` was 0 on every grounded run while 46 seed
+    options sat unused.
+
+    Fetching for ALL of the city's airports also avoids a question staging could
+    not answer: one flight finding spans several arrival airports, so choosing
+    one would pair a Haneda arrival with the Narita Express. Each option carries
+    the airport it serves, and the package picks the matching one.
+
+    `arrival_airport` — when known from the selected flight — is prioritised
+    first in the list so the most relevant transfer surfaces at the top. It
+    does not exclude other airports: a traveller may still want a cheaper
+    option from a different gateway.
+    """
+    from flaskapp.places import find_city
+
+    if not destination_city:
+        return []
+    city = find_city(destination, destination_city)
+    if city is None:
+        return []
+    options: list[Option] = []
+    for transport in transport_for_city(
+        destination, destination_city, arrival_airport
+    ):
+        options.append(_transport_to_option(transport, currency))
+    return options
+
+
+def transport_for_city(
+    destination: str, destination_city: str | None,
+    arrival_airport: str | None = None,
+):
+    """Every seeded transfer for the destination city, tagged with its airport.
+
+    Returns transport for all of the city's airports. When `arrival_airport`
+    is provided (from the flight agent's selected flight), options for that
+    airport are listed first so the most relevant transfers surface early.
+    This avoids the bug where the arrival airport was resolved but never
+    used — transport was fetched for all airports with no priority signal.
+    """
+    from flaskapp.places import find_city
+
+    if not destination_city:
+        return []
+    city = find_city(destination, destination_city)
+    if city is None:
+        return []
+
+    def _key(airport: str) -> int:
+        if arrival_airport and airport == arrival_airport:
+            return 0
+        return 1
+
+    airports = sorted(city.airports, key=_key)
+    return [
+        transport.model_copy(update={"airport": airport})
+        for airport in airports
+        for transport in transport_for(city.slug, airport)
+    ]
+
+
 def _transport_to_option(option: TransportOption, currency: str) -> Option:
     """Transport option as a shared-contract Option."""
     desc_parts = [f"{option.mode} — {option.name}"]
+    if option.frequency:
+        desc_parts.append(f"{option.frequency}")
     if option.duration_minutes:
         desc_parts.append(f"{option.duration_minutes} min")
     if option.distance_km:
         desc_parts.append(f"{option.distance_km:.1f} km")
+    # The cost is in the option's own currency (SGD from seed data);
+    # use that rather than the request currency so the figure matches
+    # the label.
+    cost_currency = option.currency or currency
     if option.estimated_cost:
-        desc_parts.append(f"~{option.estimated_cost:.2f} {currency}")
+        desc_parts.append(f"~{option.estimated_cost:.2f} {cost_currency}")
 
     return Option(
         category="transport",
+        airport=option.airport,
         name=option.name,
         description=", ".join(desc_parts),
         estimated_cost=option.estimated_cost,
-        currency=currency,
+        currency=cost_currency,
         assumptions=option.assumptions,
         limitations=option.limitations,
         selection_factors=option.accessibility_notes or [],
@@ -228,12 +304,27 @@ def create_node(llm, tracer, provider=None, config=None):
 
         # Transport seed data is static — no provider abstraction yet.
         ctx = adapted.request.trip_context
-        arrival_airport = ctx.arrival_airport
-        if arrival_airport and ctx.dest_city_slug:
-            transport_options = transport_for(ctx.dest_city_slug, arrival_airport)
+        # Resolved from the destination CITY, not from the flight agent's
+        # findings: those are empty here because both agents start from START,
+        # which is why this lookup never once returned anything in production.
+        # arrival_airport is passed to prioritise transport for the selected
+        # flight's airport — previously resolved but never consumed.
+        transport_options = transport_for_city(
+            travel_request.destination, travel_request.destination_city,
+            ctx.arrival_airport,
+        )
         if not transport_options:
             notes.append(
                 "No verified transport options are available for the selected arrival airport."
+            )
+
+        # All seed data is denominated in SGD. If the traveller's currency
+        # differs, flag it so they know prices are in SGD, not their
+        # chosen currency.
+        if travel_request.currency != "SGD":
+            notes.append(
+                f"All prices are in SGD; your request currency is "
+                f"{travel_request.currency}. Confirm conversion rates before booking."
             )
 
         if not hotel_inventory and not transport_options:
@@ -260,7 +351,7 @@ def create_node(llm, tracer, provider=None, config=None):
             screening = screen_hotels(adapted.request, hotel_inventory, ctx.dest_city_slug)
 
             options = [
-                _hotel_candidate_to_option(c, travel_request.currency, assumption)
+                _hotel_candidate_to_option(c, assumption)
                 for c in proposal.candidates
             ] + [
                 _transport_to_option(t, travel_request.currency)

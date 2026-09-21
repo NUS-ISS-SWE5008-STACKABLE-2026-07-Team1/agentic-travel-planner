@@ -123,6 +123,52 @@ def test_executor_returns_finding_as_a2a_artifact():
     assert final_event.status.state == TaskState.TASK_STATE_COMPLETED
 
 
+def test_accessibility_executor_receives_upstream_candidate_findings():
+    class RecordingQueue:
+        def __init__(self):
+            self.events = []
+
+        async def enqueue_event(self, event):
+            self.events.append(event)
+
+    request_payload = {
+        "origin": "Singapore", "destination": "Australia",
+        "departure_date": "2026-10-10", "return_date": "2026-10-16",
+        "travellers": 1, "traveller_ages": [30],
+        "traveller_genders": ["prefer_not_to_say"],
+        "traveller_accessibility_needs": [["step-free access"]], "budget": 3000,
+    }
+    candidate = AgentFinding(
+        agent="hotel_transport_agent", summary="Hotel candidate", confidence=0.9,
+    )
+    message = new_data_message({
+        "travel_request": request_payload,
+        "candidate_findings": [candidate.model_dump(mode="json")],
+    }, role=Role.ROLE_USER)
+    context = RequestContext(
+        ServerCallContext(), request=SendMessageRequest(message=message)
+    )
+    queue = RecordingQueue()
+    executor = SpecialistAgentExecutor(
+        "accessibility_agent",
+        lambda _request_id: lambda state: {
+            "findings": [AgentFinding(
+                agent="accessibility_agent",
+                summary=f"Audited {len(state['findings'])} candidate finding",
+                confidence=0.9,
+            )]
+        },
+    )
+
+    asyncio.run(executor.execute(context, queue))
+
+    artifact_event = next(
+        event for event in queue.events if isinstance(event, TaskArtifactUpdateEvent)
+    )
+    finding = get_data_parts(artifact_event.artifact.parts)[0]
+    assert finding["summary"] == "Audited 1 candidate finding"
+
+
 def test_orchestrator_executor_returns_complete_plan_response_artifact():
     class RecordingQueue:
         def __init__(self):

@@ -47,6 +47,32 @@ def test_security_headers_reach_authenticated_pages_too(client):
     assert response.headers.get("X-Content-Type-Options") == "nosniff"
 
 
+def test_api_csrf_failure_is_json_with_an_actionable_message(tmp_path):
+    class CsrfConfig(TestConfig):
+        DATABASE = tmp_path / "csrf.sqlite3"
+        WTF_CSRF_ENABLED = True
+
+    client = create_app(CsrfConfig).test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["user_id"] = 1
+
+    response = client.post("/api/v1/travel-plans", json={})
+
+    assert response.status_code == 400
+    assert response.is_json
+    assert response.get_json()["code"] == "csrf_token_invalid"
+    assert "Refresh the page" in response.get_json()["error"]
+
+
+def test_planner_handles_non_json_server_errors_without_parsing_html():
+    javascript = __import__("pathlib").Path("flaskapp/static/js/app.js").read_text(
+        encoding="utf-8"
+    )
+    assert 'contentType.includes("application/json")' in javascript
+    assert "The server could not process the request" in javascript
+
+
 def test_every_cdn_resource_declares_integrity():
     """Anything loaded from a third-party CDN must carry a checksum.
 

@@ -9,10 +9,13 @@ from uuid import UUID
 from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, session, url_for
 from werkzeug.security import generate_password_hash
 
-from flaskapp.database import authenticate_user, create_user, get_intake_conversation
+from flaskapp.database import (
+    authenticate_user, create_user, get_intake_conversation,
+    get_user_for_password_reset, replace_password,
+)
 from flaskapp.countries import COUNTRIES
 from flaskapp.places import city_options
-from flaskapp.forms import LoginForm, RegistrationForm
+from flaskapp.forms import LoginForm, RegistrationForm, ResetPasswordForm
 from flaskapp.admin_auth import is_admin_email
 
 pages_bp = Blueprint("pages", __name__)
@@ -89,6 +92,28 @@ def register():
             return redirect(url_for("pages.main"))
 
     return render_template("register.html", form=form)
+
+
+@pages_bp.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    if session.get("authenticated"):
+        return redirect(url_for("pages.main"))
+    form = ResetPasswordForm()
+    if form.validate_on_submit():
+        user = get_user_for_password_reset(form.email.data)
+        if user:
+            replace_password(
+                user["email"],
+                user["password_hash"],
+                generate_password_hash(form.password.data),
+            )
+            session.clear()
+        flash(
+            "If an account exists for that email, its password has been reset. You can now sign in.",
+            "success",
+        )
+        return redirect(url_for("pages.login"))
+    return render_template("forgot_password.html", form=form)
 
 
 @pages_bp.get("/main")

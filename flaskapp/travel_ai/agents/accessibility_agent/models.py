@@ -37,4 +37,5 @@ class AccessibilityEvidence(BaseModel):
     source_type: Literal["official", "specialist", "crowdsourced", "unknown"]
     query_scope: str
     published_or_updated_at: str | None = None
+    freshness: Literal["current", "stale", "unknown"] = "unknown"
 

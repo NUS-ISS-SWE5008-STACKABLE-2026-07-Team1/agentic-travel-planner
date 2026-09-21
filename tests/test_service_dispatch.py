@@ -82,6 +82,7 @@ def test_a_default_request_still_runs_every_specialist(planned):
         "flight_agent", "hotel_transport_agent",
         "accessibility_agent", "risk_advisory_agent",
     ])
+    assert called[-1] == "accessibility_agent"
 
 
 def test_the_plan_states_which_specialists_were_skipped(planned):
@@ -97,11 +98,33 @@ def test_the_response_carries_ordered_sections(planned):
     response, _called = planned()
     titles = [section.title for section in response.sections]
     assert titles[-1].startswith("Risk"), "advisory qualifies the plan above it"
-    assert any("Flight" in title for title in titles)
-
-
-def test_a_hotel_only_response_has_no_flight_section(planned):
-    response, _called = planned(plan_scope="hotel", origin=None)
-    titles = [section.title for section in response.sections]
+    # Flight and hotel are tier columns now, not sections.
     assert not any("Flight" in title for title in titles)
-    assert any("Hotel" in title for title in titles)
+
+
+def test_a_hotel_only_response_has_no_flight_group(planned):
+    """Selective dispatch composes with the transpose: no flight finding means
+    no flight group, with no scope check in the renderer."""
+    response, _called = planned(plan_scope="hotel", origin=None)
+    titles = [group.title for package in response.packages for group in package.groups]
+    assert not any("Flight" in title for title in titles)
+
+
+def test_the_response_carries_icons_and_tiers(planned):
+    """A section with no options has no tiers — there is nothing to band, and
+    the summary is what it has to say. Icons are unconditional."""
+    response, _called = planned()
+    for section in response.sections:
+        assert section.icon.strip(), section.title
+        if section.options:
+            assert section.tiers, f"{section.title} has options but no tiers"
+        else:
+            assert section.tiers == [], f"{section.title} has tiers but no options"
+
+
+def test_the_response_always_carries_a_recommendation(planned):
+    """Present even when nothing fits, so the traveller learns the trip does not
+    fit rather than seeing nothing at all."""
+    response, _called = planned()
+    assert response.recommendation is not None
+    assert response.recommendation.items or response.recommendation.note
