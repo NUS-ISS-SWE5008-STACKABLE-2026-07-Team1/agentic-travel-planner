@@ -22,7 +22,7 @@ def test_the_hotel_builder_says_hotel():
         hotel_id="h1", name="Test Hotel", city_slug="jp-tokyo", room_type="double",
         price_per_night=150.0, distance_to_center_km=1.0, star_rating=4,
     )
-    assert _hotel_candidate_to_option(candidate, "SGD", "seed data").category == "hotel"
+    assert _hotel_candidate_to_option(candidate, "seed data").category == "hotel"
 
 
 def test_the_transport_builder_says_transport():
