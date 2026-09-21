@@ -29,6 +29,7 @@ class SeedHotelProvider:
 
     name = "seed"
     assumption = INVENTORY_ASSUMPTION
+    is_static = True
 
     def covers(self, request: HotelProposalRequest) -> bool:
         ctx = request.trip_context
