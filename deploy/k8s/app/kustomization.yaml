@@ -1,0 +1,34 @@
+# The application: the `web` and `agents` Deployments. OWNED BY CI.
+#
+# .github/workflows/deploy-gke.yml applies this directory on every push to
+# `release` that passes CI, after rewriting `newTag` below to that commit. So a
+# change to probes, resources or environment in web.yaml / agents.yaml deploys
+# the same way code does: merge it.
+#
+# Why this is its own directory, apart from ../ (the infrastructure): `kubectl
+# apply` sets every field in the file to the file's value. If the Deployments
+# were applied alongside the Ingress and the rest, a hand-run
+# `kubectl apply -k deploy/k8s` would reset the image to whatever tag was
+# committed here and silently roll production back. Tested on 2026-09-21 in a
+# scratch namespace: `set image` to 1.27, re-apply a file saying 1.25, and the
+# Deployment went back to 1.25. Keeping the Deployments out of the manual path
+# makes that mistake impossible rather than merely documented.
+#
+# By hand, only to bootstrap a fresh cluster (then let CI take over):
+#   kubectl apply -k deploy/k8s          # infrastructure first
+#   kubectl apply -k deploy/k8s/app      # starts on newTag below
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: travel-planner
+
+resources:
+  - web.yaml
+  - agents.yaml
+
+# Both Deployments name the image `travel-planner`; this maps it to the
+# registry. `newTag` is the bootstrap image only — CI replaces it in its own
+# checkout at deploy time and never commits the change, so do not bump it here.
+images:
+  - name: travel-planner
+    newName: us-west1-docker.pkg.dev/project-931fd286-f1d2-4105-9e5/travel-planner/app
+    newTag: v3

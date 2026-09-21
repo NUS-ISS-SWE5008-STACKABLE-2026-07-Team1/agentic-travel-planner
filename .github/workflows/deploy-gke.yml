@@ -1,0 +1,304 @@
+# Continuous deployment to GKE: every push to `release` that passes CI goes live.
+#
+# GKE is the main deployment and Render the backup (decided 2026-09-21), and
+# both follow `release`: Render through its own auto-deploy, GKE through this.
+#
+# HOW IT WORKS
+#
+#   push to release
+#     -> gate:   wait for ci-checks.yml's verdict on this exact commit
+#     -> deploy: build the image, tag it with the commit, push it to Artifact
+#                Registry, apply deploy/k8s/app with that tag, wait for the
+#                health checks, and roll back if they never pass
+#
+# Why the gate waits instead of being chained to CI: GitHub only fires a
+# `workflow_run` trigger from the DEFAULT branch's copy of the workflow, and the
+# default branch (`main`) is far behind `release`. So this starts on the push
+# and asks the Actions API what CI concluded for the same commit. A red CI run
+# means no deploy — which also covers a direct push to `release`, since the
+# free plan cannot block those (see the comment at the top of ci-checks.yml).
+#
+# WHAT THIS CAN AND CANNOT TOUCH
+#
+# It updates the `web` and `agents` Deployments (deploy/k8s/app/). Nothing else.
+# The Google service account it acts as can push to the one image repository
+# and read the cluster's address; inside the cluster, deploy/k8s/deployer-rbac.yaml
+# lets it patch those two Deployments and read their pods — it CANNOT read
+# Secrets, create anything, or change the Ingress, IAP, the NetworkPolicy or
+# the ConfigMap. Those stay manual (`kubectl apply -k deploy/k8s`), on purpose:
+# they change rarely, and a mistake there could expose the site.
+#
+# It needs NO application secrets. The pods keep reading the `app-secrets`
+# Secret already in the cluster, so the OpenAI key never reaches GitHub.
+#
+# HOW GITHUB PROVES WHO IT IS — Workload Identity Federation, no key file
+#
+# GitHub issues this run a short-lived OIDC token saying which repository and
+# branch it is. Google trusts that token only for this repository's `release`
+# branch (the provider's attribute condition) and exchanges it for a short-lived
+# credential as `github-deployer`. Nothing long-lived is stored in GitHub: the
+# three repository VARIABLES below are identifiers, not secrets.
+#
+#   GCP_PROJECT_ID    project-931fd286-f1d2-4105-9e5
+#   GCP_WIF_PROVIDER  projects/1040773574528/locations/global/workloadIdentityPools/github/providers/agentic-travel-planner
+#   GCP_DEPLOY_SA     github-deployer@project-931fd286-f1d2-4105-9e5.iam.gserviceaccount.com
+#
+# ROLLING BACK
+#
+# Actions -> "Deploy — GKE" -> Run workflow, and give an older commit from
+# `release`. It must be a commit CI ran on as a push (a merge commit, not one
+# from inside a feature branch). The image is usually still in the registry,
+# so a rollback re-uses it rather than rebuilding.
+#
+# KNOWN COSTS
+#
+# - Each deploy interrupts plans in flight: both Deployments use `Recreate`,
+#   because a plan's progress lives in one pod's memory (ADR-0005). About a
+#   minute of downtime. Render behaves the same way.
+# - Schema changes still run at pod start (docs/horizontal-scaling-plan.md,
+#   blocker 4). Harmless at one replica.
+# - ~5-8 Actions minutes per deploy, against the org's 2,000 free per month.
+
+name: Deploy — GKE
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit on release to deploy. Blank = the current head. An older one rolls back."
+        required: false
+        default: ""
+
+# One deploy at a time, in the order they were started, and never cancelled
+# halfway: a cancelled rollout can leave `web` on the new version and `agents`
+# on the old, and the two must agree on the A2A contract.
+concurrency:
+  group: deploy-gke
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGION: us-west1
+  CLUSTER: travel-planner
+  NAMESPACE: travel-planner
+
+jobs:
+  gate:
+    name: Wait for CI on this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: release
+          fetch-depth: 0
+
+      - name: Choose the commit
+        id: pick
+        env:
+          REQUESTED: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${REQUESTED:-}" ]; then
+            sha="$(git rev-parse --verify "${REQUESTED}^{commit}")"
+          else
+            sha="${GITHUB_SHA}"
+          fi
+          # Only ever something that is on release. Without this, "Run workflow"
+          # started from another branch would deploy that branch's head.
+          if ! git merge-base --is-ancestor "$sha" origin/release; then
+            echo "::error::$sha is not on release; refusing to deploy it."
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=${sha::7}" >> "$GITHUB_OUTPUT"
+          echo "Deploying $sha"
+
+      - name: Wait for CI's verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.pick.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # CI starts within seconds of the push. If nothing has appeared after
+          # five minutes, CI never ran on this commit as a push to release (it is
+          # a commit from inside a merged branch) and there is no verdict to trust.
+          appear_deadline=$(( $(date +%s) + 300 ))
+          finish_deadline=$(( $(date +%s) + 1800 ))
+          while :; do
+            run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-checks.yml \
+                     --commit "$SHA" --event push --limit 1 \
+                     --json status,conclusion,url --jq '.[0] // empty')"
+            now=$(date +%s)
+            if [ -z "$run" ]; then
+              if [ "$now" -gt "$appear_deadline" ]; then
+                echo "::error::No CI run found for $SHA as a push to release. Deploy a merge commit that CI checked."
+                exit 1
+              fi
+              echo "CI has not started for $SHA yet; waiting."
+            else
+              status="$(jq -r .status <<<"$run")"
+              conclusion="$(jq -r .conclusion <<<"$run")"
+              url="$(jq -r .url <<<"$run")"
+              if [ "$status" = "completed" ]; then
+                if [ "$conclusion" = "success" ]; then
+                  echo "CI passed: $url"
+                  exit 0
+                fi
+                echo "::error::CI concluded '$conclusion' for $SHA — not deploying. $url"
+                exit 1
+              fi
+              echo "CI is $status: $url"
+            fi
+            if [ "$now" -gt "$finish_deadline" ]; then
+              echo "::error::CI did not finish within 30 minutes."
+              exit 1
+            fi
+            sleep 20
+          done
+
+  deploy:
+    name: Build, push and roll out
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write   # the OIDC token Workload Identity Federation exchanges
+    env:
+      SHA: ${{ needs.gate.outputs.sha }}
+      TAG: ${{ needs.gate.outputs.tag }}
+      IMAGE: us-west1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/travel-planner/app
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      - name: Let Docker push to Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build and push the image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          labels: |
+            org.opencontainers.image.revision=${{ env.SHA }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          # Dependencies change far less often than code; caching the pip layer
+          # is most of the difference between a two- and an eight-minute build.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Connect to the cluster
+        uses: google-github-actions/get-gke-credentials@64bc7249bbcf78056bb92f14d3cedc2da193946c # v2.3.5
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          location: ${{ env.REGION }}
+
+      - name: Record what is running now
+        id: before
+        run: |
+          set -euo pipefail
+          for d in web agents; do
+            echo "$d=$(kubectl -n "$NAMESPACE" get deployment "$d" -o jsonpath='{.spec.template.spec.containers[0].image}')" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Roll out
+        id: rollout
+        run: |
+          set -euo pipefail
+          # Apply the Deployments exactly as committed, with only the tag
+          # swapped in — in this checkout, never committed back. So git stays
+          # the record of how the pods are configured, and a change to probes or
+          # resources ships with the code. See deploy/k8s/app/kustomization.yaml
+          # for why these two are applied apart from the rest of deploy/k8s.
+          sed -i "s|^\(    newTag:\).*|\1 ${TAG}|" deploy/k8s/app/kustomization.yaml
+          grep -q "newTag: ${TAG}$" deploy/k8s/app/kustomization.yaml \
+            || { echo "::error::could not set the image tag"; exit 1; }
+          # Both together, then wait on both: they share one image and one A2A
+          # contract, so they should change together rather than one at a time.
+          kubectl apply -k deploy/k8s/app
+          kubectl -n "$NAMESPACE" annotate deployment/web deployment/agents --overwrite \
+            kubernetes.io/change-cause="deploy $TAG from ${GITHUB_REPOSITORY} run ${GITHUB_RUN_ID}"
+          # A rollout is only "complete" once the new pods pass their readiness
+          # probes — /readyz (database reachable) for web, the agent card for
+          # agents — so this wait IS the health check. 8 minutes covers web's
+          # 3-minute startup allowance plus Autopilot finding room for a pod.
+          kubectl -n "$NAMESPACE" rollout status deployment/web    --timeout=8m
+          kubectl -n "$NAMESPACE" rollout status deployment/agents --timeout=8m
+
+      # Only when the roll-out itself failed. A failed build or login never
+      # touched the cluster, and "undoing" then would replace the healthy
+      # version with the one before it.
+      - name: Roll back
+        if: failure() && steps.rollout.outcome == 'failure'
+        env:
+          BEFORE_WEB: ${{ steps.before.outputs.web }}
+          BEFORE_AGENTS: ${{ steps.before.outputs.agents }}
+        run: |
+          # Evidence first: once the old pods are back, the failing ones are gone.
+          kubectl -n "$NAMESPACE" get pods -o wide || true
+          kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
+          for d in web agents; do
+            echo "::group::last log lines, $d"
+            kubectl -n "$NAMESPACE" logs "deployment/$d" --tail=60 || true
+            echo "::endgroup::"
+          done
+          # Undo only a Deployment this run actually changed. If `set image`
+          # failed on agents, agents never moved, and undoing it would roll it
+          # back one version further than anyone intended.
+          set -euo pipefail
+          for d in web agents; do
+            before_var="BEFORE_${d^^}"
+            before="${!before_var}"
+            now="$(kubectl -n "$NAMESPACE" get deployment "$d" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+            if [ "$now" != "$before" ]; then
+              echo "Rolling $d back: $now -> $before"
+              kubectl -n "$NAMESPACE" rollout undo "deployment/$d"
+              kubectl -n "$NAMESPACE" rollout status "deployment/$d" --timeout=8m
+            else
+              echo "$d was not changed by this run; leaving it on $now"
+            fi
+          done
+          echo "::error::Deploy of $TAG failed its health checks and was rolled back."
+
+      - name: Summary
+        if: always()
+        env:
+          BEFORE_WEB: ${{ steps.before.outputs.web }}
+          BEFORE_AGENTS: ${{ steps.before.outputs.agents }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          {
+            echo "### GKE deploy: ${OUTCOME}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | [\`${TAG}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${SHA}) |"
+            echo "| Image | \`${IMAGE}:${TAG}\` |"
+            echo "| Before (web) | \`${BEFORE_WEB:-unknown}\` |"
+            echo "| Before (agents) | \`${BEFORE_AGENTS:-unknown}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
