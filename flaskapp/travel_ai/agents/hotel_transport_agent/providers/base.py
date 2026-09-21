@@ -48,9 +48,15 @@ class HotelInventoryProvider(Protocol):
     `covers` exists so the node can tell "this provider has nothing for this
     city" apart from "this provider tried and found nothing", before spending
     a network call or an LLM call.
+
+    `is_static` - agents.loop.InventoryCache can collapse every
+    cache key to one on a static provider, making repeated searches provably
+    free rather than billed — the safe direction to be wrong in, matching
+    `flight_agent/providers/base.py`.
     """
 
     name: str
+    is_static: bool = True
 
     def covers(self, request: HotelProposalRequest) -> bool: ...
 

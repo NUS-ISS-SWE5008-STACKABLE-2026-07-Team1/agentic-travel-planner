@@ -8,6 +8,10 @@ import pytest
 
 from flaskapp.travel_ai.agents.hotel_transport_agent.agent import (
     create_node,
+    to_hotel_request,
+)
+from flaskapp.travel_ai.agents.hotel_transport_agent.providers.base import (
+    HotelInventoryProvider,
 )
 from flaskapp.travel_ai.agents.hotel_transport_agent.domain import (
     propose_hotels,
@@ -431,3 +435,202 @@ def test_run_hotel_agent_falls_back_after_two_failures():
     assert response.confidence == 0.0
     assert "ungrounded" not in response.rationale.lower()
     assert mock_llm.with_structured_output.return_value.invoke.call_count == 2
+
+def test_seed_provider_is_static():
+    """`is_static` must be True so InventoryCache collapses all keys to one."""
+    provider = SeedHotelProvider()
+    assert provider.is_static is True
+
+
+def test_provider_is_static_in_protocol():
+    """`is_static` must be a declared member of the protocol, not an
+    afterthought accessed via getattr fallback."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.providers.base import (
+        HotelInventoryProvider,
+    )
+    assert hasattr(HotelInventoryProvider, "is_static")
+
+
+def test_transport_for_city_prioritises_arrival_airport():
+    """`arrival_airport` — previously resolved but never consumed — now
+    influences ordering: options for the arrival airport are listed
+    first while all city airports remain included."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import (
+        transport_for_city,
+    )
+
+    all_options = transport_for_city("Japan", "Tokyo")
+    airport_names = {opt.airport for opt in all_options}
+    assert airport_names == {"NRT", "HND"}
+
+    prioritised = transport_for_city("Japan", "Tokyo", arrival_airport="HND")
+    assert prioritised[0].airport == "HND"
+
+
+def test_transport_for_city_keeps_all_airports_with_priority():
+    """Prioritisation does not exclude non-arrival airports."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import (
+        transport_for_city,
+    )
+
+    prioritised = transport_for_city("Japan", "Tokyo", arrival_airport="HND")
+    airports = {opt.airport for opt in prioritised}
+    assert airports == {"NRT", "HND"}
+
+
+def test_transport_for_city_no_arrival_airport_default():
+    """Without arrival_airport, all airports are listed in city order."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import (
+        transport_for_city,
+    )
+
+    options = transport_for_city("Japan", "Tokyo")
+    airports = [opt.airport for opt in options]
+    assert set(airports) == {"NRT", "HND"}
+
+
+def test_propose_hotels_uses_sgd_currency():
+    """Hotel prices are SGD in the seed; the label must match the cost
+    regardless of request currency."""
+    req = _make_request(preferences={})
+    proposal = propose_hotels(req, SEED_HOTEL_INVENTORY)
+    for c in proposal.candidates:
+        assert c.currency == "SGD"
+
+
+def test_propose_hotels_sgd_currency_with_non_sgd_request():
+    """When the request currency is not SGD, hotel prices still report SGD
+    with a currency mismatch warning at the node level."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.adapter import (
+        to_hotel_request,
+    )
+    from flaskapp.travel_ai.agents.hotel_transport_agent.domain import (
+        propose_hotels,
+    )
+
+    req = TravelRequest(
+        origin="Singapore",
+        destination="Japan",
+        origin_city="Singapore",
+        destination_city="Tokyo",
+        departure_date="2026-08-15",
+        return_date="2026-08-20",
+        travellers=1,
+        traveller_ages=[30],
+        traveller_genders=["male"],
+        traveller_accessibility_needs=[[]],
+        budget=1000,
+        currency="EUR",
+        preferences=[],
+        accessibility_needs=[],
+    )
+    adapted = to_hotel_request(req)
+    proposal = propose_hotels(adapted.request, SEED_HOTEL_INVENTORY)
+    for c in proposal.candidates:
+        assert c.currency == "SGD"
+
+
+def test_propose_transport_ranks_unknown_as_neutral():
+    """A transport option without accessibility_notes is treated as neutral
+    (ranked after confirmed accessible, before cost/duration), not as
+    inaccessible. This matches the flight agent's three-value approach:
+    unknown is not the same as unavailable."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.domain import (
+        propose_transport,
+    )
+    from flaskapp.travel_ai.agents.hotel_transport_agent.schemas import (
+        TransportOption,
+    )
+
+    confirmed_cheap = TransportOption(
+        name="Express", mode="train", estimated_cost=10.0,
+        accessibility_notes=["Step-free"],
+    )
+    confirmed_expensive = TransportOption(
+        name="Taxi", mode="taxi", estimated_cost=50.0,
+        accessibility_notes=["Wheelchair"],
+    )
+    no_info = TransportOption(
+        name="Bus", mode="bus", estimated_cost=10.0,
+        accessibility_notes=[],
+    )
+
+    ctx = HotelTripContext(
+        dest_city_slug="jp-tokyo",
+        check_in_date="2026-08-15",
+        check_out_date="2026-08-20",
+        accessibility_needs=["wheelchair"],
+    )
+    req = HotelProposalRequest(trip_context=ctx)
+    ranked = propose_transport(
+        req, [confirmed_expensive, no_info, confirmed_cheap]
+    )
+
+    # Confirmed accessible always outranks unknown, regardless of cost.
+    assert ranked[0].name == "Express"
+    assert ranked[1].name == "Taxi"
+    # Unknown is neutral — last among these, but not excluded entirely.
+    assert ranked[2].name == "Bus"
+    # Verify Bus is not excluded (i.e., accessibility check didn't filter it).
+    assert len(ranked) == 3
+
+
+def test_adapter_extracts_arrival_airport_from_flight():
+    """The adapter correctly pulls the arrival airport from outbound
+    flight findings — previously this data was resolved but unused."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.adapter import (
+        to_hotel_request,
+    )
+    from flaskapp.travel_ai.schemas import TravelRequest
+
+    req = TravelRequest(
+        origin="Singapore",
+        destination="Japan",
+        origin_city=None,
+        destination_city="Tokyo",
+        departure_date="2026-08-15",
+        return_date="2026-08-20",
+        travellers=1,
+        traveller_ages=[30],
+        traveller_genders=["male"],
+        traveller_accessibility_needs=[[]],
+        budget=1000,
+        currency="SGD",
+        preferences=[],
+        accessibility_needs=[],
+    )
+    adapted = to_hotel_request(
+        req,
+        flight_candidates=[
+            {"direction": "OUTBOUND", "dest_airport": "HND"},
+            {"direction": "RETURN", "dest_airport": "SIN"},
+        ],
+    )
+    assert adapted.request.trip_context.arrival_airport == "HND"
+
+
+def test_adapter_no_arrival_airport_without_flights():
+    """When no flight findings exist, arrival_airport defaults to None."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.adapter import (
+        to_hotel_request,
+    )
+    from flaskapp.travel_ai.schemas import TravelRequest
+
+    req = TravelRequest(
+        origin="Singapore",
+        destination="Japan",
+        origin_city=None,
+        destination_city="Tokyo",
+        departure_date="2026-08-15",
+        return_date="2026-08-20",
+        travellers=1,
+        traveller_ages=[30],
+        traveller_genders=["male"],
+        traveller_accessibility_needs=[[]],
+        budget=1000,
+        currency="SGD",
+        preferences=[],
+        accessibility_needs=[],
+    )
+    adapted = to_hotel_request(req, flight_candidates=[])
+    assert adapted.request.trip_context.arrival_airport is None

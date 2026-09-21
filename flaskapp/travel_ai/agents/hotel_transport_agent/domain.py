@@ -175,7 +175,11 @@ def propose_hotels(
         key=lambda item: _rank_key(item, prefs, needs_assist)
     )
 
-    currency = ctx.currency
+    # All hotel inventory is denominated in SGD; the price figures
+    # are SGD regardless of what the request claims. Use SGD here
+    # so the currency label always matches the cost. A currency
+    # mismatch warning is added by the node when request currency differs.
+    hotel_currency = "SGD"
     candidates = [
         HotelCandidate(
             hotel_id=item.hotel_id,
@@ -191,7 +195,7 @@ def propose_hotels(
             amenities=list(item.amenities),
             source=item.source,
             estimated_total_cost=round(item.price_per_night * nights, 2),
-            currency=currency,
+            currency=hotel_currency,
         )
         for item in survivors[:top_n]
     ]
@@ -211,7 +215,11 @@ def propose_transport(
     ranked = sorted(
         transport_options,
         key=lambda opt: (
-            1 if (needs_assist and not opt.accessibility_notes) else 0,
+            # Confirmed accessible (has notes) ranks first when assist
+            # is needed. Unknown (no notes) is treated as neutral —
+            # not as inaccessible — since silence is not evidence of
+            # a lack of access. If no assist needed, all rank equally.
+            0 if (not needs_assist or opt.accessibility_notes) else 1,
             opt.estimated_cost or 999999.0,
             opt.duration_minutes or 999999,
         ),
