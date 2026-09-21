@@ -1,8 +1,19 @@
-# kubectl apply -k deploy/k8s
+# The infrastructure around the application. APPLIED BY HAND:
+#
+#   kubectl diff  -k deploy/k8s     # see what would change first
+#   kubectl apply -k deploy/k8s
 #
 # Kustomize is built into kubectl; nothing else to install.
 # The Secret `app-secrets` is NOT created from this directory. Run
 # deploy/create_secrets.py first; it also creates the database role.
+#
+# The two Deployments are NOT here. They live in deploy/k8s/app/ and are
+# deployed by .github/workflows/deploy-gke.yml on every push to `release`; see
+# app/kustomization.yaml for why they had to be separated. Consequence worth
+# knowing: a change to configmap.yaml takes effect only when the pods restart —
+# after applying it, run
+#   kubectl rollout restart deployment/web deployment/agents -n travel-planner
+# or let the next deploy pick it up.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: travel-planner
@@ -10,8 +21,7 @@ namespace: travel-planner
 resources:
   - namespace.yaml
   - configmap.yaml
-  - web.yaml
-  - agents.yaml
+  - services.yaml
   - networkpolicy.yaml
   - pdb.yaml
   # Access option D: public, behind Identity-Aware Proxy. These two belong
@@ -20,10 +30,5 @@ resources:
   # BOTH out to go back to private port-forward access (option A).
   - iap.yaml
   - ingress.yaml
-
-# Both Deployments name the image `travel-planner`; this is the one place the
-# registry path and tag are decided. Bump newTag for each pushed build.
-images:
-  - name: travel-planner
-    newName: us-west1-docker.pkg.dev/project-931fd286-f1d2-4105-9e5/travel-planner/app
-    newTag: v3
+  # What the GitHub Actions deploy may do in this namespace, and nothing more.
+  - deployer-rbac.yaml

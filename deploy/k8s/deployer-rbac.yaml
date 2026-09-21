@@ -1,0 +1,47 @@
+# What .github/workflows/deploy-gke.yml may do inside the cluster: change the
+# image the two Deployments run, watch them roll out, and read enough to explain
+# a failure. Nothing else.
+#
+# The caller is the Google service account `github-deployer`, which GKE presents
+# to Kubernetes RBAC as a User named by its email. Its only IAM role on the
+# project is roles/container.clusterViewer — enough to fetch the cluster's
+# address, and deliberately NOT enough to read or change any Kubernetes object.
+# Everything it can do in here is granted by this file, in this namespace.
+#
+# Verb by verb:
+#   deployments  get/list/watch  `rollout status`, reading the running image
+#                patch           `set image`, `annotate`, `rollout undo`
+#   replicasets  get/list/watch  `rollout status` and `rollout undo` read revisions
+#   pods, logs,  get/list/watch  the diagnostics printed when a rollout fails
+#   events
+#
+# Deliberately absent: `secrets` (the pipeline needs no application secret),
+# `create`/`delete` on anything, and every other kind — the Ingress, IAP
+# BackendConfig, NetworkPolicy and ConfigMap stay a manual `kubectl apply -k`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-deployer
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-deployer
+subjects:
+  - kind: User
+    name: github-deployer@project-931fd286-f1d2-4105-9e5.iam.gserviceaccount.com
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: github-deployer
+  apiGroup: rbac.authorization.k8s.io

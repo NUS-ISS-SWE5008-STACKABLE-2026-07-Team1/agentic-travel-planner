@@ -1,0 +1,33 @@
+# The two Services: a fixed name in front of each Deployment's pods.
+#
+# Kept apart from the Deployments (deploy/k8s/app/) because they belong to the
+# manually applied infrastructure, not to what CI deploys. A pod gets a new IP
+# on every restart; these names do not, which is what `A2A_BASE_URL:
+# http://agents:8000` and the Ingress backend rely on.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  labels: {app: web}
+  annotations:
+    # Container-native load balancing straight to the pod, and the IAP /
+    # health-check / timeout settings in iap.yaml.
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "web"}'
+spec:
+  type: ClusterIP
+  selector: {app: web}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agents
+  labels: {app: agents}
+spec:
+  type: ClusterIP
+  selector: {app: agents}
+  ports:
+    - {name: a2a, port: 8000, targetPort: a2a}
