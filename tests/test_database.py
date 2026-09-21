@@ -345,6 +345,27 @@ def test_option_category_round_trips_and_is_null_for_older_rows(tmp_path):
     assert rows == {"Grand": "hotel", "Express": "transport", "Uncategorised": None}
 
 
+def test_option_airport_round_trips(tmp_path):
+    """Which airport a transfer serves is a fact the specialist asserted, and
+    the audit record keeps it for the same reason it keeps the category."""
+    from flaskapp.travel_ai.schemas import AgentFinding, Option
+
+    database = tmp_path / "airport.sqlite3"
+    initialize(database)
+    response = _plan_response("66666666-6666-4666-8666-666666666666")
+    response.agent_findings = [AgentFinding(
+        agent="hotel_transport_agent", summary="s", confidence=0.9,
+        options=[
+            Option(category="transport", airport="NRT", name="Narita Express", description="d"),
+            Option(category="hotel", name="A hotel", description="d"),
+        ],
+    )]
+    save_plan(database, _request(), response, [])
+    with sqlite3.connect(database) as connection:
+        rows = dict(connection.execute("SELECT name, airport FROM options").fetchall())
+    assert rows == {"Narita Express": "NRT", "A hotel": ""}
+
+
 def test_a_legacy_flight_eval_runs_fk_is_repointed_at_planning_jobs(tmp_path):
     """`CREATE TABLE IF NOT EXISTS` never touches an existing table, so a
     database created under the old FK (onto travel_requests, which does not

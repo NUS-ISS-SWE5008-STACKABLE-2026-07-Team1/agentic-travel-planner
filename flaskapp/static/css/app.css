@@ -234,3 +234,109 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
   color: var(--bs-secondary-color, #6c757d);
 }
 .manual-planner > summary:hover { border-color: var(--bs-primary, #0d6efd); }
+
+/* Price tiers. `auto-fit` rather than a fixed three columns: a section with two
+   tiers should fill the row, not leave a third of it empty. */
+/* Columns are tiers, rows are sections. A fixed column count rather than
+   auto-fit: the columns must line up between the flight row and the hotel row,
+   which auto-fit cannot guarantee once the rows hold different card counts. */
+.plan-tier-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--tier-count, 3), minmax(0, 1fr));
+  gap: .75rem 1rem;
+  align-items: start;
+}
+.plan-tier-row-heading {
+  grid-column: 1 / -1;
+  font-size: .95rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  margin: 1rem 0 .1rem;
+  padding-bottom: .35rem;
+  border-bottom: 2px solid rgba(0, 0, 0, .15);
+}
+.plan-tier-cell { display: flex; flex-direction: column; gap: .75rem; }
+/* One set, declared together so a reader can see the three belong to a scale
+   rather than being three unrelated colours. */
+:root {
+  --tier-budget: #1f7a5a;
+  --tier-comfort: #1d5fa8;
+  --tier-luxury: #7b4397;
+  --tier-unpriced: #6c757d;
+}
+.plan-tier-label {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  margin: 0 0 .25rem;
+  padding: .35rem .6rem;
+  border-radius: 4px;
+  color: #fff;
+  background: var(--tier-unpriced);
+}
+.plan-tier-label[data-tier="budget"] { background: var(--tier-budget); }
+.plan-tier-label[data-tier="comfort"] { background: var(--tier-comfort); }
+.plan-tier-label[data-tier="luxury"] { background: var(--tier-luxury); }
+
+.plan-group-heading {
+  font-size: .82rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  margin: .9rem 0 .1rem;
+  padding-bottom: .3rem;
+  border-bottom: 1px solid rgba(0, 0, 0, .12);
+}
+
+/* Airline-style schedule. Tabular numerals so times line up down a column. */
+.flight-route {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: .5rem;
+  margin-bottom: .15rem;
+}
+.flight-reference { font-weight: 700; letter-spacing: .04em; }
+.flight-date { font-size: .85rem; color: #6c757d; }
+.flight-times {
+  font-size: 1.15rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: .4rem;
+}
+.flight-day-offset { font-size: .7em; color: #a3352a; margin-left: .1rem; }
+/* Spaced away from the day marker: "07:04+1SIN" ran together without it. */
+.flight-dest { font-size: .8rem; color: #6c757d; margin-left: .6rem; font-weight: 400; }
+.plan-section-icon { margin-right: .45rem; }
+@media (max-width: 900px) {
+  /* One column: the row headings still separate the sections, and a tier label
+     now introduces its own stack rather than heading a column. */
+  .plan-tier-grid { grid-template-columns: 1fr; }
+}
+
+/* The budget recommendation. A distinct accent from the three tier colours so
+   "recommended" does not read as a fourth tier. */
+.plan-recommendation {
+  border: 2px solid #b8860b;
+  border-radius: 6px;
+  background: rgba(184, 134, 11, .06);
+  padding: 1rem 1.15rem;
+}
+.plan-recommendation-heading {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: #8a6508;
+  margin: 0 0 .35rem;
+}
+.plan-recommendation-total {
+  font-size: 1.1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 .75rem;
+}
+.plan-recommendation-items { display: flex; flex-direction: column; gap: .75rem; }
+.plan-recommendation-note { font-size: .9rem; color: #6c757d; margin: .5rem 0 0; }

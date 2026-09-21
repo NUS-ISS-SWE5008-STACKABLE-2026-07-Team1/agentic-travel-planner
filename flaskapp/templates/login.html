@@ -68,11 +68,12 @@
               <button class="password-toggle" type="button" data-password-toggle aria-label="Show password" aria-pressed="false">Show</button>
               {% for error in form.password.errors %}<div class="invalid-feedback">{{ error }}</div>{% endfor %}
             </div>
-            <div class="d-flex align-items-center mb-4">
+            <div class="d-flex align-items-center justify-content-between gap-3 mb-4">
               <div class="form-check">
                 {{ form.remember(class="form-check-input") }}
                 {{ form.remember.label(class="form-check-label") }}
               </div>
+              <a href="{{ url_for('pages.forgot_password') }}">Forgot password?</a>
             </div>
             {{ form.submit(class="btn btn-primary btn-lg w-100") }}
           </form>

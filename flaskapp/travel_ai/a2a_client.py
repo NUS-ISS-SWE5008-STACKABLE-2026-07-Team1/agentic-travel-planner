@@ -118,6 +118,7 @@ async def _request_finding(
     correlation_id: str,
     httpx_client_factory,
     deadline_seconds: float,
+    candidate_findings: list[AgentFinding] | None = None,
 ) -> AgentFinding:
     import httpx
     from a2a.client import ClientConfig, create_client
@@ -143,9 +144,12 @@ async def _request_finding(
         )
         client = await create_client(endpoint, config)
 
-        message = new_data_message(
-            {"travel_request": request.model_dump(mode="json")}, role=Role.ROLE_USER
-        )
+        payload = {"travel_request": request.model_dump(mode="json")}
+        if candidate_findings:
+            payload["candidate_findings"] = [
+                item.model_dump(mode="json") for item in candidate_findings
+            ]
+        message = new_data_message(payload, role=Role.ROLE_USER)
         send_request = SendMessageRequest(message=message)
         # Request-level metadata, not the Message's own. `RequestContext.metadata`
         # — the accessor the server side uses — exposes `SendMessageRequest.metadata`,
@@ -234,6 +238,10 @@ def create_remote_specialist_node(
                     correlation_id=str(incoming.correlation_id),
                     httpx_client_factory=httpx_client_factory,
                     deadline_seconds=timeout_seconds,
+                    candidate_findings=(
+                        list(state.get("findings", []))
+                        if agent_name == "accessibility_agent" else None
+                    ),
                 ),
                 timeout_seconds + 5,
             )

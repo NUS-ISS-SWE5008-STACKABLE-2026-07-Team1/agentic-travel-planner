@@ -18,6 +18,7 @@ from flaskapp.travel_ai.schemas import TravelPlan
 from flaskapp.travel_ai.terminal import log_payload
 from flaskapp.travel_ai.usage import TokenUsageCallback
 from flaskapp.database import save_agent_run
+from flaskapp.travel_ai.agents.accessibility_agent.integration import enforce_cross_agent_vetoes
 
 NAME = "orchestrator_agent"
 
@@ -68,8 +69,13 @@ def create_node(llm, tracer, guardrail=None):
     structured_llm = llm.with_structured_output(TravelPlan, method="json_schema")
 
     def orchestrate(state):
-        findings = state.get("findings", [])
+        findings, vetoed_candidates = enforce_cross_agent_vetoes(state.get("findings", []))
         tracer.record("agent_started", NAME, {"finding_count": len(findings)})
+        if vetoed_candidates:
+            tracer.record("accessibility_vetoes_enforced", NAME, {
+                "candidate_count": len(vetoed_candidates),
+                "candidates": vetoed_candidates,
+            })
         if tracer.database_path:
             save_agent_run(tracer.database_path, state["request_id"], NAME, "processing")
         # A fresh secret per request, embedded in the system prompt and never

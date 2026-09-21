@@ -223,7 +223,12 @@ if (planner) {
         },
         body: JSON.stringify(payload)
       });
-      const body = await response.json();
+      const contentType = response.headers.get("content-type") || "";
+      const body = contentType.includes("application/json")
+        ? await response.json()
+        : {error: response.ok
+          ? "The server returned an unexpected response."
+          : "The server could not process the request. Refresh the page and try again."};
       if (!response.ok) throw new Error(body.error || "Unable to build your travel plan.");
       latestPayload = payload;
       sessionStorage.setItem("atlas-plan-payload", JSON.stringify(payload));
@@ -552,7 +557,10 @@ if (agentChat) {
       header.className = "accessibility-evidence-header";
       const name = document.createElement("h5");
       name.className = "h6 mb-0";
-      name.textContent = option.name;
+      // A flight card states its identity once, on the reference line below.
+      // Showing "TR4011-20261015 (Return)" here as well repeats it and repeats
+      // the date the card already formats.
+      name.textContent = option.schedule_display ? "" : option.name;
       const badges = document.createElement("div");
       badges.className = "accessibility-evidence-badges";
       const statusFactor = (option.selection_factors || []).find((factor) => /^status:/i.test(factor));
@@ -564,10 +572,43 @@ if (agentChat) {
         badges.append(badge);
       });
       header.append(name, badges);
+      card.append(header);
+      // Grounded flights only: the fallback path has no number and no times.
+      if (option.schedule_display) {
+        const s = option.schedule_display;
+        const route = document.createElement("div");
+        route.className = "flight-route";
+        const ref = document.createElement("span");
+        ref.className = "flight-reference";
+        ref.textContent = s.reference;
+        const when = document.createElement("span");
+        when.className = "flight-date";
+        when.textContent = option.schedule && option.schedule.direction
+          ? `${s.date} · ${option.schedule.direction.toLowerCase()}`
+          : s.date;
+        route.append(ref, when);
+        const times = document.createElement("div");
+        times.className = "flight-times";
+        times.textContent = `${s.depart} → ${s.arrive}`;
+        if (s.day_offset) {
+          const offset = document.createElement("sup");
+          offset.className = "flight-day-offset";
+          offset.textContent = s.day_offset;
+          offset.title = "Arrives on a later date";
+          times.append(offset);
+        }
+        if (s.dest_code) {
+          const dest = document.createElement("span");
+          dest.className = "flight-dest";
+          dest.textContent = s.dest_code;
+          times.append(dest);
+        }
+        card.append(route, times);
+      }
       const description = document.createElement("p");
       description.className = "accessibility-evidence-description";
       description.textContent = option.description;
-      card.append(header, description);
+      card.append(description);
       // Flights and hotels are chosen on price; accessibility evidence has none,
       // so this is shown only when the specialist costed the option.
       if (option.estimated_cost !== null && option.estimated_cost !== undefined) {
@@ -623,12 +664,108 @@ if (agentChat) {
       return card;
     };
 
+    // The budget recommendation, above the tiers: it is the one thing on this
+    // page that answers "can I afford this trip".
+    const rec = response.recommendation;
+    if (rec && (rec.items?.length || rec.note)) {
+      const box = document.createElement("section");
+      box.className = "plan-recommendation mt-4";
+      const heading = document.createElement("h4");
+      heading.className = "plan-recommendation-heading";
+      heading.append(document.createTextNode("Closest to your budget"));
+      box.append(heading);
+      if (rec.items?.length) {
+        const total = document.createElement("p");
+        total.className = "plan-recommendation-total";
+        total.textContent =
+          `${rec.currency} ${rec.total} total · ${rec.currency} ${rec.remaining} left of your budget`;
+        box.append(total);
+        const list = document.createElement("div");
+        list.className = "plan-recommendation-items";
+        rec.items.forEach((option) => list.append(optionCard(option)));
+        box.append(list);
+      }
+      if (rec.note) {
+        const note = document.createElement("p");
+        note.className = "plan-recommendation-note";
+        note.textContent = rec.note;
+        box.append(note);
+      }
+      result.append(box);
+    }
+
+    // Tier columns. Order, banding and which groups a column holds are all
+    // decided server-side by `sections.plan_packages`; this lays them out as a
+    // matrix — columns are tiers, rows are sections — so Budget sits under
+    // Budget in the flight row and the hotel row alike.
+    const packages = response.packages || [];
+    if (packages.length) {
+      const note = document.createElement("p");
+      note.className = "form-text mt-4 mb-2";
+      note.textContent =
+        "Tiers compare the options this search returned, not the wider market.";
+      const grid = document.createElement("div");
+      grid.className = "plan-tier-grid";
+      grid.style.setProperty("--tier-count", String(packages.length));
+
+      packages.forEach((pkg) => {
+        const label = document.createElement("h5");
+        label.className = "plan-tier-label";
+        label.dataset.tier = (pkg.label || "").toLowerCase().replace(/\s+/g, "-");
+        label.textContent = pkg.label;
+        grid.append(label);
+      });
+
+      // Row order follows first appearance across the columns, which is
+      // SECTION_ORDER: flights before hotels, decided server-side.
+      const rows = [];
+      packages.forEach((pkg) => (pkg.groups || []).forEach((group) => {
+        if (!rows.some((row) => row.title === group.title)) {
+          rows.push({title: group.title, icon: group.icon});
+        }
+      }));
+
+      rows.forEach((row) => {
+        const heading = document.createElement("h6");
+        heading.className = "plan-tier-row-heading";
+        if (row.icon) {
+          const icon = document.createElement("span");
+          icon.setAttribute("aria-hidden", "true");
+          icon.className = "plan-section-icon";
+          icon.textContent = row.icon;
+          heading.append(icon);
+        }
+        heading.append(document.createTextNode(row.title));
+        grid.append(heading);
+        packages.forEach((pkg) => {
+          const cell = document.createElement("div");
+          cell.className = "plan-tier-cell";
+          const group = (pkg.groups || []).find((g) => g.title === row.title);
+          // A section that contributed nothing to this tier leaves an empty
+          // cell, which is what keeps the columns aligned across rows.
+          (group ? group.options : []).forEach((option) =>
+            cell.append(optionCard(option)));
+          grid.append(cell);
+        });
+      });
+      result.append(note, grid);
+    }
+
     // Order and omission are decided server-side by `sections.plan_sections`,
     // so this loop renders what it is given and never asks which agents ran.
     (response.sections || []).forEach((section) => {
       const sectionHeading = document.createElement("h4");
       sectionHeading.className = "h6 mt-4";
-      sectionHeading.textContent = section.title;
+      if (section.icon) {
+        // Decorative: a screen reader should hear "Flight details", not
+        // "airplane Flight details".
+        const icon = document.createElement("span");
+        icon.setAttribute("aria-hidden", "true");
+        icon.className = "plan-section-icon";
+        icon.textContent = section.icon;
+        sectionHeading.append(icon);
+      }
+      sectionHeading.append(document.createTextNode(section.title));
       result.append(sectionHeading);
       if (section.summary) {
         const sectionSummary = document.createElement("p");
@@ -636,13 +773,21 @@ if (agentChat) {
         sectionSummary.textContent = section.summary;
         result.append(sectionSummary);
       }
-      if (section.options?.length) {
-        const list = document.createElement("div");
-        list.className = "vstack gap-3 accessibility-evidence-list";
-        section.options.forEach((option) => list.append(optionCard(option)));
-        result.append(list);
-      }
+      // `tiers` was added after `options`. Stored responses and older A2A
+      // callers can legitimately provide only the original options array, so
+      // treat it as one unlabelled tier instead of silently hiding the cards.
+      const tiers = section.tiers?.length
+        ? section.tiers
+        : [{label: "", options: section.options || []}];
+      if (!tiers[0].options?.length) return;
+      // One rule: a grid when any tier carries a label, the plain list
+      // otherwise. Which tiers exist, and their order, were decided server-side.
+      const list = document.createElement("div");
+      list.className = "vstack gap-3 accessibility-evidence-list";
+      tiers[0].options.forEach((option) => list.append(optionCard(option)));
+      result.append(list);
     });
+
     appendListSection("Assumptions", plan.assumptions);
     appendListSection("Limitations", plan.limitations);
     if (plan.safety) {

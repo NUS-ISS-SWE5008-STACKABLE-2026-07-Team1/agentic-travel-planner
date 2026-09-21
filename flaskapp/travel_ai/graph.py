@@ -68,8 +68,8 @@ def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None,
     must pass the SAME value to the A2A message list — `make_specialist_node`
     raises `Missing A2A request` for a node that runs without one.
     """
-    # CUSTOMIZE THE LANGGRAPH WORKFLOW HERE.
-    # START -> the selected specialists in parallel -> orchestrator -> END.
+    # CUSTOMIZE THE LANGGRAPH WORKFLOW HERE. Discovery specialists run first;
+    # accessibility then audits their concrete candidates before synthesis.
     settings = vars(Config) if config is None else config
     workflow = StateGraph(TravelGraphState)
     selected = tuple(name for name in SPECIALISTS if name in set(specialists))
@@ -83,7 +83,6 @@ def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None,
                 raise PlanningCancelled("Planning was cancelled")
             return result
         workflow.add_node(name, cancellable_specialist)
-        workflow.add_edge(START, name)
     orchestrator = create_orchestrator_node(llm, tracer, guardrail)
     def cancellable_orchestrator(state):
         if cancel_event and cancel_event.is_set():
@@ -93,7 +92,21 @@ def build_travel_graph(llm: ChatOpenAI, tracer: AuditTracer, cancel_event=None,
             raise PlanningCancelled("Planning was cancelled")
         return result
     workflow.add_node("orchestrator_agent", cancellable_orchestrator)
-    # A list-valued source is a barrier: synthesis starts only after every branch.
-    workflow.add_edge(list(selected), "orchestrator_agent")
+    accessibility = "accessibility_agent"
+    if accessibility in selected:
+        discovery = tuple(name for name in selected if name != accessibility)
+        if discovery:
+            for name in discovery:
+                workflow.add_edge(START, name)
+            # A list-valued source is a barrier. The accessibility agent sees
+            # every discovery finding in state and audits the actual options.
+            workflow.add_edge(list(discovery), accessibility)
+        else:
+            workflow.add_edge(START, accessibility)
+        workflow.add_edge(accessibility, "orchestrator_agent")
+    else:
+        for name in selected:
+            workflow.add_edge(START, name)
+        workflow.add_edge(list(selected), "orchestrator_agent")
     workflow.add_edge("orchestrator_agent", END)
     return workflow.compile()
