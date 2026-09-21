@@ -20,9 +20,11 @@ def create_app(config_object: type[Config] = Config) -> Flask:
 
     init_database(app)
 
+    from flaskapp.health import health_bp
     from flaskapp.routes import pages_bp
     from flaskapp.travel_ai.api import travel_api_bp
 
+    app.register_blueprint(health_bp)
     app.register_blueprint(pages_bp)
     app.register_blueprint(travel_api_bp, url_prefix="/api/v1")
 

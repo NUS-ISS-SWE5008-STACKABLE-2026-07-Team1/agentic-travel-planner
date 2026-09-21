@@ -1,0 +1,29 @@
+# kubectl apply -k deploy/k8s
+#
+# Kustomize is built into kubectl; nothing else to install.
+# The Secret `app-secrets` is NOT created from this directory. Run
+# deploy/create_secrets.py first; it also creates the database role.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: travel-planner
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - web.yaml
+  - agents.yaml
+  - networkpolicy.yaml
+  - pdb.yaml
+  # Access option D: public, behind Identity-Aware Proxy. These two belong
+  # together — iap.yaml carries the BackendConfig that puts Google sign-in in
+  # front of the app, so an Ingress without it would expose the site. Comment
+  # BOTH out to go back to private port-forward access (option A).
+  - iap.yaml
+  - ingress.yaml
+
+# Both Deployments name the image `travel-planner`; this is the one place the
+# registry path and tag are decided. Bump newTag for each pushed build.
+images:
+  - name: travel-planner
+    newName: us-west1-docker.pkg.dev/project-931fd286-f1d2-4105-9e5/travel-planner/app
+    newTag: v3

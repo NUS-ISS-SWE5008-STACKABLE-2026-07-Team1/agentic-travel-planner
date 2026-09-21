@@ -460,3 +460,43 @@ def test_a_populated_leg_does_not_carry_suggestions():
     assert result["included_count"] > 0
     assert "dates_this_route_flies_nearby" not in result
     assert "suggestion" not in result
+
+
+# --- The two halves of the tool registry must agree -------------------------
+#
+# `TOOL_SPECS` is what `bind_tools` shows the model; `_TOOLS` is what `dispatch`
+# looks names up in. They are built differently on purpose — the specs are
+# hand-written OpenAI-format dicts so `tools.py` stays langchain-free
+# (test_flight_imports.py) — which is exactly why nothing but a test can keep
+# their names in step. A mismatch is invisible at import and surfaces mid-loop
+# as a refusal the model wastes turns trying to correct.
+
+def test_every_advertised_tool_is_dispatchable():
+    advertised = {spec["function"]["name"] for spec in tools.TOOL_SPECS}
+
+    missing = sorted(advertised - set(tools._TOOLS))
+    assert not missing, (
+        f"TOOL_SPECS advertises {missing} but dispatch cannot run them — the model "
+        "would be told about a tool that always answers 'unknown tool'."
+    )
+
+
+def test_every_dispatchable_tool_is_advertised():
+    advertised = {spec["function"]["name"] for spec in tools.TOOL_SPECS}
+
+    unreachable = sorted(set(tools._TOOLS) - advertised)
+    assert not unreachable, (
+        f"{unreachable} is registered but absent from TOOL_SPECS, so the model is "
+        "never told it exists and it can never be called."
+    )
+
+
+def test_each_spec_is_shaped_the_way_bind_tools_expects():
+    """A malformed spec fails inside langchain at loop time, not here. Pin the
+    three fields `dispatch` and `bind_tools` both rely on."""
+    for spec in tools.TOOL_SPECS:
+        assert spec["type"] == "function"
+        function = spec["function"]
+        assert function["name"] and isinstance(function["name"], str)
+        assert function["description"].strip()
+        assert function["parameters"]["type"] == "object"

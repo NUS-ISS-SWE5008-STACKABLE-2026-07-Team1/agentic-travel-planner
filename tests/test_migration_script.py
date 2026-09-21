@@ -51,6 +51,7 @@ def test_identity_tables_are_the_ones_with_generated_keys():
     assert IDENTITY_TABLES == (
         "users", "agent_findings", "options", "audit_events",
         "intake_messages", "agent_runs", "plan_feedback",
+        "flight_agent_eval_runs",
     )
 
 
@@ -97,6 +98,7 @@ def test_table_primary_keys_do_not_assume_id_everywhere():
         "intake_messages": "id",
         "agent_runs": "id",
         "plan_feedback": "id",
+        "flight_agent_eval_runs": "id",
     }
 
 

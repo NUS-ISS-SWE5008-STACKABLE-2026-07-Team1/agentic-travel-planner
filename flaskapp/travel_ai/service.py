@@ -40,7 +40,9 @@ class TravelPlanningService:
                  database_path: Path | str | None = None, user_id: int | None = None,
                  cancel_event=None, guardrail_settings: dict | None = None,
                  input_guardrail: dict | None = None,
-                 a2a_base_url: str | None = None):
+                 a2a_base_url: str | None = None,
+                 flight_agent_transport: str | None = None,
+                 flight_agent_a2a_url: str | None = None):
         self.api_key = api_key
         self.provider = provider
         self.endpoint = endpoint
@@ -60,6 +62,12 @@ class TravelPlanningService:
         self.guardrail_settings = guardrail_settings
         self.input_guardrail = input_guardrail
         self.a2a_base_url = a2a_base_url.rstrip("/") if a2a_base_url else None
+        # The flight-only seam (ADR-0004): route just this one specialist over
+        # A2A while the rest stay in-process. Carried here because `graph.py`
+        # reads it from the settings this service builds — without it the
+        # environment variable existed, was documented, and did nothing.
+        self.flight_agent_transport = flight_agent_transport
+        self.flight_agent_a2a_url = flight_agent_a2a_url
 
     def create_plan(self, request: TravelRequest, request_id: str | None = None) -> PlanResponse:
         correlation_id = uuid4() if request_id is None else UUID(request_id)
@@ -98,6 +106,8 @@ class TravelPlanningService:
             "A2A_BASE_URL": self.a2a_base_url or "",
             "AI_REQUEST_TIMEOUT_SECONDS": self.timeout,
             "FLIGHT_AGENT_A2A_TIMEOUT_SECONDS": self.timeout,
+            "FLIGHT_AGENT_TRANSPORT": self.flight_agent_transport or "inprocess",
+            "FLIGHT_AGENT_A2A_URL": self.flight_agent_a2a_url or "",
         }
         graph = build_travel_graph(
             llm, tracer, self.cancel_event, guardrail,

@@ -6,6 +6,7 @@ CI sets it, so the dialect that actually ships is never untested.
 """
 
 import os
+import re
 import uuid
 
 import pytest
@@ -251,3 +252,72 @@ def test_create_user_rejects_a_duplicate_email(database):
         second = create_user("B", "DUPE@example.com", "hash", "Singapore", "1990-01-01")
     assert first is not None
     assert second is None, "a duplicate email must return None, not raise"
+
+
+def test_a_legacy_flight_eval_runs_fk_is_repointed_at_planning_jobs(database):
+    """The Postgres half of `_repoint_flight_eval_run_fk`, which SQLite never runs.
+
+    A table created under the old FK (onto travel_requests, which save_plan only
+    writes after the whole graph) rejected every live eval-row insert with
+    ForeignKeyViolation. `CREATE TABLE IF NOT EXISTS` does not touch it, so
+    `initialize` must find that constraint in `pg_constraint`, swap it, and null
+    only ids no planning job backs. Every later test's `initialize` restores the
+    new FK even if this one fails midway.
+    """
+    from flaskapp.database import SCHEMA_POSTGRES, ensure_planning_job, save_flight_eval_run
+
+    create_table = re.search(
+        r"CREATE TABLE IF NOT EXISTS flight_agent_eval_runs \(.*?\n\);", SCHEMA_POSTGRES, re.DOTALL
+    ).group(0)
+    legacy_table = create_table.replace(
+        "request_id TEXT REFERENCES planning_jobs(request_id) ON DELETE SET NULL",
+        "request_id TEXT REFERENCES travel_requests(id) ON DELETE SET NULL",
+    )
+    assert legacy_table != create_table, "fixture must actually restore the old FK"
+
+    backed, orphan = str(uuid.uuid4()), str(uuid.uuid4())
+    with connect(database) as db:
+        db.execute("DROP TABLE flight_agent_eval_runs")
+        db.executescript(legacy_table)
+        # Legal under the old FK only with a travel_requests row behind it.
+        for request_id in (backed, orphan):
+            db.execute(
+                "INSERT INTO travel_requests (id, destination, departure_date, return_date, "
+                "travellers, currency, risk_tolerance) "
+                "VALUES (?, 'Japan', '2026-10-10', '2026-10-16', 1, 'SGD', 'medium')",
+                (request_id,),
+            )
+            db.execute(
+                "INSERT INTO flight_agent_eval_runs (run_type, request_id, flight_agent_mode, "
+                "inventory_source, latency_ms, outcome, trace_id) "
+                "VALUES ('production', ?, 'auto', 'seed', 5, 'success', ?)",
+                (request_id, request_id),
+            )
+    ensure_planning_job(database, backed, None, {})
+
+    initialize(database)
+    initialize(database)  # and idempotent once migrated
+
+    with connect(database) as db:
+        parents = [row["parent"] for row in db.execute(
+            """SELECT parent.relname AS parent
+               FROM pg_constraint con
+               JOIN pg_class child ON child.oid = con.conrelid
+               JOIN pg_namespace nsp ON nsp.oid = child.relnamespace
+               JOIN pg_class parent ON parent.oid = con.confrelid
+               WHERE con.contype = 'f' AND nsp.nspname = current_schema()
+                 AND child.relname = 'flight_agent_eval_runs'"""
+        ).fetchall()]
+        request_ids = {row["trace_id"]: row["request_id"] for row in db.execute(
+            "SELECT trace_id, request_id FROM flight_agent_eval_runs"
+        ).fetchall()}
+    assert parents == ["planning_jobs"]
+    assert request_ids == {backed: backed, orphan: None}
+
+    # The live ordering: a planning job exists, travel_requests does not yet.
+    mid_plan = str(uuid.uuid4())
+    ensure_planning_job(database, mid_plan, None, {})
+    save_flight_eval_run(
+        database, run_type="production", request_id=mid_plan,
+        flight_agent_mode="auto", inventory_source="seed", outcome="success", latency_ms=1,
+    )

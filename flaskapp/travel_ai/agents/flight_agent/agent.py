@@ -9,9 +9,15 @@ correctness — the candidate list is identical either way.
 Flow:
 
     A2A request -> adapter.to_flight_request  (shared contract -> flight contract)
-                -> domain.propose_flights     (deterministic, always runs)
-                -> reasoning.run_flight_agent (model explains; grounding enforced)
+                -> ToolContext + one inventory fetch
+                -> reasoners.select_reasoner  (structured | agentic, per mode)
+                -> FlightReasoner.run         (search in code, model explains)
                 -> AgentFinding               (back onto the shared contract)
+
+The node owns the request's *lifecycle* — adapting it, fetching inventory once,
+tracing, eval logging, building the finding. It does not own the reasoning: both
+ways of thinking live in `reasoners.py` behind one interface, so this module
+never branches on which one ran.
 
 Inventory comes from an `InventoryProvider` (see `providers/`), not from a
 module-level dataset. Seed is the default; `FLIGHT_INVENTORY_SOURCE=duffel`
@@ -32,17 +38,17 @@ an answer the orchestrator can act on; an exception is not.
 
 from __future__ import annotations
 
-from flaskapp.config import Config
-from flaskapp.database import save_agent_run
+import time
+
+from flaskapp.config import Config, get_llm_settings
+from flaskapp.database import save_agent_run, save_flight_eval_run
 from flaskapp.travel_ai.a2a import response_message
 from flaskapp.travel_ai.agents.base import make_specialist_node
 from flaskapp.travel_ai.agents.flight_agent.adapter import to_flight_request
-from flaskapp.travel_ai.agents.flight_agent.domain import propose_flights, screen_flights
 from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION, PATH2_INSTRUCTION
 from flaskapp.travel_ai.agents.flight_agent.providers import get_inventory_provider
 from flaskapp.travel_ai.agents.flight_agent.providers.seed import INVENTORY_ASSUMPTION
-from flaskapp.travel_ai.agents.flight_agent.agentic import run_agentic_flight_agent
-from flaskapp.travel_ai.agents.flight_agent.reasoning import run_flight_agent
+from flaskapp.travel_ai.agents.flight_agent.reasoners import select_reasoner
 from flaskapp.travel_ai.agents.flight_agent.tools import ToolContext, budget_from_config
 from flaskapp.travel_ai.agents.loop import EVENT_BUDGET_EXHAUSTED
 from flaskapp.travel_ai.guardrails.specialist import make_postprocess, make_preflight
@@ -92,29 +98,60 @@ NO_CONCRETE_OPTIONS_WARNING = (
 _DUPLICATE_EVENTS = frozenset({"agent_started", "agent_completed"})
 
 
-class _InnerTracer:
-    """Forwards `run_flight_agent`'s events except the lifecycle duplicates."""
+class _EvalSignals:
+    """Reconstructs guardrail pass/block results for `flight_agent_eval_runs`
+    purely by watching trace events `reasoning.py`/`agentic.py` already emit
+    (`agent_input_blocked`, `agent_llm_attempt_failed`) — no change to either
+    module's own logic or return shape. Best-effort: 'pass' unless a specific
+    violation event was actually observed.
 
-    def __init__(self, tracer):
+    `guardrail_output_result` collapses to only 'pass'/'high': `screen_output_text`
+    only ever flags on high-risk bias or flagged toxicity (medium bias never
+    retries), so a 'medium' output-side classification can't happen here.
+    """
+
+    def __init__(self) -> None:
+        self.input_blocked = False
+        self.grounding_failed = False
+        self.output_flagged = False
+        self.block_reasons: list[str] = []
+
+    def observe(self, event: str, details: dict | None) -> None:
+        details = details or {}
+        if event == "agent_input_blocked":
+            self.input_blocked = True
+            self.block_reasons.append("input screening blocked")
+        elif event == "agent_llm_attempt_failed":
+            if "ungrounded_flight_ids" in details:
+                self.grounding_failed = True
+                self.block_reasons.append("ungrounded flight id(s) in rationale")
+            if "output_policy_violation" in details:
+                self.output_flagged = True
+                self.block_reasons.append("output policy violation")
+
+    def as_row(self) -> dict[str, str | None]:
+        return {
+            "guardrail_input_result": "blocked" if self.input_blocked else "pass",
+            "guardrail_output_result": "high" if self.output_flagged else "pass",
+            "guardrail_grounding_result": "fail" if self.grounding_failed else "pass",
+            "guardrail_block_reason": "; ".join(dict.fromkeys(self.block_reasons)) or None,
+        }
+
+
+class _InnerTracer:
+    """Forwards `run_flight_agent`'s events except the lifecycle duplicates,
+    and — if given an `_EvalSignals` — feeds every event to it first, so eval
+    logging observes exactly what the traveller-facing trace saw."""
+
+    def __init__(self, tracer, signals: _EvalSignals | None = None):
         self._tracer = tracer
+        self._signals = signals
 
     def record(self, event: str, agent: str, details: dict | None = None) -> None:
+        if self._signals is not None:
+            self._signals.observe(event, details)
         if event not in _DUPLICATE_EVENTS:
             self._tracer.record(event, agent, details)
-
-
-def _has_empty_leg(request, inventory) -> bool:
-    """Whether the deterministic search leaves either leg with no candidates.
-
-    The escalation test for `auto` mode, and deliberately the cheap one: pure
-    Python over rows already fetched, no model call. An empty leg is precisely the
-    case the tool loop improves — it can search a nearby date — and a full leg is
-    precisely the case where the loop was measured to add latency for an identical
-    result.
-    """
-    proposal = propose_flights(request, inventory)
-    directions = {candidate.direction for candidate in proposal.candidates}
-    return directions != {"OUTBOUND", "RETURN"}
 
 
 def _forbid_concrete_options(agent_name: str, tracer):
@@ -259,6 +296,124 @@ def _build_finding(
     )
 
 
+class _EvalRun:
+    """One row of `flight_agent_eval_runs`, assembled as the request unfolds.
+
+    Three outcomes end a request — the Path 2 fallback, a completed plan, and an
+    exception — and each used to build its own row inline. The fields they share
+    (the resolved mode, provider and model; elapsed time; whether the loop ran)
+    were therefore restated three times, and every column this table got wrong in
+    production got it wrong here: `llm_provider`/`llm_model` recorded as
+    `auto`/NULL, `provider_calls` zeroed on the single-shot path, and
+    `escalation_reason` claiming a loop that had been switched off.
+
+    So the row is built in one place and the node only says which ending
+    happened. `escalation_reason` in particular is derived here from `mode` and
+    `escalated_to_loop` rather than re-expressed at the call site, because it is
+    a fact about those two values and nothing else.
+
+    Timing starts at construction, which must therefore be the first thing the
+    node does — `latency_ms` is meant to cover the whole node, including the
+    adapter and the inventory fetch, not just the model call.
+    """
+
+    def __init__(
+        self, tracer, request_id: str, *, mode: str, inventory_source: str,
+        llm_provider: str | None, llm_model: str | None,
+    ) -> None:
+        self._tracer = tracer
+        self._request_id = request_id
+        self._mode = mode
+        self._inventory_source = inventory_source
+        self._llm_provider = llm_provider
+        self._llm_model = llm_model
+        self._started = time.perf_counter()
+        # Set once the mode gate has run. False is the correct default: an
+        # exception raised before the decision did not escalate to anything.
+        self.escalated_to_loop = False
+        self.signals = _EvalSignals()
+
+    def _escalation_reason(self) -> str | None:
+        """Why the loop ran, or None if it did not.
+
+        `and self.escalated_to_loop` on both arms, because a model without tool
+        calling turns the loop off after the mode is resolved; without it the row
+        said the loop ran for its own reason while `escalated_to_loop` stayed 0.
+        """
+        if not self.escalated_to_loop:
+            return None
+        if self._mode == "auto":
+            return "empty_leg"
+        if self._mode == "agentic":
+            return "mode_agentic"
+        return None
+
+    def _write(self, **fields) -> None:
+        """Best-effort. Never raises — see `save_flight_eval_run`'s docstring:
+        telemetry must not turn an already-served (or already-failed) request
+        into a second failure."""
+        if not self._tracer.database_path:
+            return
+        try:
+            save_flight_eval_run(
+                self._tracer.database_path,
+                run_type="production",
+                request_id=self._request_id,
+                flight_agent_mode=self._mode,
+                inventory_source=self._inventory_source,
+                llm_provider=self._llm_provider,
+                llm_model=self._llm_model,
+                trace_id=self._request_id,
+                latency_ms=int((time.perf_counter() - self._started) * 1000),
+                **fields,
+            )
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break the response
+            self._tracer.record("agent_eval_log_failed", NAME, {"error_type": type(exc).__name__})
+
+    def path2_fallback(self, *, options_returned: int) -> None:
+        """No inventory covered the trip, so the prompt-only path answered.
+
+        No guardrail signals: that path runs the shared L1/L2 screening rather
+        than this agent's own, and recording its own gates as 'pass' would claim
+        checks that never ran.
+        """
+        self._write(outcome="path2_fallback", options_returned=options_returned)
+
+    def success(
+        self, *, budget_exhausted: bool, counts: dict, usage: dict, options_returned: int,
+    ) -> None:
+        """A finding was produced.
+
+        `budget_exhausted` is still a served request — the distinction is that an
+        early-stopped search is not the result a full search would have given, so
+        it must not be averaged in with clean runs.
+        """
+        self._write(
+            outcome="budget_exhausted" if budget_exhausted else "success",
+            escalated_to_loop=self.escalated_to_loop,
+            escalation_reason=self._escalation_reason(),
+            # Real on both paths: the inventory fetch goes through `ctx.cache`,
+            # which spends a provider call, and on Duffel that is a billed
+            # search. `llm_turns` and `tool_calls` are genuinely 0 without the
+            # loop — `run_flight_agent` calls the model without spending this
+            # budget and does not report how many calls it made.
+            llm_turns=counts.get("llm_turns", 0),
+            tool_calls=counts.get("tool_calls", 0),
+            provider_calls=counts.get("provider_calls", 0),
+            usage=usage,
+            options_returned=options_returned,
+            **self.signals.as_row(),
+        )
+
+    def error(self, exc: BaseException, *, usage: dict) -> None:
+        self._write(
+            outcome="error", error_type=type(exc).__name__,
+            escalated_to_loop=self.escalated_to_loop,
+            usage=usage,
+            **self.signals.as_row(),
+        )
+
+
 def create_node(llm, tracer, provider=None, config=None):
     """The graph node. Grounded when inventory covers the trip, prompt-only otherwise.
 
@@ -288,28 +443,33 @@ def create_node(llm, tracer, provider=None, config=None):
     # between travellers.
     settings = vars(Config) if config is None else config
     budget_limits, max_date_shift_days = budget_from_config(settings)
-    # Three modes, resolved once here rather than per request so the mode cannot
-    # change under a traveller mid-plan:
-    #
-    #   structured  the single-shot path this agent has always run.
-    #   agentic     always open the tool loop.
-    #   auto        the default: structured, escalating to the loop only when the
-    #               deterministic search leaves a leg empty.
-    #
-    # `auto` exists because of what the measurement actually showed
-    # (`docs/flight_agent/mode-eval.md`). The loop's benefit is concentrated
-    # almost entirely in one case: a stocked route on an unstocked date went from
-    # 0 options to 6. On every other covered scenario it produced an identical
-    # option count for 2-4 extra seconds. Making it the global default would tax
-    # every traveller for a benefit most of them never see.
-    #
-    # The escalation test is free, which is what makes this worth doing: whether a
-    # leg is empty is decided by `propose_flights` over an in-memory list, with no
-    # model call. So the common path keeps single-shot latency exactly, and only
-    # the requests that would otherwise return nothing pay for the loop.
+    # Three modes — `structured`, `agentic`, `auto` — resolved once HERE rather
+    # than per request, so the mode cannot change under a traveller mid-plan.
+    # What each one means, and why `auto` is the default, is in `reasoners.py`
+    # beside the code that acts on it; `docs/flight_agent/mode-eval.md` has the
+    # measurement the default rests on.
     mode = str(settings.get("FLIGHT_AGENT_MODE", "auto")).strip().lower()
+    # Resolved once here, same as `mode` and `provider` — eval logging records
+    # what actually ran, not what the current settings say, so a config change
+    # mid-deployment doesn't retroactively relabel earlier rows.
+    #
+    # Through `get_llm_settings`, not the raw keys: LLM_PROVIDER defaults to
+    # "auto" and LLM_MODEL is usually blank, so reading them directly recorded
+    # provider="auto", model=NULL on a deployment that in fact ran openai/gpt-5.
+    # These columns exist to compare runs across providers and models, which
+    # "auto"/NULL cannot do. A configuration error leaves both None rather than
+    # failing: this is telemetry, and the request itself fails elsewhere.
+    _llm_settings, _llm_settings_error = get_llm_settings(settings)
+    llm_provider_name = (_llm_settings or {}).get("provider")
+    llm_model_name = (_llm_settings or {}).get("model")
 
     def flight_node(state) -> dict:
+        # First statement in the node: the recorder starts its clock here, and
+        # `latency_ms` is meant to cover everything the node does.
+        eval_run = _EvalRun(
+            tracer, state["request_id"], mode=mode, inventory_source=provider.name,
+            llm_provider=llm_provider_name, llm_model=llm_model_name,
+        )
         incoming = next(
             (m for m in state.get("messages", [])
              if m.message_type == "request" and m.recipient == NAME),
@@ -335,15 +495,23 @@ def create_node(llm, tracer, provider=None, config=None):
         # the provenance ledger. Here it still makes exactly one call, which
         # `test_flight_node_providers.py` pins.
         budget = budget_limits.fresh().start()
+        # Set when the loop actually hits a spend cap, so eval logging can
+        # call the outcome 'budget_exhausted' rather than a plain 'success' —
+        # the run still returns a usable finding, but an early-stopped search
+        # is not the same result a full search would have produced.
+        budget_exhausted: list[str] = []
+
+        def _on_budget_exhausted(limit: str) -> None:
+            budget_exhausted.append(limit)
+            tracer.record(EVENT_BUDGET_EXHAUSTED, NAME, {"limit": limit, **budget.as_counts()})
+
         # One context for the whole request. The loop, when it runs, uses this
         # same cache — building it a second one there would re-fetch inventory
         # already paid for, which is free on seed and billed on Duffel.
         ctx = ToolContext.for_request(
             adapted.request, provider, budget,
             max_date_shift_days=max_date_shift_days,
-            on_budget_exhausted=lambda limit: tracer.record(
-                EVENT_BUDGET_EXHAUSTED, NAME, {"limit": limit, **budget.as_counts()}
-            ),
+            on_budget_exhausted=_on_budget_exhausted,
         )
         inventory = []
         if provider.covers(adapted.request):
@@ -363,6 +531,9 @@ def create_node(llm, tracer, provider=None, config=None):
             result = prompt_only_node(state)
             for finding in result.get("findings", []):
                 finding.warnings = [*finding.warnings, *notes, ESTIMATE_WARNING]
+            eval_run.path2_fallback(
+                options_returned=sum(len(f.options) for f in result.get("findings", [])),
+            )
             return result
 
         tracer.record("agent_started", NAME, {
@@ -373,49 +544,27 @@ def create_node(llm, tracer, provider=None, config=None):
 
         usage = TokenUsageCallback()
         try:
-            # Free, model-free escalation test: `propose_flights` is pure Python
-            # over rows already in memory. `run_flight_agent` computes it again
-            # internally, which is cheap and keeps this decision independent of
-            # whichever path is chosen.
-            use_loop = mode == "agentic" or (
-                mode == "auto" and _has_empty_leg(adapted.request, inventory)
+            # Which way of thinking this request gets. `reasoners.py` owns the
+            # decision and the two implementations; from here on the node does
+            # not know or care which one it is holding.
+            reasoner = select_reasoner(mode, ctx, inventory, llm, tracer=tracer)
+            eval_run.escalated_to_loop = reasoner.is_loop
+            outcome = reasoner.run(
+                ctx, inventory, llm, tracer=_InnerTracer(tracer, eval_run.signals),
             )
-            # Not every chat model exposes tool calling, and `auto` is the default
-            # — so a model without it would otherwise turn an empty leg from a
-            # disappointing answer into a failed request. Checked as a capability
-            # rather than caught as an exception, so the trace says what happened.
-            if use_loop and not hasattr(llm, "bind_tools"):
-                tracer.record("agent_loop_unavailable", NAME, {
-                    "reason": "model_does_not_support_tool_calling",
-                })
-                use_loop = False
-            if use_loop:
-                proposal, response = run_agentic_flight_agent(
-                    ctx, llm, tracer=_InnerTracer(tracer)
-                )
-                # The loop may have searched more than once, so the screening
-                # trace is computed over everything it saw — same rule as before
-                # (describe the search that produced the options), applied to a
-                # search that now has more than one step.
-                screening = screen_flights(ctx.resolved_request(), ctx.cache.all_rows)
-                notes.extend(note for note in ctx.notes if note not in notes)
-            else:
-                proposal, response = run_flight_agent(
-                    adapted.request, inventory, llm, tracer=_InnerTracer(tracer)
-                )
-                screening = screen_flights(adapted.request, inventory)
+            notes.extend(note for note in outcome.notes if note not in notes)
             finding = _build_finding(
-                proposal, response, travel_request.currency, notes, assumption
+                outcome.proposal, outcome.response, travel_request.currency, notes, assumption
             )
             log_payload(f"REQUEST {state['request_id']} | {NAME.upper()} RESPONSE", finding)
             tracer.record("agent_completed", NAME, {
-                "mode": "agentic" if use_loop else "grounded",
+                "mode": reasoner.name,
                 "source": provider.name,
                 "confidence": finding.confidence,
                 "option_count": len(finding.options),
                 "warning_count": len(finding.warnings),
-                "screened_count": len(screening),
-                "excluded_count": sum(1 for s in screening if not s.included),
+                "screened_count": len(outcome.screening),
+                "excluded_count": sum(1 for s in outcome.screening if not s.included),
                 **usage.as_dict(),
             })
             if tracer.database_path:
@@ -423,6 +572,12 @@ def create_node(llm, tracer, provider=None, config=None):
                     tracer.database_path, state["request_id"], NAME, "completed",
                     usage.as_dict(), finding,
                 )
+            eval_run.success(
+                budget_exhausted=bool(budget_exhausted),
+                counts=ctx.budget.as_counts(),
+                usage=usage.as_dict(),
+                options_returned=len(finding.options),
+            )
             outgoing = response_message(
                 request=incoming, sender=NAME, payload_type="AgentFinding", payload=finding
             )
@@ -434,6 +589,7 @@ def create_node(llm, tracer, provider=None, config=None):
                     tracer.database_path, state["request_id"], NAME, "failed",
                     usage.as_dict(), error_type=type(exc).__name__,
                 )
+            eval_run.error(exc, usage=usage.as_dict())
             raise
 
     return flight_node
