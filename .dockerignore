@@ -1,0 +1,33 @@
+# flaskapp/config.py calls load_dotenv() on .env, .env.local, .env.secrets and
+# crediential.env from the project root at import time. Any of them copied into
+# the image would bake real credentials into every layer and every registry
+# that stores it. Configuration reaches a container through its environment
+# only — a Kubernetes Secret in the cluster, `environment:` in compose.
+# tests/test_dockerignore.py fails if these lines go missing.
+.env
+.env.*
+crediential.env
+.ebv.secrets
+
+# Local state. instance/ holds the SQLite file (traveller rows) and traces.
+instance/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.deepeval/
+
+# Not needed at runtime, and each one is a cache bust on every edit.
+.git/
+.github/
+.claude/
+.semgrep/
+.zap/
+docs/
+tests/
+deploy/
+# Root-level explainer pages and notes only; flaskapp/templates/*.html is
+# matched by neither pattern, since these do not recurse.
+*.html
+*.txt
+!requirements.txt

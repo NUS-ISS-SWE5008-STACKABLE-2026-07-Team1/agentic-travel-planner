@@ -212,3 +212,33 @@ def test_an_injected_stub_serves_both_gates(built):
 
     assert stub.calls == 2
     assert built == {}, "an injected stub must not reach build_llm at all"
+
+
+# --- the timeout is a budget, not one attempt of several ----------------------
+
+
+def test_neither_gate_retries_so_its_timeout_is_the_whole_budget():
+    """`build_llm` defaults to two retries, which silently tripled both gates:
+    the documented 8s input budget became up to 24s and the 20s output budget
+    up to 60s. Under fail-closed that is how long a traveller waits before being
+    refused, so the gates opt out of retrying."""
+    settings = guardrail_settings(config())
+    assert settings["llm"]["max_retries"] == 0
+    assert settings["llm_output"]["max_retries"] == 0
+
+
+def test_planning_still_retries():
+    """Only the gates opt out. A plan already costs 30-90s, and re-sending a
+    transient 429 is worth more than failing the whole run."""
+    from flaskapp.travel_ai.llm import build_llm
+
+    planner = build_llm(provider="openai", api_key="test-key-not-real", model="m")
+    assert planner.max_retries == 2
+
+
+def test_build_llm_passes_the_gate_setting_through_to_the_client():
+    """The setting is only worth anything if it reaches the client."""
+    from flaskapp.travel_ai.llm import build_llm
+
+    gate = build_llm(**{**guardrail_settings(config())["llm_output"], "api_key": "test-key-not-real"})
+    assert gate.max_retries == 0

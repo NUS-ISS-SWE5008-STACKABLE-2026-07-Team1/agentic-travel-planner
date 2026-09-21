@@ -1,0 +1,41 @@
+# Non-secret settings shared by both roles. Mirrors render.yaml's envVars, so
+# the two deploy targets behave the same; where a value differs, it says why.
+# Credentials live in the `app-secrets` Secret, never here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  FLASK_DEBUG: "false"
+  LLM_PROVIDER: openai
+  LLM_MODEL: gpt-5
+
+  # DIFFERS FROM RENDER on purpose. Same Supabase project, separate schema, so
+  # test users, plans and audit events never mix with Render's
+  # `Travelplanner_schema`. Case-sensitive.
+  #
+  # The schema must EXIST before the first pod starts. connect() sets
+  # `search_path TO travelplanner_gke, public, extensions`, and Postgres skips a
+  # missing schema silently — every table would be created in `public` instead,
+  # with no error. Created by hand on 2026-09-15 (CREATE SCHEMA travelplanner_gke).
+  DATABASE_SCHEMA: travelplanner_gke
+
+  # Where the agents role lives, as the web role calls it AND as the agents
+  # role advertises itself in its Agent Card. The short Service name resolves
+  # because both roles share the namespace.
+  A2A_BASE_URL: http://agents:8000
+
+  # The public site is HTTPS-only (iap.yaml redirects HTTP), so the session
+  # cookie is marked Secure, as on Render. Browsers still send Secure cookies
+  # to http://localhost, so `kubectl port-forward` logins keep working;
+  # deploy/smoke_test.py relaxes the flag itself for localhost.
+  SESSION_COOKIE_SECURE: "true"
+
+  # --- L2 guardrails: same values and reasoning as render.yaml ------------
+  GUARDRAIL_LLM_ENABLED: "true"
+  GUARDRAIL_INPUT_LLM_MODEL: gpt-5-mini
+  GUARDRAIL_OUTPUT_LLM_MODEL: gpt-5
+  GUARDRAIL_LLM_TIMEOUT_SECONDS: "8"
+  GUARDRAIL_OUTPUT_LLM_TIMEOUT_SECONDS: "20"
+  GUARDRAIL_BLOCK_THRESHOLD: "0.7"
+  GUARDRAIL_FAIL_MODE: closed

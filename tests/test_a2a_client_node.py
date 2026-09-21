@@ -200,3 +200,39 @@ def test_the_switch_only_affects_the_flight_agent(tracer):
             continue
         node = _specialist_node(name, factory, _grounded_llm(), tracer, settings)
         assert node.__name__ != "remote_node", name
+
+
+def test_polling_backs_off_instead_of_hammering_the_agent(monkeypatch, tmp_path, tracer):
+    """A specialist takes 30-80s; a flat 50ms poll spent ~1,200 requests waiting
+    for it. One real plan on GKE put ~5,100 JSON-RPC calls through the agents
+    pod and its health probe timed out mid-plan. The first poll stays fast, so a
+    stubbed task that is already done still returns immediately.
+    """
+    import asyncio
+
+    from flaskapp.travel_ai import a2a_client
+
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(seconds):
+        slept.append(seconds)
+        await real_sleep(0)  # yield, without the wall-clock wait
+
+    monkeypatch.setattr(a2a_client.asyncio, "sleep", recording_sleep)
+
+    node = _remote_node(_server(tmp_path), tracer)
+    node(_state(COVERED))
+
+    assert slept, "the stub completes fast, but the loop still polls at least once"
+    assert slept[0] == a2a_client._POLL_INTERVAL_SECONDS, "first poll stays fast"
+    assert slept == sorted(slept), "intervals only grow"
+    assert max(slept) <= a2a_client._POLL_CEILING_SECONDS
+
+    # The schedule this produces over a realistic 80-second wait.
+    interval, elapsed, polls = a2a_client._POLL_INTERVAL_SECONDS, 0.0, 0
+    while elapsed < 80:
+        elapsed += interval
+        polls += 1
+        interval = min(interval * a2a_client._POLL_BACKOFF, a2a_client._POLL_CEILING_SECONDS)
+    assert polls < 100, f"{polls} polls for an 80s wait is still hammering"

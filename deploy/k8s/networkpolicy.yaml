@@ -1,0 +1,23 @@
+# Only the web role may call the agents role.
+#
+# This stands in for authentication the A2A endpoints do not have: nothing in
+# a2a_standard.py checks a token, and every call spends the provider key. It is
+# also what makes A2A_TRUST_CALLER_REQUEST_ID safe to enable, since a trusted
+# request id is a write key into another plan's audit trail.
+#
+# Enforced on Autopilot, which runs GKE Dataplane V2. Kubelet health probes are
+# unaffected.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agents-allow-web-only
+spec:
+  podSelector:
+    matchLabels: {app: agents}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: web}
+      ports:
+        - {protocol: TCP, port: 8000}

@@ -1,0 +1,93 @@
+# The web role: Flask site, REST API, job manager and orchestrator synthesis.
+# All four specialists are reached over A2A at the `agents` Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels: {app: web}
+spec:
+  # ONE, and not a tuning choice. flaskapp/travel_ai/jobs.py keeps job state
+  # in module-level dicts, so a second replica answers GET .../status with 404
+  # for plans running in its sibling (ADR-0005). Raise this only after job
+  # state moves into the planning_jobs table.
+  replicas: 1
+  # Recreate for the same reason: a rolling update briefly runs old and new
+  # side by side, which is exactly the two-replica case above. A deploy
+  # therefore interrupts in-flight plans — true on Render today as well.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+      # Eviction protection is pdb.yaml, deliberately NOT the
+      # `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation.
+      # On Autopilot that annotation makes an extended-duration pod: it raised
+      # the CPU request to 500m and required a dedicated node, whose creation
+      # failed on the trial's SSD_TOTAL_GB quota and left both pods Pending
+      # (2026-09-17). A PodDisruptionBudget stops the same scale-down
+      # evictions without either cost.
+    spec:
+      # A plan takes 30-90s. Give a running one the chance to finish before
+      # the container is killed on deploy or node maintenance.
+      terminationGracePeriodSeconds: 150
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: web
+          image: travel-planner
+          ports:
+            - {name: http, containerPort: 8000}
+          envFrom:
+            - configMapRef: {name: app-config}
+            - secretRef: {name: app-secrets}
+          env:
+            - {name: A2A_INTERNAL_ENABLED, value: "true"}
+          # Measured locally: ~150 MiB after a plan. Autopilot bills requests,
+          # so these are sized to the measurement with headroom, not guessed.
+          # If Autopilot rewrites the limit to equal the request, that is its
+          # policy for this cluster version; watch for OOMKilled restarts.
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          # Import of langchain, the seed inventory and schema creation make
+          # startup slow; this holds off liveness until the first success.
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 36
+          # No dependencies: restarting cannot fix a database outage.
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Checks the database. GKE's load balancer derives its own health
+          # check from this probe, so a DB outage takes the pod out of rotation
+          # instead of serving 500s.
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  labels: {app: web}
+  annotations:
+    # Container-native load balancing straight to the pod, and the IAP /
+    # health-check / timeout settings in iap.yaml.
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "web"}'
+spec:
+  type: ClusterIP
+  selector: {app: web}
+  ports:
+    - {name: http, port: 80, targetPort: http}

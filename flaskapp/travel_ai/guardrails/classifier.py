@@ -243,15 +243,24 @@ def guardrail_settings(config: Mapping[str, Any]) -> dict[str, Any]:
         shared_model = config.get("GUARDRAIL_LLM_MODEL") or llm_settings.get("model")
         base = {**llm_settings}
         base.pop("temperature", None)
+        # `max_retries=0` on both gates, so the configured timeout is the whole
+        # budget rather than one attempt of up to three. `build_llm` defaults to
+        # 2 retries, which turned the documented 8s input gate into 24s and the
+        # 20s output gate into 60s — and under fail-closed that wait is what a
+        # traveller sits through before being refused. A transient provider
+        # error now fails fast into `_failure_verdict`, which is the decision
+        # the fail mode exists to make.
         input_settings = {
             **base,
             "model": config.get("GUARDRAIL_INPUT_LLM_MODEL") or shared_model,
             "timeout": float(config.get("GUARDRAIL_LLM_TIMEOUT_SECONDS", 8)),
+            "max_retries": 0,
         }
         output_settings = {
             **base,
             "model": config.get("GUARDRAIL_OUTPUT_LLM_MODEL") or shared_model,
             "timeout": float(config.get("GUARDRAIL_OUTPUT_LLM_TIMEOUT_SECONDS", 20)),
+            "max_retries": 0,
         }
     return {
         "llm": input_settings,

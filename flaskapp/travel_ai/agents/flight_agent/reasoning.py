@@ -40,7 +40,6 @@ treated exactly like an ungrounded one — retry, then fall back.
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
 
 from flaskapp.travel_ai.agents.flight_agent.domain import (
     acknowledgment_is_valid,
@@ -51,7 +50,6 @@ from flaskapp.travel_ai.agents.flight_agent.domain import (
 )
 from flaskapp.travel_ai.agents.flight_agent.guardrails import (
     screen_input_text,
-    screen_output_text,
     validate_grounded_explanation,
 )
 from flaskapp.travel_ai.agents.flight_agent.prompt import FLIGHT_AGENT_SYSTEM_PROMPT
@@ -62,24 +60,18 @@ from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightProposalRequest,
 )
 
-FALLBACK_RATIONALE = (
-    "Automated explanation unavailable this round; showing ranked candidates "
-    "without narrative rationale. All listed options are still fully grounded "
-    "in real inventory."
+# The fail-closed model call itself lives in `structured_call.py`, shared with
+# the tool loop so the retry-and-fall-back policy exists once. Re-exported here
+# because this is where callers have always found these names.
+from flaskapp.travel_ai.agents.flight_agent.structured_call import (  # noqa: F401
+    FALLBACK_RATIONALE,
+    MAX_ATTEMPTS,
+    ChatModel,
+    StructuredLLM,
+    blocked_input_response as _blocked_input_response,
+    fallback_response as _fallback_response,
+    invoke_structured,
 )
-MAX_ATTEMPTS = 2
-
-
-class StructuredLLM(Protocol):
-    """The narrow shape agent.py actually needs from a LangChain chat model
-    after `.with_structured_output(FlightAgentResponse, ...)` — lets tests
-    inject a stub without importing langchain_openai at all."""
-
-    def invoke(self, messages: list[Any]) -> FlightAgentResponse: ...
-
-
-class ChatModel(Protocol):
-    def with_structured_output(self, schema: type, method: str) -> StructuredLLM: ...
 
 
 def _compact(value: object) -> str:
@@ -112,36 +104,6 @@ def _build_messages(
     ]
 
 
-def _fallback_response(proposal: FlightProposal) -> FlightAgentResponse:
-    return FlightAgentResponse(
-        rationale=FALLBACK_RATIONALE,
-        highlighted_flight_ids=[c.flight_id for c in proposal.candidates],
-        confidence=0.0,
-    )
-
-
-def _blocked_input_response(proposal: FlightProposal, screen_result: dict) -> FlightAgentResponse:
-    reasons = []
-    if screen_result["injection"]:
-        reasons.append("instruction-like content")
-    if screen_result["high_bias"]:
-        reasons.append("high-risk biased/stereotyping content")
-    if screen_result["toxicity"]:
-        reasons.append("toxic content")
-    reason_text = ", ".join(reasons) or "an input policy violation"
-    return FlightAgentResponse(
-        rationale=(
-            "Traveller-stated preferences were not sent to the reasoning model because "
-            f"input screening flagged {reason_text}. Showing ranked candidates without "
-            "narrative rationale; a human should review the original request."
-        ),
-        highlighted_flight_ids=[c.flight_id for c in proposal.candidates],
-        escalate=True,
-        escalation_reason=f"Input screening blocked this request: {reason_text}.",
-        confidence=0.0,
-    )
-
-
 def _reason_over_proposal(
     request: FlightProposalRequest,
     proposal: FlightProposal,
@@ -150,37 +112,23 @@ def _reason_over_proposal(
     llm: ChatModel,
     tracer,
 ) -> FlightAgentResponse:
-    """The retry-then-fallback loop, isolated so option B can call it a
-    second time (post-acknowledgment) without duplicating the logic."""
+    """One grounded model pass, isolated so option B can call it a second time
+    (post-acknowledgment) without duplicating the logic.
+
+    Grounding is membership in *this* proposal: the single-shot path searched
+    once, so a flight outside `proposal.candidates` came from nowhere. The tool
+    loop widens that set to everything it ever saw — see `structured_call.py`.
+    """
     structured_llm = llm.with_structured_output(FlightAgentResponse, method="json_schema")
-    messages = _build_messages(request, proposal, screening, gaps)
-
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            response = structured_llm.invoke(messages)
-        except Exception as exc:  # noqa: BLE001 - any LLM failure falls back, never propagates
-            if tracer is not None:
-                tracer.record("agent_llm_attempt_failed", "flight_agent", {
-                    "attempt": attempt, "error_type": type(exc).__name__,
-                })
-            continue
-
-        offending = validate_grounded_explanation(response.highlighted_flight_ids, proposal)
-        output_screen = screen_output_text(response.rationale)
-        if not offending and not output_screen["flagged"]:
-            return response
-
-        if tracer is not None:
-            details: dict[str, Any] = {"attempt": attempt}
-            if offending:
-                details["ungrounded_flight_ids"] = offending
-            if output_screen["flagged"]:
-                details["output_policy_violation"] = {
-                    "bias": output_screen["bias"], "toxicity": output_screen["toxicity"],
-                }
-            tracer.record("agent_llm_attempt_failed", "flight_agent", details)
-
-    return _fallback_response(proposal)
+    return invoke_structured(
+        structured_llm,
+        _build_messages(request, proposal, screening, gaps),
+        ground=lambda response: validate_grounded_explanation(
+            response.highlighted_flight_ids, proposal
+        ),
+        proposal=proposal,
+        tracer=tracer,
+    )
 
 
 def run_flight_agent(

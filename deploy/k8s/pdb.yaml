@@ -1,0 +1,30 @@
+# Stop the cluster autoscaler evicting either single-replica pod.
+#
+# Autopilot consolidates nodes to save cost, and it evicted both pods four times
+# in their first day (cluster-autoscaler-visibility log, 2026-09-16 12:04, 13:30,
+# 15:31, 16:38). Each eviction kills every plan in flight, empties jobs.py's
+# in-memory job dicts (ADR-0005) and the agents role's InMemoryTaskStore.
+#
+# With one replica, minAvailable: 1 means no voluntary eviction is allowed, so
+# scale-down skips the node these pods are on. GKE node upgrades respect a PDB
+# for up to an hour and then proceed anyway — a planned upgrade still restarts
+# the pods, but routine bin-packing no longer does.
+#
+# Side effect to accept: the node hosting them cannot be removed for savings.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: web}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: agents
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: agents}
