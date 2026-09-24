@@ -12,7 +12,10 @@ import pytest
 from flaskapp.travel_ai.a2a import request_message
 from flaskapp.travel_ai.agents.risk_advisory_agent.agent import ESTIMATE_WARNING, NAME, create_node
 from flaskapp.travel_ai.agents.risk_advisory_agent.providers.base import RiskFetchResult
-from flaskapp.travel_ai.agents.risk_advisory_agent.schemas import RiskAgentResponse
+from flaskapp.travel_ai.agents.risk_advisory_agent.schemas import (
+    RiskAgentResponse,
+    RiskProposalRequest,
+)
 from flaskapp.travel_ai.schemas import AgentFinding, TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
 
@@ -93,6 +96,25 @@ def test_grounded_path_produces_options_from_the_providers_facts(tracer):
     assert finding.summary == "Low overall risk."
     assert len(finding.options) == 1
     assert "category: crime_safety" in finding.options[0].selection_factors
+
+
+def test_the_grounded_path_needs_no_origin(tracer):
+    """A hotel-only stay collects no departure country, and still gets a
+    grounded advisory.
+
+    This is the guard on the claim that once justified skipping the agent for
+    that scope entirely. It asserts the contract, not just the outcome: the
+    request `domain.py` is given has no origin field to read, so nothing here
+    can quietly start depending on one without this failing.
+    """
+    assert "origin" not in RiskProposalRequest.model_fields
+
+    stay = {**TRIP, "origin": None, "plan_scope": "hotel"}
+    finding = create_node(_llm(), tracer, provider=FakeProvider())(_state(stay))["findings"][0]
+
+    assert finding.summary == "Low overall risk."
+    assert finding.options, "grounded items, from a request carrying no origin"
+    assert ESTIMATE_WARNING not in finding.warnings, "grounded, not the fallback"
 
 
 def test_provider_fetched_exactly_once(tracer):
