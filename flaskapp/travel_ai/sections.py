@@ -218,12 +218,17 @@ def _options_for(finding: AgentFinding, agent: str, category: str | None) -> lis
     return [option for option in finding.options if option.category == category]
 
 
-def _displayed(option: Option) -> Option:
+def with_display(option: Option) -> Option:
     """A copy of the option carrying its formatted schedule.
 
     A copy, because the same `Option` objects are handed to the traveller AND
     stored as `agent_findings`. Mutating one to add a display string would put a
     rendering concern into the record of what a specialist actually found.
+
+    Public because a tier column is no longer the only place an option reaches
+    the traveller: `recommendation.py` hands the same objects to the same
+    `optionCard`, and an option that skips this renders its raw name — flight
+    id, embedded date and all — instead of a card.
     """
     if option.schedule is None:
         return option
@@ -264,7 +269,7 @@ def plan_packages(findings: list[AgentFinding]) -> list[PlanPackage]:
     packages: list[PlanPackage] = []
     for label in (*TIER_LABELS, UNPRICED_LABEL):
         groups = [
-            PlanGroup(title=title, icon=icon, options=[_displayed(o) for o in tier.options])
+            PlanGroup(title=title, icon=icon, options=[with_display(o) for o in tier.options])
             for title, icon, tiers in banded
             for tier in tiers
             if tier.label == label and tier.options

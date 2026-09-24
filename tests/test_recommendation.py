@@ -55,6 +55,42 @@ def names(rec):
     return [item.name for item in rec.items]
 
 
+def test_recommended_flights_carry_the_formatted_schedule():
+    """The recommendation renders through the same `optionCard` as a tier
+    column, so it needs the same formatted schedule.
+
+    Without it the card falls back to the raw option name — "JL4001-20261010
+    (Outbound)" — which shows an unformatted date, in the one panel a traveller
+    reads first.
+    """
+    rec = recommend_package(request(budget=3000), findings(
+        flights=[flight("JL4001-20261010", 800, "OUTBOUND"),
+                 flight("JL4002-20261016", 900, "RETURN")],
+        hotels=[hotel("Shinjuku", 1000)],
+    ))
+
+    flights = [item for item in rec.items if item.category == "flight"]
+    assert flights, "a recommendation with flights in it"
+    for item in flights:
+        assert item.schedule_display, f"{item.name} reached the card unformatted"
+        assert item.schedule_display["date"] == "10 Oct 2026"
+    # The embedded -YYYYMMDD is stripped from the reference, because the card
+    # shows that date on its own line.
+    assert {item.schedule_display["reference"] for item in flights} == {"JL4001", "JL4002"}
+
+
+def test_a_hotel_without_a_schedule_is_left_alone():
+    """Only flights carry one; formatting must not invent a display for a
+    hotel, which would render an empty date line on its card."""
+    rec = recommend_package(request(budget=3000), findings(
+        flights=[flight("out", 800, "OUTBOUND"), flight("back", 900, "RETURN")],
+        hotels=[hotel("Shinjuku", 1000)],
+    ))
+
+    hotels = [item for item in rec.items if item.category == "hotel"]
+    assert hotels and all(item.schedule_display is None for item in hotels)
+
+
 def test_it_picks_the_combination_closest_under_budget():
     rec = recommend_package(request(budget=3000), findings(
         flights=[flight("out-cheap", 800, "OUTBOUND"), flight("out-dear", 1200, "OUTBOUND"),

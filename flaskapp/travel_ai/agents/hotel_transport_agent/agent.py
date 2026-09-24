@@ -36,7 +36,7 @@ from flaskapp.database import save_agent_run
 from flaskapp.travel_ai.a2a import response_message
 from flaskapp.travel_ai.agents.base import make_specialist_node
 from flaskapp.travel_ai.agents.hotel_transport_agent.adapter import to_hotel_request
-from flaskapp.travel_ai.agents.hotel_transport_agent.domain import screen_hotels
+from flaskapp.travel_ai.agents.hotel_transport_agent.domain import screen_hotels, transport_units
 from flaskapp.travel_ai.agents.hotel_transport_agent.guardrails import (
     validate_grounded_explanation,
 )
@@ -224,8 +224,20 @@ def transport_for_city(
     ]
 
 
-def _transport_to_option(option: TransportOption, currency: str) -> Option:
-    """Transport option as a shared-contract Option."""
+def _transport_to_option(
+    option: TransportOption, currency: str, travellers: int = 1
+) -> Option:
+    """Transport option as a shared-contract Option.
+
+    The seed cost is for ONE unit — one car, or one ticket — so it is scaled by
+    what the party actually needs before it reaches the traveller or
+    `recommend_package`. See `domain.transport_units` for which mode is which.
+    """
+    units = transport_units(option.mode, travellers)
+    scaled_cost = (
+        round(option.estimated_cost * units, 2)
+        if option.estimated_cost is not None else None
+    )
     desc_parts = [f"{option.mode} — {option.name}"]
     if option.frequency:
         desc_parts.append(f"{option.frequency}")
@@ -237,15 +249,21 @@ def _transport_to_option(option: TransportOption, currency: str) -> Option:
     # use that rather than the request currency so the figure matches
     # the label.
     cost_currency = option.currency or currency
-    if option.estimated_cost:
-        desc_parts.append(f"~{option.estimated_cost:.2f} {cost_currency}")
+    if scaled_cost:
+        # Say what the multiplier was, so a traveller can check the figure
+        # rather than wonder why a 12.00 train ticket reads as 60.00.
+        unit_note = (
+            "" if units == 1
+            else f" ({units} x {option.estimated_cost:.2f})"
+        )
+        desc_parts.append(f"~{scaled_cost:.2f} {cost_currency}{unit_note}")
 
     return Option(
         category="transport",
         airport=option.airport,
         name=option.name,
         description=", ".join(desc_parts),
-        estimated_cost=option.estimated_cost,
+        estimated_cost=scaled_cost,
         currency=cost_currency,
         assumptions=option.assumptions,
         limitations=option.limitations,
@@ -354,7 +372,7 @@ def create_node(llm, tracer, provider=None, config=None):
                 _hotel_candidate_to_option(c, assumption)
                 for c in proposal.candidates
             ] + [
-                _transport_to_option(t, travel_request.currency)
+                _transport_to_option(t, travel_request.currency, travel_request.travellers)
                 for t in ranked_transport
             ]
 
