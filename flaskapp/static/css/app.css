@@ -340,3 +340,11 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
 }
 .plan-recommendation-items { display: flex; flex-direction: column; gap: .75rem; }
 .plan-recommendation-note { font-size: .9rem; color: #6c757d; margin: .5rem 0 0; }
+
+/* Password rules checklist (templates/_password_rules.html). Plain text without
+   JavaScript; password-rules.js adds .is-live and ticks items off as they are met. */
+.password-rules li { margin: .1rem 0; }
+.password-rules.is-live li { position: relative; padding-left: 1.4em; }
+.password-rules.is-live li::before { content: "○"; position: absolute; left: 0; color: #6c757d; }
+.password-rules.is-live li.is-met { color: #146c43; }
+.password-rules.is-live li.is-met::before { content: "✓"; color: #198754; font-weight: 700; }

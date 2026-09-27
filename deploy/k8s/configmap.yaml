@@ -31,6 +31,15 @@ data:
   # deploy/smoke_test.py relaxes the flag itself for localhost.
   SESSION_COOKIE_SECURE: "true"
 
+  # EMPTY ON PURPOSE. `ADMIN_EMAIL` is the legacy single-admin setting, and
+  # config.py falls back to LOGIN_EMAIL when it is unset — which, before
+  # 2026-09-27, defaulted to the demo account, whose password is published in
+  # the README. That made the demo account an administrator on GKE. An empty
+  # value switches the fallback off under both the old and the new config.py.
+  # Administrators come from ADMIN_EMAILS (in the `app-secrets` Secret) and the
+  # `users.is_admin` column instead.
+  ADMIN_EMAIL: ""
+
   # --- L2 guardrails: same values and reasoning as render.yaml ------------
   GUARDRAIL_LLM_ENABLED: "true"
   GUARDRAIL_INPUT_LLM_MODEL: gpt-5-mini
