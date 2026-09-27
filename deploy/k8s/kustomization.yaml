@@ -30,5 +30,11 @@ resources:
   # BOTH out to go back to private port-forward access (option A).
   - iap.yaml
   - ingress.yaml
-  # What the GitHub Actions deploy may do in this namespace, and nothing more.
-  - deployer-rbac.yaml
+  # The cluster refuses a Deployment whose image is not a real, tagged image
+  # from our registry — so a placeholder applied by hand fails loudly instead
+  # of stopping the running pod. See the file for why.
+  - image-policy.yaml
+  # NOT here: deployer-rbac.yaml. Its subject is a placeholder, so applying it
+  # with this bundle would revoke the pipeline's permission. It is a one-time
+  # bootstrap step; the command is at the top of that file.
+  # tests/test_k8s_manifests.py fails CI if any placeholder enters this list.
