@@ -16,7 +16,7 @@ left out — the component table at the end has a blank column for them.
 ```mermaid
 graph TB
     subgraph USERS["People"]
-        DEV["Developer browser<br/>5 allow-listed Google accounts"]
+        DEV["Developer browser<br/>6 allow-listed Google accounts"]
     end
 
     subgraph GOOGLE["Google Cloud — configured project"]
@@ -112,7 +112,7 @@ graph TB
 For slides, where mermaid is inconvenient and icons go on top.
 
 ```
-                         Developer browser  (5 allow-listed Google accounts)
+                         Developer browser  (6 allow-listed Google accounts)
                                      |
                                      |  HTTPS 443
                                      v

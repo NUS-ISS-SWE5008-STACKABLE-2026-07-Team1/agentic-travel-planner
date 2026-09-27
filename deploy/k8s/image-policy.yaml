@@ -1,0 +1,48 @@
+# The cluster refuses any Deployment in `travel-planner` whose image is not a
+# real, tagged image from our Artifact Registry repository.
+#
+# Why: deploy/k8s/app/kustomization.yaml names the image with a placeholder
+# (REPLACE_WITH_ARTIFACT_REGISTRY_IMAGE) that only the pipeline fills in.
+# Kubernetes accepts any image name, so applying that directory by hand would
+# succeed, stop the running pod (the Deployments use Recreate) and leave a new
+# one that can never start: an outage. With this policy the API server rejects
+# the change before any pod is touched, and the running version keeps serving.
+#
+# It checks the name only. A real-looking tag that does not exist still passes;
+# the pipeline's health checks and automatic rollback cover that case, which is
+# why deploys go through the pipeline.
+#
+# No project-specific identity: the pattern matches any project's registry.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: travel-planner-real-images-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+  validations:
+    - expression: >-
+        object.spec.template.spec.containers.all(c,
+          !c.image.contains('REPLACE_WITH_') &&
+          c.image.matches('^[a-z0-9-]+-docker\\.pkg\\.dev/[^/]+/travel-planner/app:[A-Za-z0-9._-]+$'))
+      message: >-
+        Refused: the image must be a tagged image from the travel-planner
+        Artifact Registry repository. A REPLACE_WITH_ placeholder means
+        deploy/k8s/app was applied by hand; deploys go through the pipeline.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: travel-planner-real-images-only
+spec:
+  policyName: travel-planner-real-images-only
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: travel-planner
