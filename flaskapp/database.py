@@ -88,7 +88,11 @@ CREATE TABLE IF NOT EXISTS agent_findings (
     agent TEXT NOT NULL,
     summary TEXT NOT NULL,
     warnings_json TEXT NOT NULL DEFAULT '[]',
-    confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1)
+    confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    -- When save_plan() stored this row, which is when the plan was saved, not
+    -- when the agent finished: that is agent_runs.completed_at. Nullable with
+    -- no default so a migrated database matches a fresh one; see initialize().
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS options (
@@ -109,7 +113,13 @@ CREATE TABLE IF NOT EXISTS options (
     -- Which airport an option lands at or serves. Defaulted rather than
     -- nullable: rows written before packages existed served no airport, and ''
     -- says that without a caller needing to handle None.
-    airport TEXT NOT NULL DEFAULT ''
+    airport TEXT NOT NULL DEFAULT '',
+    -- Copied from the owning finding so "every option for this request" is one
+    -- filter instead of a join. Nullable because ADD COLUMN cannot add NOT NULL
+    -- to a table with rows; initialize() backfills it from agent_findings.
+    request_id TEXT REFERENCES travel_requests(id) ON DELETE CASCADE,
+    -- Same meaning and reasoning as agent_findings.created_at.
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -315,7 +325,11 @@ CREATE TABLE IF NOT EXISTS agent_findings (
     agent TEXT NOT NULL,
     summary TEXT NOT NULL,
     warnings_json TEXT NOT NULL DEFAULT '[]',
-    confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1)
+    confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    -- When save_plan() stored this row, which is when the plan was saved, not
+    -- when the agent finished: that is agent_runs.completed_at. Nullable with
+    -- no default so a migrated database matches a fresh one; see initialize().
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS options (
@@ -336,7 +350,13 @@ CREATE TABLE IF NOT EXISTS options (
     -- Which airport an option lands at or serves. Defaulted rather than
     -- nullable: rows written before packages existed served no airport, and ''
     -- says that without a caller needing to handle None.
-    airport TEXT NOT NULL DEFAULT ''
+    airport TEXT NOT NULL DEFAULT '',
+    -- Copied from the owning finding so "every option for this request" is one
+    -- filter instead of a join. Nullable because ADD COLUMN cannot add NOT NULL
+    -- to a table with rows; initialize() backfills it from agent_findings.
+    request_id TEXT REFERENCES travel_requests(id) ON DELETE CASCADE,
+    -- Same meaning and reasoning as agent_findings.created_at.
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -808,6 +828,56 @@ def _repoint_flight_eval_run_fk(connection) -> None:
     _rebuild_sqlite_table(connection, "flight_agent_eval_runs", repoint)
 
 
+def _add_trace_columns(connection, existing_columns) -> None:
+    """Add and backfill `options.request_id` and both `created_at` columns.
+
+    Every step is safe to repeat, because initialize() runs on every start.
+
+    The columns are added without a default. A "now" default on ADD COLUMN would
+    stamp every existing Postgres row with the deploy time, which is a false
+    fact, and SQLite rejects a non-constant default there anyway.
+
+    The backfills are exact, not estimates. `options.request_id` comes from the
+    option's own finding. `created_at` comes from `travel_plans.created_at`
+    because save_plan() is the only writer of all three tables and inserts the
+    plan, its findings and its options in one pass. A row with no plan row
+    stays NULL rather than being given a guessed time.
+
+    The index is created here and not in the schema constants: those run first,
+    and on an existing database the column would not exist yet.
+    """
+    option_columns = existing_columns("options")
+    if "request_id" not in option_columns:
+        connection.execute(
+            "ALTER TABLE options ADD COLUMN request_id TEXT "
+            "REFERENCES travel_requests(id) ON DELETE CASCADE"
+        )
+    if "created_at" not in option_columns:
+        connection.execute("ALTER TABLE options ADD COLUMN created_at TEXT")
+    if "created_at" not in existing_columns("agent_findings"):
+        connection.execute("ALTER TABLE agent_findings ADD COLUMN created_at TEXT")
+
+    connection.execute(
+        """UPDATE options SET request_id = (
+               SELECT f.request_id FROM agent_findings f WHERE f.id = options.finding_id
+           ) WHERE request_id IS NULL"""
+    )
+    connection.execute(
+        """UPDATE agent_findings SET created_at = (
+               SELECT p.created_at FROM travel_plans p
+               WHERE p.request_id = agent_findings.request_id
+           ) WHERE created_at IS NULL"""
+    )
+    connection.execute(
+        """UPDATE options SET created_at = (
+               SELECT f.created_at FROM agent_findings f WHERE f.id = options.finding_id
+           ) WHERE created_at IS NULL"""
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_options_request ON options(request_id)"
+    )
+
+
 def initialize(target: Path | str) -> None:
     with connect(target) as connection:
         connection.executescript(
@@ -854,6 +924,7 @@ def initialize(target: Path | str) -> None:
             connection.execute(
                 "ALTER TABLE options ADD COLUMN airport TEXT NOT NULL DEFAULT ''"
             )
+        _add_trace_columns(connection, existing_columns)
         # `origin` was NOT NULL until hotel-only scope existed: a stay has no
         # departure country. Postgres can relax the constraint in place;
         # SQLite cannot, so the table is rebuilt with its rows copied across.
@@ -1014,7 +1085,8 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
         )
         for finding in response.agent_findings:
             finding_id = db.insert_returning_id(
-                "INSERT INTO agent_findings (request_id, agent, summary, warnings_json, confidence) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO agent_findings (request_id, agent, summary, warnings_json, confidence, created_at) "
+                "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
                 (request_id, finding.agent, finding.summary, _json(finding.warnings), finding.confidence),
             )
             for option in finding.options:
@@ -1022,13 +1094,13 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
                     """INSERT INTO options
                        (finding_id, name, description, estimated_cost, currency, source_urls_json,
                         assumptions_json, limitations_json, selection_factors_json, category,
-                        airport)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        airport, request_id, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
                     (finding_id, option.name, option.description, option.estimated_cost,
                      option.currency, _json(option.source_urls), _json(option.assumptions),
                      _json(option.limitations), _json(option.selection_factors),
                      getattr(option, "category", None),
-                     getattr(option, "airport", "") or ""),
+                     getattr(option, "airport", "") or "", request_id),
                 )
         for message in messages:
             item = message.model_dump(mode="json") if hasattr(message, "model_dump") else message
