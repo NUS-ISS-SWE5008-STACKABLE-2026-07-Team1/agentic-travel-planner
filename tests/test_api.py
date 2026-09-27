@@ -31,6 +31,11 @@ class TestConfig(Config):
     DATABASE = _TEST_DATABASE
     LOGIN_EMAIL = TEST_LOGIN_EMAIL
     LOGIN_PASSWORD_HASH = generate_password_hash(TEST_LOGIN_PASSWORD)
+    # Config no longer supplies a bundled login/admin identity. Make the
+    # generated test account an explicit administrator so navigation and
+    # authorization tests exercise the same configured-admin path as runtime.
+    ADMIN_EMAIL = TEST_LOGIN_EMAIL
+    ADMIN_EMAILS = (TEST_LOGIN_EMAIL,)
     LLM_PROVIDER = "auto"
     AZURE_OPENAI_API_KEY = None
     AZURE_OPENAI_ENDPOINT = None
