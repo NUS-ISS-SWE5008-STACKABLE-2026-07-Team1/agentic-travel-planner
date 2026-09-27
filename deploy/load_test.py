@@ -24,6 +24,7 @@ Each plan gets its own signed-in session, as separate travellers would.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import statistics
 import sys
@@ -163,10 +164,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base-url", default="http://127.0.0.1:5000")
     parser.add_argument("--plans", type=int, default=2)
-    parser.add_argument("--email", default="demo@example.com")
-    parser.add_argument("--password", default="TravelDemo2026!")
+    parser.add_argument("--email", default=os.getenv("E2E_LOGIN_EMAIL"))
+    parser.add_argument("--password", default=os.getenv("E2E_LOGIN_PASSWORD"))
     parser.add_argument("--timeout", type=int, default=600, help="per plan, seconds")
     args = parser.parse_args()
+    if not args.email or not args.password:
+        parser.error("pass --email/--password or set E2E_LOGIN_EMAIL/E2E_LOGIN_PASSWORD")
     base = args.base_url.rstrip("/")
 
     print(f"submitting {args.plans} plans at once against {base}\n")

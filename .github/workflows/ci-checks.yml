@@ -25,7 +25,8 @@ on:
   pull_request:
     branches: [main, release]
 
-  # The two shared branches on push as well, and ONLY those two.
+  # Scan every pushed branch. A workflow can only run after that branch has
+  # received this file, so feature branches should regularly merge release.
   #
   # This is a tripwire, not a gate, and the distinction matters. The intended
   # control was branch protection requiring the four checks, which would make a
@@ -45,7 +46,7 @@ on:
   # Known cost, so nobody is surprised by it: merging a pull request is itself
   # a push to the base branch, so every merge runs the pipeline a second time.
   push:
-    branches: [main, release]
+    branches: ["**"]
 
   # Manual runs, so this file can be exercised without opening a PR.
   workflow_dispatch:
@@ -97,6 +98,15 @@ jobs:
         run: >
           gitleaks detect --no-git --source . --redact
           --report-format sarif --report-path gitleaks-tree.sarif
+
+      # BLOCKING: the known credential was removed in this baseline commit.
+      # Scan every change after that point so a newly committed credential can
+      # never be hidden by the older, already-rotated historical finding.
+      - name: Gitleaks (commits after credential-removal baseline)
+        run: >
+          gitleaks detect --source . --redact
+          --log-opts="61ce56ee38deaf37308e74283724aef1c7a09373..HEAD"
+          --report-format sarif --report-path gitleaks-new-history.sarif
 
       # ADVISORY by design, permanently. History contains the Azure key from
       # c309d7a and we decided not to rewrite history. Rotating the key was the

@@ -880,6 +880,8 @@ def initialize(target: Path | str) -> None:
 
 
 def seed_login_user(path: Path | str, email: str, password_hash: str) -> None:
+    if not email or not password_hash:
+        return
     with connect(path) as connection:
         connection.execute(
             "INSERT INTO users (email, password_hash) VALUES (?, ?) ON CONFLICT DO NOTHING",

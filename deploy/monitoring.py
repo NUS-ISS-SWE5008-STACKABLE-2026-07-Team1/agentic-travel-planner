@@ -22,17 +22,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
-PROJECT = "project-931fd286-f1d2-4105-9e5"
-PROJECT_NUMBER = "1040773574528"
-BILLING_ACCOUNT = "01142B-B4310B-4AA253"
-CLUSTER = "travel-planner"
-NAMESPACE = "travel-planner"
+PROJECT = os.getenv("GCP_PROJECT_ID", "").strip()
+PROJECT_NUMBER = os.getenv("GCP_PROJECT_NUMBER", "").strip()
+BILLING_ACCOUNT = os.getenv("GCP_BILLING_ACCOUNT", "").strip()
+CLUSTER = os.getenv("GKE_CLUSTER_NAME", "travel-planner").strip()
+NAMESPACE = os.getenv("GKE_NAMESPACE", "travel-planner").strip()
 LABELS = {"app": "travel-planner"}
 BUDGET_NAME = "travel-planner GKE test"
 
@@ -190,6 +191,13 @@ def main() -> None:
     parser.add_argument("--email", required=True, help="where alerts are sent")
     parser.add_argument("--budget", type=int, default=100, help="in the billing account's currency")
     args = parser.parse_args()
+    missing = [name for name, value in (
+        ("GCP_PROJECT_ID", PROJECT),
+        ("GCP_PROJECT_NUMBER", PROJECT_NUMBER),
+        ("GCP_BILLING_ACCOUNT", BILLING_ACCOUNT),
+    ) if not value]
+    if missing:
+        parser.error("missing environment variables: " + ", ".join(missing))
     api = Api()
     channel = ensure_channel(api, args.email)
     ensure_policies(api, channel)

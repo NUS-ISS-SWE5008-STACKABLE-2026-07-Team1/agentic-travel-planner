@@ -39,7 +39,9 @@ metadata:
   name: github-deployer
 subjects:
   - kind: User
-    name: github-deployer@project-931fd286-f1d2-4105-9e5.iam.gserviceaccount.com
+    # Replace during environment provisioning with the GitHub deployer's
+    # service-account principal. Do not commit a project-specific identity.
+    name: REPLACE_WITH_GCP_DEPLOY_SERVICE_ACCOUNT
     apiGroup: rbac.authorization.k8s.io
 roleRef:
   kind: Role

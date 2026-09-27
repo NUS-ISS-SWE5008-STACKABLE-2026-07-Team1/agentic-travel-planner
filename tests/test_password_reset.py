@@ -1,7 +1,7 @@
 """Direct password recovery without email delivery or database schema changes."""
 
 from flaskapp import create_app
-from tests.test_api import TestConfig
+from tests.test_api import TEST_LOGIN_EMAIL, TEST_LOGIN_PASSWORD, TestConfig
 
 
 def reset_app(tmp_path):
@@ -37,7 +37,7 @@ def test_registered_user_can_reset_and_sign_in(tmp_path):
     response = client.post(
         "/forgot-password",
         data={
-            "email": "demo@example.com",
+            "email": TEST_LOGIN_EMAIL,
             "password": "A-NewJourney2026!",
             "confirm_password": "A-NewJourney2026!",
         },
@@ -46,11 +46,11 @@ def test_registered_user_can_reset_and_sign_in(tmp_path):
     assert b"its password has been reset" in response.data
 
     old_login = client.post(
-        "/", data={"email": "demo@example.com", "password": "TravelDemo2026!"}
+        "/", data={"email": TEST_LOGIN_EMAIL, "password": TEST_LOGIN_PASSWORD}
     )
     assert old_login.status_code == 200
     new_login = client.post(
-        "/", data={"email": "demo@example.com", "password": "A-NewJourney2026!"}
+        "/", data={"email": TEST_LOGIN_EMAIL, "password": "A-NewJourney2026!"}
     )
     assert new_login.status_code == 302
 
@@ -76,7 +76,7 @@ def test_reset_form_enforces_strong_matching_passwords(tmp_path):
     response = app.test_client().post(
         "/forgot-password",
         data={
-            "email": "demo@example.com",
+            "email": TEST_LOGIN_EMAIL,
             "password": "weak",
             "confirm_password": "different",
         },

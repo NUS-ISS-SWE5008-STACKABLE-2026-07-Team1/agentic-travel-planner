@@ -1,5 +1,7 @@
 import tempfile
+import secrets
 from pathlib import Path
+from werkzeug.security import generate_password_hash
 
 from flaskapp import create_app
 from flaskapp.config import Config
@@ -11,6 +13,8 @@ from flaskapp.database import connect, get_admin_activity, get_platform_dashboar
 # inherit that DSN and every test using it would write schema DDL and a demo-user
 # seed to the live Supabase database instead of a throwaway SQLite file.
 _TEST_DATABASE = Path(tempfile.mkdtemp(prefix="travel_planner_test_api_")) / "test.sqlite3"
+TEST_LOGIN_EMAIL = "api-test@example.com"
+TEST_LOGIN_PASSWORD = secrets.token_urlsafe(24)
 
 
 class TestConfig(Config):
@@ -25,12 +29,8 @@ class TestConfig(Config):
     TESTING = True
     WTF_CSRF_ENABLED = False
     DATABASE = _TEST_DATABASE
-    LOGIN_EMAIL = "demo@example.com"
-    LOGIN_PASSWORD_HASH = (
-        "scrypt:32768:8:1$99T3BfVwYO8CnqNC$"
-        "c85a15f2f167616564085724c37c79fc2ad151e306e5ec0414759a0f8a6eba28"
-        "a179494a8d39bfd838986ebbb2daa4d0586da0bee718d299fce4a89a7de45a95"
-    )
+    LOGIN_EMAIL = TEST_LOGIN_EMAIL
+    LOGIN_PASSWORD_HASH = generate_password_hash(TEST_LOGIN_PASSWORD)
     LLM_PROVIDER = "auto"
     AZURE_OPENAI_API_KEY = None
     AZURE_OPENAI_ENDPOINT = None
@@ -64,7 +64,7 @@ def test_health_page():
 def test_valid_login_redirects_to_main():
     client = create_app(TestConfig).test_client()
     response = client.post("/", data={
-        "email": "demo@example.com", "password": "TravelDemo2026!",
+        "email": TEST_LOGIN_EMAIL, "password": TEST_LOGIN_PASSWORD,
     })
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/main")
@@ -95,7 +95,7 @@ def test_the_intake_form_offers_dependent_city_selects():
     import re
 
     client = create_app(TestConfig).test_client()
-    client.post("/", data={"email": "demo@example.com", "password": "TravelDemo2026!"})
+    client.post("/", data={"email": TEST_LOGIN_EMAIL, "password": TEST_LOGIN_PASSWORD})
     html = client.get("/main").get_data(as_text=True)
 
     assert 'id="origin_city"' in html and 'id="destination_city"' in html
@@ -295,10 +295,12 @@ def test_completed_plan_feedback_requires_comment_for_thumbs_down(tmp_path):
         DATABASE = tmp_path / "feedback.sqlite3"
 
     client = create_app(FeedbackConfig).test_client()
-    client.post("/", data={"email": "demo@example.com", "password": "TravelDemo2026!"})
+    client.post("/", data={"email": TEST_LOGIN_EMAIL, "password": TEST_LOGIN_PASSWORD})
     request_id = "11111111-1111-4111-8111-111111111111"
     with connect(FeedbackConfig.DATABASE) as db:
-        user_id = db.execute("SELECT id FROM users WHERE email = 'demo@example.com'").fetchone()[0]
+        user_id = db.execute(
+            "SELECT id FROM users WHERE email = ?", (TEST_LOGIN_EMAIL,)
+        ).fetchone()[0]
         db.execute(
             "INSERT INTO planning_jobs (request_id, user_id, status, request_json) VALUES (?, ?, 'completed', '{}')",
             (request_id, user_id),

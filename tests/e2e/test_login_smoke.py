@@ -14,10 +14,6 @@ from playwright.sync_api import expect
 
 pytestmark = pytest.mark.e2e
 
-# The demo account every fresh database gets for free (see `conftest.py`).
-DEMO_EMAIL = "demo@example.com"
-DEMO_PASSWORD = "TravelDemo2026!"
-
 # Singapore -> Tokyo is the pair already exercised by tests/test_api.py, so a
 # failure here means something changed in the live wiring, not in an untested
 # route/city combination. Dates fall inside the seed flight inventory's window
@@ -29,8 +25,8 @@ RETURN_DATE = "2026-10-22"
 def test_login_and_plan_render(page, live_server):
     page.goto(live_server.base_url + "/")
 
-    page.fill("#email", DEMO_EMAIL)
-    page.fill("#password", DEMO_PASSWORD)
+    page.fill("#email", live_server.login_email)
+    page.fill("#password", live_server.login_password)
     page.click("#submit")
     expect(page).to_have_url(live_server.base_url + "/main")
 

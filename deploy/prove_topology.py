@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -356,8 +357,8 @@ def main() -> None:
                         help="with --scale, do NOT restore the previous replica count")
     parser.add_argument("--session-portability", action="store_true",
                         help="needs 2 web pods; combine with --scale web=2 --keep")
-    parser.add_argument("--email", default="demo@example.com")
-    parser.add_argument("--password", default="TravelDemo2026!")
+    parser.add_argument("--email", default=os.getenv("E2E_LOGIN_EMAIL"))
+    parser.add_argument("--password", default=os.getenv("E2E_LOGIN_PASSWORD"))
     args = parser.parse_args()
 
     prove_two_roles()
@@ -371,6 +372,8 @@ def main() -> None:
         role, _, count = args.scale.partition("=")
         prove_scale(role, int(count), restore=not args.keep and not args.session_portability)
     if args.session_portability:
+        if not args.email or not args.password:
+            parser.error("session portability needs --email/--password or E2E_LOGIN_EMAIL/E2E_LOGIN_PASSWORD")
         session_portability(2, args.email, args.password)
         if args.scale and not args.keep:
             role, _, _ = args.scale.partition("=")

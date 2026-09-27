@@ -19,7 +19,7 @@ graph TB
         DEV["Developer browser<br/>5 allow-listed Google accounts"]
     end
 
-    subgraph GOOGLE["Google Cloud — project-931fd286-f1d2-4105-9e5"]
+    subgraph GOOGLE["Google Cloud — configured project"]
 
         subgraph EDGE["Global edge"]
             IP["Static IP 8.232.99.251<br/><i>travel-planner-ip</i>"]

@@ -50,6 +50,7 @@ jobs:
       # app defect. Fixing it properly means terminating TLS in CI — not worth
       # it for this module.
       SESSION_COOKIE_SECURE: "false"
+      DAST_LOGIN_EMAIL: browser-scan@example.com
 
       # ---- Item 14, part 2: a stub model, never a real provider key --------
       # Without a model, POST /travel-plans fails immediately and ZAP only ever
@@ -81,6 +82,15 @@ jobs:
 
       - name: Prepare CI instance directory
         run: mkdir -p ci-instance/traces
+
+      - name: Generate ephemeral login credential
+        run: |
+          password=$(python -c 'import secrets; print(secrets.token_urlsafe(24))')
+          password_hash=$(DAST_PASSWORD="$password" python -c 'import os; from werkzeug.security import generate_password_hash; print(generate_password_hash(os.environ["DAST_PASSWORD"]))')
+          echo "::add-mask::$password"
+          echo "E2E_LOGIN_PASSWORD=$password" >> "$GITHUB_ENV"
+          echo "LOGIN_EMAIL=$DAST_LOGIN_EMAIL" >> "$GITHUB_ENV"
+          echo "LOGIN_PASSWORD_HASH=$password_hash" >> "$GITHUB_ENV"
 
       # ---- Stub provider ---------------------------------------------------
       # See scripts/ci_stub_provider.py (also a draft in this folder).
@@ -126,8 +136,8 @@ jobs:
           fi
           curl -s -b jar -c jar -X POST http://127.0.0.1:5000/ \
             -d "csrf_token=${token}" \
-            -d "email=demo@example.com" \
-            -d "password=TravelDemo2026!" \
+            -d "email=${DAST_LOGIN_EMAIL}" \
+            -d "password=${E2E_LOGIN_PASSWORD}" \
             -o /dev/null
           code=$(curl -s -b jar -o /dev/null -w '%{http_code}' \
             http://127.0.0.1:5000/api/v1/admin/activity)
