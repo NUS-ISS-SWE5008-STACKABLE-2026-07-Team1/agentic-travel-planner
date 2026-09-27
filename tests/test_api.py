@@ -238,17 +238,10 @@ def test_main_page_provides_country_options_required_by_intake_script():
 
 
 def test_admin_button_is_available_on_both_chat_modes():
-    # An explicit administrator, not `TestConfig.ADMIN_EMAIL`. That value is
-    # inherited from `Config`, which falls back to LOGIN_EMAIL — and since the
-    # bundled demo login was removed, LOGIN_EMAIL defaults to "", so the
-    # session would carry an empty email and never be an admin.
-    class AdminConfig(TestConfig):
-        ADMIN_EMAIL = "admin@example.com"
-
-    client = create_app(AdminConfig).test_client()
+    client = create_app(TestConfig).test_client()
     with client.session_transaction() as session:
         session["authenticated"] = True
-        session["user_email"] = AdminConfig.ADMIN_EMAIL
+        session["user_email"] = TestConfig.ADMIN_EMAIL
     intake = client.get("/chat/intake")
     planning = client.get("/chat/11111111-1111-4111-8111-111111111111")
     assert b'href="/admin"' in intake.data
