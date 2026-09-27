@@ -1,3 +1,4 @@
+import re
 import sqlite3
 
 import pytest
@@ -364,6 +365,118 @@ def test_option_airport_round_trips(tmp_path):
     with sqlite3.connect(database) as connection:
         rows = dict(connection.execute("SELECT name, airport FROM options").fetchall())
     assert rows == {"Narita Express": "NRT", "A hotel": ""}
+
+
+def _schema_without_trace_columns() -> str:
+    """SCHEMA_SQLITE as it was before options.request_id and the created_at columns.
+
+    Built by removing the new column lines rather than dropping columns from a
+    real database: SQLite refuses DROP COLUMN on a column with a REFERENCES
+    clause, which options.request_id has.
+    """
+    legacy = re.sub(
+        r",\n(?:    --[^\n]*\n)*    created_at TEXT\n\)", "\n)", SCHEMA_SQLITE
+    )
+    legacy = re.sub(
+        r",\n(?:    --[^\n]*\n)*    request_id TEXT REFERENCES travel_requests\(id\) "
+        r"ON DELETE CASCADE\n\)",
+        "\n)",
+        legacy,
+    )
+    return legacy
+
+
+def _columns(connection, table: str) -> list[str]:
+    return [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+
+
+def test_trace_columns_are_added_and_backfilled_on_an_old_database(tmp_path):
+    """The upgrade path Render and GKE take on their next start.
+
+    request_id is copied from the option's own finding, and created_at from the
+    plan saved in the same pass. A finding with no plan row keeps a NULL time,
+    because nothing records when it was written.
+    """
+    database = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(_schema_without_trace_columns())
+        assert "created_at" not in _columns(connection, "agent_findings"), "fixture"
+        assert not {"request_id", "created_at"} & set(_columns(connection, "options")), "fixture"
+        for request_id in ("planned", "unplanned"):
+            connection.execute(
+                "INSERT INTO travel_requests (id, origin, destination, departure_date, "
+                "return_date, travellers, budget, currency, risk_tolerance) VALUES "
+                "(?, 'Singapore', 'Japan', '2026-01-01', '2026-01-05', 1, 1000, 'SGD', 'medium')",
+                (request_id,),
+            )
+        connection.execute(
+            "INSERT INTO travel_plans (request_id, title, summary, itinerary_json, "
+            "rationale_json, safety_passed, created_at) "
+            "VALUES ('planned', 't', 's', '[]', '[]', 1, '2026-01-02 03:04:05')"
+        )
+        connection.execute(
+            "INSERT INTO agent_findings (id, request_id, agent, summary, confidence) VALUES "
+            "(1, 'planned', 'flight_agent', 's', 0.5), (2, 'unplanned', 'flight_agent', 's', 0.5)"
+        )
+        connection.execute(
+            "INSERT INTO options (finding_id, name, description) VALUES "
+            "(1, 'with plan', 'd'), (2, 'without plan', 'd')"
+        )
+
+    initialize(database)
+    initialize(database)  # second run must be a no-op, not an error
+
+    with sqlite3.connect(database) as connection:
+        options = {
+            row[0]: row[1:] for row in connection.execute(
+                "SELECT name, request_id, created_at FROM options"
+            )
+        }
+        findings = dict(connection.execute("SELECT id, created_at FROM agent_findings"))
+        index = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_options_request'"
+        ).fetchone()
+    assert options == {
+        "with plan": ("planned", "2026-01-02 03:04:05"),
+        "without plan": ("unplanned", None),
+    }
+    assert findings == {1: "2026-01-02 03:04:05", 2: None}
+    assert index, "the request_id index must exist after migration"
+
+
+def test_a_migrated_database_has_the_same_columns_as_a_fresh_one(tmp_path):
+    """Fresh and migrated databases must agree on column order, or the same
+    `SELECT *` returns a different shape depending on when a database was made."""
+    fresh, migrated = tmp_path / "fresh.sqlite3", tmp_path / "migrated.sqlite3"
+    initialize(fresh)
+    with sqlite3.connect(migrated) as connection:
+        connection.executescript(_schema_without_trace_columns())
+    initialize(migrated)
+
+    with sqlite3.connect(fresh) as a, sqlite3.connect(migrated) as b:
+        for table in ("agent_findings", "options"):
+            assert _columns(a, table) == _columns(b, table), table
+
+
+def test_saved_findings_and_options_carry_request_id_and_created_at(tmp_path):
+    from flaskapp.travel_ai.schemas import AgentFinding, Option
+
+    database = tmp_path / "trace.sqlite3"
+    initialize(database)
+    request_id = "77777777-7777-4777-8777-777777777777"
+    response = _plan_response(request_id)
+    response.agent_findings = [AgentFinding(
+        agent="flight_agent", summary="s", confidence=0.9,
+        options=[Option(name="A", description="d"), Option(name="B", description="d")],
+    )]
+    save_plan(database, _request(), response, [])
+
+    with sqlite3.connect(database) as connection:
+        options = connection.execute("SELECT request_id, created_at FROM options").fetchall()
+        finding_time = connection.execute("SELECT created_at FROM agent_findings").fetchone()[0]
+    assert [row[0] for row in options] == [request_id, request_id]
+    for created in [finding_time, *(row[1] for row in options)]:
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", created), created
 
 
 def test_a_legacy_flight_eval_runs_fk_is_repointed_at_planning_jobs(tmp_path):
