@@ -33,12 +33,14 @@ def test_flights_only_skips_the_hotel_agent():
     assert "hotel_transport_agent" not in specialists_for(request(plan_scope="flights"))
 
 
-@pytest.mark.parametrize("scope", ["both", "flights"])
-def test_risk_advisory_runs_for_any_scope_that_involves_travel(scope):
-    """Visa and entry rules are not opt-out for a journey.
+@pytest.mark.parametrize("scope", ["both", "flights", "hotel"])
+def test_risk_advisory_runs_for_every_scope(scope):
+    """Visa and entry rules are not opt-out, and no scope escapes them.
 
-    Hotel-only is the one exception, and deliberately so — see
-    `test_hotel_only_dispatches_the_hotel_agent_alone`.
+    Hotel-only was once the exception, on the grounds that the advisory reasons
+    from a departure country it no longer collects. That was never true of the
+    implementation: `RiskProposalRequest` has no origin field at all, so the
+    missing country costs the agent nothing.
     """
     assert "risk_advisory_agent" in specialists_for(request(plan_scope=scope))
 
@@ -76,31 +78,30 @@ def test_the_result_is_always_ordered_and_never_empty():
         assert list(selected) == [n for n in SPECIALISTS if n in selected]
 
 
-# --- hotel-only is a stay, not a trip ----------------------------------------
+# --- hotel-only is a stay, but it still happens somewhere --------------------
 
 
-def test_hotel_only_dispatches_the_hotel_agent_alone():
-    """Reversal of "advisory is not opt-out", made deliberately.
+def test_hotel_only_dispatches_the_hotel_agent_and_the_advisory():
+    """The narrowest scope, and the advisory still runs.
 
-    Risk & Advisory surfaces visa and entry rules, which are reasoned from the
-    departure country. A hotel-only request no longer collects one, so the
-    agent would be advising on a journey it knows nothing about.
+    Hotel-only is the one scope collecting no origin, which was once the reason
+    for skipping Risk & Advisory here. The dependency was never real — the
+    agent resolves reference data from `destination_slug` and reads no origin
+    anywhere, pinned by
+    `test_risk_advisory_agent.py::test_the_grounded_path_needs_no_origin`.
     """
     assert specialists_for(request(plan_scope="hotel", origin=None)) == (
-        "hotel_transport_agent",
+        "hotel_transport_agent", "risk_advisory_agent",
     )
-
-
-def test_risk_advisory_still_runs_for_every_other_scope():
-    for scope in ("both", "flights"):
-        assert "risk_advisory_agent" in specialists_for(request(plan_scope=scope))
 
 
 def test_hotel_only_still_gets_accessibility_when_needs_are_stated():
     selected = specialists_for(request(
         plan_scope="hotel", origin=None, accessibility_needs=["step-free access"],
     ))
-    assert selected == ("hotel_transport_agent", "accessibility_agent")
+    assert selected == (
+        "hotel_transport_agent", "accessibility_agent", "risk_advisory_agent",
+    )
 
 
 def test_a_hotel_only_request_is_valid_without_an_origin():

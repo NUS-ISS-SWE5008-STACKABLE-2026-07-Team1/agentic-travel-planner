@@ -45,6 +45,7 @@ from flaskapp.database import save_agent_run, save_flight_eval_run
 from flaskapp.travel_ai.a2a import response_message
 from flaskapp.travel_ai.agents.base import make_specialist_node
 from flaskapp.travel_ai.agents.flight_agent.adapter import to_flight_request
+from flaskapp.travel_ai.agents.flight_agent.domain import _party_size
 from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION, PATH2_INSTRUCTION
 from flaskapp.travel_ai.agents.flight_agent.providers import get_inventory_provider
 from flaskapp.travel_ai.agents.flight_agent.providers.seed import INVENTORY_ASSUMPTION
@@ -208,12 +209,19 @@ def _accessibility_limitations(candidate: FlightCandidate) -> list[str]:
     return limitations
 
 
-def _candidate_to_option(candidate: FlightCandidate, currency: str, assumption: str) -> Option:
+def _candidate_to_option(
+    candidate: FlightCandidate, currency: str, assumption: str, party_size: int = 1
+) -> Option:
     """One ranked candidate as a shared-contract `Option`.
 
     `selection_factors` restates only what the deterministic ranking actually
     used, so the traveller-visible reasons match the code that produced the
     order rather than a model's account of it.
+
+    `party_size` must be the SAME one `domain.rank_flights` used, because
+    `estimated_cost` here has to equal `domain._effective_cost` there. If the
+    two drift, the cheapest option by the ranking stops being the cheapest
+    option on screen, and nothing in the UI would reveal it.
     """
     factors = [
         "Direct" if candidate.stops == 0 else f"{candidate.stops} stop(s)",
@@ -253,7 +261,16 @@ def _candidate_to_option(candidate: FlightCandidate, currency: str, assumption: 
             + ("non-stop." if candidate.stops == 0
                else f"{candidate.stops} stop{'s' if candidate.stops > 1 else ''}.")
         ),
-        estimated_cost=candidate.price + candidate.seat_fee_estimate,
+        # `price` is ONE seat; `seat_fee_estimate` is already the whole
+        # party's fee (see its docstring), so only the fare is multiplied.
+        # This is what the party is asked to pay, and what `recommend_package`
+        # sums into "closest to your budget".
+        estimated_cost=candidate.price * party_size + candidate.seat_fee_estimate,
+        # One seat, for the tier columns — the figure an airline quotes and the
+        # only one comparable across Budget, Comfort and Luxury. The party seat
+        # fee is deliberately excluded: it is a whole-party total, so dividing
+        # it out would invent a per-seat number nobody charges.
+        unit_cost=candidate.price,
         currency=currency,
         assumptions=[assumption],
         limitations=_accessibility_limitations(candidate),
@@ -277,7 +294,8 @@ def _coverage_warnings(proposal: FlightProposal) -> list[str]:
 
 
 def _build_finding(
-    proposal: FlightProposal, response, currency: str, unresolved: list[str], assumption: str
+    proposal: FlightProposal, response, currency: str, unresolved: list[str], assumption: str,
+    party_size: int = 1,
 ) -> AgentFinding:
     warnings = list(unresolved) + _coverage_warnings(proposal)
     if response.escalate and response.escalation_reason:
@@ -290,7 +308,10 @@ def _build_finding(
     return AgentFinding(
         agent=NAME,
         summary=response.rationale,
-        options=[_candidate_to_option(c, currency, assumption) for c in proposal.candidates],
+        options=[
+            _candidate_to_option(c, currency, assumption, party_size)
+            for c in proposal.candidates
+        ],
         warnings=warnings,
         confidence=response.confidence,
     )
@@ -554,7 +575,11 @@ def create_node(llm, tracer, provider=None, config=None):
             )
             notes.extend(note for note in outcome.notes if note not in notes)
             finding = _build_finding(
-                outcome.proposal, outcome.response, travel_request.currency, notes, assumption
+                outcome.proposal, outcome.response, travel_request.currency, notes, assumption,
+                # From the same trip context `domain` ranked with, not from
+                # `travel_request.travellers`, so the displayed cost cannot
+                # drift from the ranked one if the adapter's mapping changes.
+                party_size=_party_size(ctx.base_request.trip_context),
             )
             log_payload(f"REQUEST {state['request_id']} | {NAME.upper()} RESPONSE", finding)
             tracer.record("agent_completed", NAME, {

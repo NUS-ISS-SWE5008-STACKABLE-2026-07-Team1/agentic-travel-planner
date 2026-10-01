@@ -123,7 +123,14 @@ class Option(BaseModel):
     schedule_display: dict[str, str] | None = None
     name: str
     description: str
+    # What the PARTY pays. For a flight that is the fare times the party size;
+    # for a hotel, the rooms the party needs across the stay.
     estimated_cost: float | None = None
+    # The same thing for one traveller, where that means anything — a fare is
+    # quoted per seat, a hotel room is not. None says "this option has no
+    # per-person figure", which is why a tier column can fall back to
+    # `estimated_cost` without guessing.
+    unit_cost: float | None = None
     currency: str | None = None
     source_urls: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
@@ -192,6 +199,11 @@ class PlanRecommendation(BaseModel):
     total: float = 0.0
     currency: str = ""
     remaining: float = 0.0
+    # How many travellers every figure in `items` covers. Carried so the card
+    # can say so: "2559 SGD" beside a flight is a different claim for a solo
+    # traveller than for a family of three, and the number alone cannot tell
+    # them apart. Defaulted for callers written before this field.
+    travellers: int = 1
     note: str = ""
 
 
