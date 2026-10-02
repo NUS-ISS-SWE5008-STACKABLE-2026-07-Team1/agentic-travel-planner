@@ -956,8 +956,26 @@ def _add_trace_columns(connection, existing_columns) -> None:
     )
 
 
+# Taken at the start of initialize() on Postgres. Every pod runs initialize()
+# when it starts, and each step is "check, then change": is the column there?
+# no -> ADD COLUMN. Two pods starting together (web and agents on every deploy,
+# or a scale-out) can both see "missing" and both ALTER; the second fails with
+# "already exists" and its pod crashes on startup. With the lock, one pod sets
+# the schema up while the others wait a moment, then find nothing to do.
+#
+# Transaction-scoped (released by the commit or rollback at the end of
+# initialize), so a pod that dies mid-setup cannot leave it held. Keyed by the
+# schema, so Render's and GKE's setups, which share one Supabase database in
+# different schemas, never queue behind each other.
+SCHEMA_SETUP_LOCK_SQL = (
+    "SELECT pg_advisory_xact_lock(hashtext('travel-planner:schema-setup:' || current_schema()))"
+)
+
+
 def initialize(target: Path | str) -> None:
     with connect(target) as connection:
+        if connection.dialect == "postgres":
+            connection.execute(SCHEMA_SETUP_LOCK_SQL)
         connection.executescript(
             SCHEMA_POSTGRES if connection.dialect == "postgres" else SCHEMA_SQLITE
         )
