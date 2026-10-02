@@ -241,3 +241,20 @@ def test_the_metrics_adapter_is_cluster_wide_and_kept_out_of_the_app_bundle():
     assert not any("k8s-cluster" in item for item in _bundle(K8S))
     # GKE's add-on manager owns this ClusterRole; redefining it would fight it.
     assert "kind: ClusterRole\nmetadata:\n  name: external-metrics-reader" not in text
+
+
+def test_the_load_test_runs_productions_manifests_in_its_own_namespace():
+    """What the scaling demo proves must be what production runs: it references
+    deploy/k8s's Deployments and scaling objects instead of copying them, and
+    lives in a namespace of its own (deploy/scaling_demo.py also refuses a
+    built bundle that names production's)."""
+    loadtest = K8S.parent / "k8s-loadtest"
+    resources = _bundle(loadtest)
+    for shared in ("../k8s/app", "../k8s/hpa.yaml", "../k8s/pod-monitoring.yaml",
+                   "../k8s/networkpolicy.yaml", "../k8s/services.yaml"):
+        assert shared in resources, shared
+    kustomization = (loadtest / "kustomization.yaml").read_text(encoding="utf-8")
+    assert "\nnamespace: travel-planner-loadtest\n" in kustomization
+    # Only test-only objects are defined locally; no copy of a production one.
+    local = [r for r in resources if not r.startswith("../")]
+    assert sorted(local) == ["config.yaml", "namespace.yaml", "postgres.yaml", "stub.yaml"]

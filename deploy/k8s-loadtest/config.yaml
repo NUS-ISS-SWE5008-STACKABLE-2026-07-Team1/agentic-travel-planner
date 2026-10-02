@@ -1,0 +1,23 @@
+# Same keys the app reads in production (deploy/k8s/configmap.yaml), pointed
+# at the fake model. The Secret `app-secrets` (database URL, session key, the
+# load-test login's password hash) is created by deploy/scaling_demo.py from
+# values it generates, never stored.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  FLASK_DEBUG: "false"
+  LLM_PROVIDER: openai_compatible
+  LLM_BASE_URL: http://stub:8081/v1
+  LLM_MODEL: stub-model
+  LLM_API_KEY: stub-not-a-real-key
+  # The fake model would satisfy a guardrail call too, but the output gate's
+  # extra round trips only lengthen plans without exercising scaling.
+  GUARDRAIL_LLM_ENABLED: "false"
+  A2A_BASE_URL: http://agents:8000
+  # In-cluster plain HTTP: the load generator talks to the Service directly.
+  SESSION_COOKIE_SECURE: "false"
+  # Not a .test address: the login form's email check rejects reserved TLDs.
+  LOGIN_EMAIL: loadtest@example.com
+  ADMIN_EMAIL: ""

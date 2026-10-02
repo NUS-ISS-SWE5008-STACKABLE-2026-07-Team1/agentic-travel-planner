@@ -1,0 +1,37 @@
+# The autoscaling proof (step 6): production's manifests, a fake model.
+#
+# A throwaway namespace on the same cluster that runs the SAME Deployments,
+# Services, autoscalers, NetworkPolicy, PodDisruptionBudgets and PodMonitoring
+# as production — referenced from deploy/k8s, not copied, so what is proven is
+# what runs. Only three things differ, all in this directory:
+#
+#   config.yaml    points the app at the fake model and the throwaway database
+#   postgres.yaml  a disposable Postgres (emptyDir; gone with the namespace)
+#   stub.yaml      scripts/ci_stub_provider.py with a reply delay, so a plan
+#                  takes minutes like a real one, at no model cost
+#
+# Do not apply this by hand. deploy/scaling_demo.py builds it (it needs
+# --load-restrictor LoadRestrictionsNone to read files from deploy/k8s),
+# fills in the image and secrets, drives the load and deletes the namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: travel-planner-loadtest
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - postgres.yaml
+  - stub.yaml
+  - ../k8s/app
+  - ../k8s/services.yaml
+  - ../k8s/networkpolicy.yaml
+  - ../k8s/pdb.yaml
+  - ../k8s/hpa.yaml
+  - ../k8s/pod-monitoring.yaml
+
+# The stub runs the app image too; the driver replaces this placeholder (and
+# the one deploy/k8s/app sets) with the image production is running.
+images:
+  - name: travel-planner
+    newName: REPLACE_WITH_ARTIFACT_REGISTRY_IMAGE
+    newTag: v3

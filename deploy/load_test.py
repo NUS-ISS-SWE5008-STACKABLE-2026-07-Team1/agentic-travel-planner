@@ -52,6 +52,7 @@ PLAN_REQUEST = {
 @dataclass
 class Result:
     index: int
+    wave: int = 0
     request_id: str | None = None
     status: str = "not submitted"
     submit_seconds: float = 0.0
@@ -106,15 +107,22 @@ def _session(base: str, email: str, password: str) -> tuple[requests.Session, st
 
 
 def run_one(index: int, base: str, email: str, password: str, timeout: int,
-            start_together: threading.Barrier) -> Result:
-    result = Result(index=index)
+            start_together: threading.Barrier, wave: int = 0) -> Result:
+    result = Result(index=index, wave=wave)
     try:
         http, csrf = _session(base, email, password)
     except Exception as exc:  # noqa: BLE001 - reported per plan, never fatal
         result.errors.append(f"login: {exc}")
+        # Release the rest of the wave rather than leave them waiting forever
+        # for a plan that will never arrive at the barrier.
+        start_together.abort()
         return result
 
-    start_together.wait()  # submit at the same moment, not staggered by login
+    try:
+        start_together.wait()  # submit at the same moment, not staggered by login
+    except threading.BrokenBarrierError:
+        result.errors.append("not submitted: another plan in this wave failed to log in")
+        return result
     started = time.monotonic()
     try:
         submitted = http.post(
@@ -167,25 +175,44 @@ def main() -> None:
     parser.add_argument("--email", default=os.getenv("E2E_LOGIN_EMAIL"))
     parser.add_argument("--password", default=os.getenv("E2E_LOGIN_PASSWORD"))
     parser.add_argument("--timeout", type=int, default=600, help="per plan, seconds")
+    parser.add_argument("--waves", type=int, default=1,
+                        help="split --plans into this many waves (default: all at once)")
+    parser.add_argument("--wave-interval", type=float, default=60.0,
+                        help="seconds between waves")
     args = parser.parse_args()
     if not args.email or not args.password:
         parser.error("pass --email/--password or set E2E_LOGIN_EMAIL/E2E_LOGIN_PASSWORD")
     base = args.base_url.rstrip("/")
 
-    print(f"submitting {args.plans} plans at once against {base}\n")
-    barrier = threading.Barrier(args.plans)
+    # Waves, for the autoscaling demo: plans already queued stay on the pod
+    # that accepted them, so only LATER arrivals can land on pods the
+    # autoscaler adds. One wave (the default) is the original all-at-once run.
+    waves = max(1, min(args.waves, args.plans))
+    sizes = [args.plans // waves + (1 if w < args.plans % waves else 0) for w in range(waves)]
+    print(f"submitting {args.plans} plans in {waves} wave(s) of {sizes}, "
+          f"{args.wave_interval:.0f}s apart, against {base}\n", flush=True)
     wall_start = time.monotonic()
-    with ThreadPoolExecutor(max_workers=args.plans) as pool:
-        results = list(pool.map(
-            lambda i: run_one(i, base, args.email, args.password, args.timeout, barrier),
-            range(args.plans),
-        ))
+
+    def run_wave(w: int) -> list[Result]:
+        time.sleep(w * args.wave_interval)
+        first = sum(sizes[:w])
+        barrier = threading.Barrier(sizes[w])
+        print(f"[{time.monotonic() - wall_start:5.0f}s] wave {w + 1}: {sizes[w]} plans", flush=True)
+        with ThreadPoolExecutor(max_workers=sizes[w]) as pool:
+            return list(pool.map(
+                lambda i: run_one(i, base, args.email, args.password, args.timeout, barrier, w),
+                range(first, first + sizes[w]),
+            ))
+
+    with ThreadPoolExecutor(max_workers=waves) as pool:
+        results = [r for batch in pool.map(run_wave, range(waves)) for r in batch]
     wall = time.monotonic() - wall_start
 
-    print(f"{'plan':<6}{'status':<12}{'submit':>8}{'total':>9}{'polls':>7}{'404s':>6}  request_id")
+    print(f"\n{'plan':<6}{'wave':<6}{'status':<12}{'submit':>8}{'total':>9}{'polls':>7}"
+          f"{'404s':>6}  request_id")
     for r in sorted(results, key=lambda r: r.index):
-        print(f"{r.index:<6}{r.status:<12}{r.submit_seconds:>7.1f}s{r.total_seconds:>8.1f}s"
-              f"{r.polls:>7}{r.not_found:>6}  {r.request_id or '-'}")
+        print(f"{r.index:<6}{r.wave + 1:<6}{r.status:<12}{r.submit_seconds:>7.1f}s"
+              f"{r.total_seconds:>8.1f}s{r.polls:>7}{r.not_found:>6}  {r.request_id or '-'}")
         for error in r.errors:
             print(f"        ! {error}")
 
