@@ -121,22 +121,25 @@ def test_the_autoscalers_are_applied_with_the_infrastructure():
     assert set(_max_replicas()) == {"web", "agents"}
 
 
-def test_no_role_scales_past_one_pod_while_its_state_is_in_memory():
-    """A second pod of either role breaks plans in flight today.
+def test_no_role_scales_past_one_pod_unless_any_pod_can_serve_any_request():
+    """A second pod is only safe while no request depends on one pod's memory.
 
-    web: the status poll can reach a pod without the job (404). agents: the
-    GetTask poll can reach a pod without the task. When the state moves into
-    the database the marker below disappears and this stops holding the cap.
+    web: the browser's status poll can reach any pod, so job state must be read
+    from the database (`planning_jobs`), not a module dict. agents: tasks sit in
+    an InMemoryTaskStore, so the client must make one blocking SendMessage and
+    never poll GetTask, which could reach a sibling pod. If either regresses,
+    this holds that role at one pod again.
     """
     source = Path(__file__).resolve().parents[1] / "flaskapp" / "travel_ai"
-    in_memory = {
-        "web": "_jobs: dict[" in (source / "jobs.py").read_text(encoding="utf-8"),
-        "agents": "InMemoryTaskStore()" in (source / "a2a_standard.py").read_text(encoding="utf-8"),
+    jobs = (source / "jobs.py").read_text(encoding="utf-8")
+    client = (source / "a2a_client.py").read_text(encoding="utf-8")
+    any_pod_can_serve = {
+        "web": "get_planning_job(" in jobs and "_jobs: dict[" not in jobs,
+        "agents": "polling=False" in client and "get_task(" not in client,
     }
-    assert any(in_memory.values()), "the markers moved; update this test"
     for role, maximum in _max_replicas().items():
-        if in_memory[role]:
+        if not any_pod_can_serve[role]:
             assert maximum == 1, (
-                f"{role} keeps its state in process memory, so a second pod "
-                "breaks plans in flight. Move the state first (ADR 0017)."
+                f"{role} answers some requests from one pod's memory, so a second "
+                "pod breaks plans in flight. See this test's docstring."
             )

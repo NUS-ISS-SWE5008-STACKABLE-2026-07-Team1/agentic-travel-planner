@@ -7,10 +7,10 @@ metadata:
   name: agents
   labels: {app: agents}
 spec:
-  # ONE. a2a_standard.py keeps tasks in an InMemoryTaskStore, and the client
-  # sends SendMessage then polls GetTask. With two replicas behind the Service,
-  # the poll can land on a pod that never saw the task and the specialist call
-  # fails. Raise this only after tasks move into a shared store.
+  # The starting count; deploy/k8s/hpa.yaml decides the rest. Tasks are still
+  # in an InMemoryTaskStore, but the client makes one blocking SendMessage and
+  # never polls GetTask (a2a_client.py), so a task lives and dies inside one
+  # request on one pod and any replica can take any call.
   replicas: 1
   strategy: {type: Recreate}
   selector:

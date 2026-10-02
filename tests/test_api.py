@@ -253,7 +253,9 @@ def test_cancel_endpoint_cancels_authenticated_users_job(monkeypatch):
     cancelled = type("Job", (), {"request_id": request_id, "status": "cancelled"})()
     monkeypatch.setattr(
         "flaskapp.travel_ai.api.cancel_job",
-        lambda supplied_id, user_id: cancelled if supplied_id == request_id and user_id == 7 else None,
+        lambda _database, supplied_id, user_id: (
+            cancelled if supplied_id == request_id and user_id == 7 else None
+        ),
     )
     client = create_app(TestConfig).test_client()
     with client.session_transaction() as session:

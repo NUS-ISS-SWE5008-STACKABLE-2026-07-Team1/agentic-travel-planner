@@ -1,15 +1,18 @@
 # Horizontal Pod Autoscalers for both roles — CAPPED AT ONE POD for now.
 #
 # These existed in the cluster since 2026-09-19 (created by hand for the
-# scaling proof, maxReplicas 3) but were never in git. They are here so the
-# cluster matches the repo, and capped because a second pod of either role
-# breaks plans today:
+# scaling proof, maxReplicas 3) but were never in git. Capped on 2026-10-02
+# because a second pod of either role broke plans in flight:
 #
-#   web     flaskapp/travel_ai/jobs.py keeps job state in module-level dicts.
-#           The browser polls GET .../status; a poll that lands on the other
-#           pod gets 404 "Planning job not found" while the plan still runs.
-#   agents  a2a_standard.py keeps A2A tasks in an InMemoryTaskStore; the
-#           client's GetTask poll can land on a pod that never saw the task.
+#   web     job state lived in jobs.py's module dicts, so a status poll that
+#           reached the other pod got 404 while the plan still ran.
+#   agents  the client polled GetTask, which could reach a pod that never saw
+#           the task (tasks are in an InMemoryTaskStore).
+#
+# Both are fixed (state in planning_jobs; one blocking SendMessage), so the
+# test no longer holds the cap. It stays at one until two more pieces land:
+# a scaling signal that reflects this app's load (below), and scale-down that
+# does not remove a pod mid-plan.
 #
 # CPU is also the wrong signal for this app: a plan spends nearly all its time
 # waiting on the model. Measured 2026-09-18 to 10-02, one reading per minute:
@@ -18,9 +21,8 @@
 # really full at 4 concurrent plans (jobs.py ThreadPoolExecutor), which CPU
 # does not show.
 #
-# To scale a role: move its state into the database first (ADR 0017, Phase 1
-# for web, Phase 2 for agents), then raise maxReplicas here — and consider a
-# signal other than CPU. tests/test_k8s_manifests.py holds both at 1 until then.
+# tests/test_k8s_manifests.py re-imposes the cap automatically if either fix
+# regresses.
 #
 # Applied by hand with the rest of this directory (`kubectl apply -k deploy/k8s`),
 # not by the pipeline, whose RBAC cannot touch autoscalers.

@@ -233,26 +233,31 @@ def _intent_response(extracted, question: str, request_id: str | None = None):
     ).model_dump(mode="json")
 
 
+# Error types worth naming to the traveller; anything else is generic.
+_JOB_ERROR_MESSAGES = {
+    "APITimeoutError": "Azure took too long to respond. Please retry the plan.",
+    "WorkerLost": "The server running this plan restarted. Please retry the plan.",
+}
+
+
 @travel_api_bp.get("/travel-plans/<uuid:request_id>/status")
 def get_travel_plan_status(request_id):
-    job = get_job(str(request_id), session.get("user_id"))
+    # Read from the database, not this pod's memory, so any web pod can
+    # answer for a plan running on another (jobs.py).
+    job = get_job(current_app.config["DATABASE"], str(request_id), session.get("user_id"))
     if job is None:
         return jsonify(error="Planning job not found"), 404
     body = {"request_id": job.request_id, "status": job.status}
     if job.response is not None:
-        body["response"] = job.response.model_dump(mode="json")
+        body["response"] = job.response
     if job.error:
-        body["error"] = (
-            "Azure took too long to respond. Please retry the plan."
-            if job.error == "APITimeoutError"
-            else "Travel planning failed"
-        )
+        body["error"] = _JOB_ERROR_MESSAGES.get(job.error, "Travel planning failed")
     return jsonify(body)
 
 
 @travel_api_bp.post("/travel-plans/<uuid:request_id>/cancel")
 def cancel_travel_plan(request_id):
-    job = cancel_job(str(request_id), session.get("user_id"))
+    job = cancel_job(current_app.config["DATABASE"], str(request_id), session.get("user_id"))
     if job is None:
         return jsonify(error="Planning job not found"), 404
     return jsonify(request_id=job.request_id, status=job.status)

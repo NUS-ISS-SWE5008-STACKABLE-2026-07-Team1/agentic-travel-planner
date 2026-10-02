@@ -63,6 +63,46 @@ def test_generated_keys_come_back(database):
     assert isinstance(user_id, int) and user_id > 0
 
 
+def test_job_state_shared_between_pods_round_trips(database):
+    """jobs.py's cross-pod transitions, on the dialect that ships.
+
+    Conditional UPDATEs must report rowcount correctly, and the heartbeat must
+    keep sub-second precision (REAL would be float4 on Postgres, which cannot
+    even hold today's epoch to the second).
+    """
+    from flaskapp.database import (
+        cancel_planning_job, fail_lost_planning_job, finish_planning_job,
+        get_planning_job, heartbeat_planning_jobs, start_planning_job,
+    )
+
+    with connect(database) as db:
+        owner = db.insert_returning_id(
+            "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+            (f"{uuid.uuid4()}@example.com", "hash"),
+        )
+    now = 1_790_000_000.25
+    create_planning_job(database, "job-a", owner, {"x": 1}, worker="web-1", heartbeat_at=now)
+    assert start_planning_job(database, "job-a")
+    assert not start_planning_job(database, "job-a"), "already processing"
+    assert get_planning_job(database, "job-a")["heartbeat_at"] == now
+
+    assert cancel_planning_job(database, "job-a", owner) == "cancelled"
+    assert heartbeat_planning_jobs(database, ["job-a"], now + 10) == {"job-a"}
+    assert not finish_planning_job(database, "job-a", "completed", response={"y": 2})
+    assert get_planning_job(database, "job-a")["status"] == "cancelled"
+
+    create_planning_job(database, "job-b", owner, {"x": 1}, heartbeat_at=now)
+    assert not fail_lost_planning_job(database, "job-b", stale_before=now - 1)
+    assert fail_lost_planning_job(database, "job-b", stale_before=now + 1)
+    row = get_planning_job(database, "job-b")
+    assert (row["status"], row["error_type"]) == ("failed", "WorkerLost")
+
+    create_planning_job(database, "job-c", owner, {"x": 1}, heartbeat_at=now)
+    assert finish_planning_job(database, "job-c", "completed", response={"y": 2})
+    import json
+    assert json.loads(get_planning_job(database, "job-c")["response_json"]) == {"y": 2}
+
+
 def test_email_uniqueness_is_case_insensitive(database):
     with connect(database) as db:
         db.execute(
