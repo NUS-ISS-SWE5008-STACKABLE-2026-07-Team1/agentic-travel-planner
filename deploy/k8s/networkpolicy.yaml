@@ -21,11 +21,12 @@ spec:
             matchLabels: {app: web}
       ports:
         - {protocol: TCP, port: 8000}
-    # Managed Prometheus's collectors read the calls-in-flight gauge that the
+    # Managed Prometheus collectors (namespace gke-gmp-system on Autopilot, NOT
+    # gmp-system as on Standard clusters) read the calls-in-flight gauge that the
     # agents autoscaler scales on (pod-monitoring.yaml). The metrics port only:
     # they cannot reach the A2A endpoint.
     - from:
         - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: gmp-system}
+            matchLabels: {kubernetes.io/metadata.name: gke-gmp-system}
       ports:
         - {protocol: TCP, port: 9090}
