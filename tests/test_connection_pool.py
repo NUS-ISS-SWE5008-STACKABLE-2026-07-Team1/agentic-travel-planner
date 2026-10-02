@@ -109,12 +109,16 @@ def pooled(monkeypatch):
 
 
 @postgres
-def test_the_same_backend_is_reused(pooled):
+def test_server_connections_are_reused(pooled):
+    """Not "always the same one": the pool lends idle connections in rotation,
+    so if earlier tests left two idle, calls alternate between them (seen in
+    CI). The property is that calls stop opening connections."""
     pids = set()
     for _ in range(10):
         with database.connect(DSN) as db:
             pids.add(db.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"])
-    assert len(pids) == 1, f"10 sequential calls used {len(pids)} server connections"
+    assert len(pids) <= pooled.max_size, f"10 calls used {len(pids)} server connections"
+    assert len(pids) < 10, "every call opened its own connection"
 
 
 @postgres
