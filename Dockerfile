@@ -35,9 +35,11 @@ USER 10001
 
 EXPOSE 8000
 
-# Same shape as render.yaml's startCommand, and for the same reason: ONE worker,
-# because flaskapp/travel_ai/jobs.py keeps job state in module-level dicts
-# (ADR-0005). Replicas do not change that either; keep the web Deployment at 1.
+# Same shape as render.yaml's startCommand. One worker per pod: job state is in
+# the database now, so more pods are how the web role scales (deploy/k8s/hpa.yaml),
+# and one process keeps the plans-in-flight count it publishes simple.
+# gunicorn.conf.py adds the graceful drain and that metrics endpoint.
 CMD ["gunicorn", "flaskapp:create_app()", \
+     "--config", "gunicorn.conf.py", \
      "--bind", "0.0.0.0:8000", \
      "--workers", "1", "--threads", "8", "--timeout", "120"]
