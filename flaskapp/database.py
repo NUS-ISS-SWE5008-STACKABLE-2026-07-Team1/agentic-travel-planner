@@ -6,12 +6,13 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
 import click
-from flask import Flask, current_app, g
+from flask import Flask, current_app
 from werkzeug.security import check_password_hash
 
 # psycopg is imported lazily inside connect(), so a SQLite-only environment
@@ -532,8 +533,9 @@ class _Connection:
 
     Both dialects commit AND close on a clean context exit. sqlite3 alone would
     commit and leave the connection open; psycopg alone would close. Making
-    them agree is what lets `with connect(...)` mean one thing in all 21 call
-    sites.
+    them agree is what lets `with connect(...)` mean one thing in every call
+    site. On Postgres "close" returns the connection to this process's pool
+    (see `_postgres_pool`), so a `with` block borrows rather than opens.
     """
 
     def __init__(self, raw, dialect: str):
@@ -602,39 +604,108 @@ CONNECTION_HELP = (
 DATABASE_SCHEMA = os.getenv("DATABASE_SCHEMA", "").strip()
 
 
+# Connections per process kept open and reused, instead of one opened and
+# closed per call. A single plan's audit trail alone used to open ~31; with
+# web and agents each autoscaling to 3 pods, a burst could approach Supabase's
+# limit of 60. Per process this is the ceiling, not a reservation: the pool
+# keeps 1 open and grows to this only while that many threads are inside a
+# `with connect(...)` at once, which is brief. Worst case 3 web + 3 agents
+# pods x 5 = 30. Set DATABASE_POOL_SIZE=0 to go back to a connection per call.
+DATABASE_POOL_SIZE = int(os.getenv("DATABASE_POOL_SIZE", "5"))
+# How long a caller waits for a free connection (or for the database to come
+# back) before the request fails.
+DATABASE_POOL_TIMEOUT_SECONDS = float(os.getenv("DATABASE_POOL_TIMEOUT_SECONDS", "30"))
+
+# Shown in pg_stat_activity, so the database can say how many connections
+# this app holds: SELECT count(*) FROM pg_stat_activity
+#                 WHERE application_name = 'travel-planner'
+APPLICATION_NAME = "travel-planner"
+
+_pools: dict[str, Any] = {}
+_pools_lock = threading.Lock()
+
+
+def _configure_postgres(raw) -> None:
+    """Session settings every Postgres connection needs, applied once when it
+    is opened — pooled connections keep them for life."""
+    if DATABASE_SCHEMA:
+        from psycopg import sql
+
+        # Identifier() quotes it correctly; the schema name is
+        # case-sensitive and unquoted Postgres folds it to lowercase.
+        raw.execute(sql.SQL("SET search_path TO {}, public, extensions").format(
+            sql.Identifier(DATABASE_SCHEMA)
+        ))
+        raw.commit()
+    # AVG() and ROUND() return `numeric` on Postgres and `float` on
+    # SQLite. psycopg maps numeric to Decimal, and Flask's JSON
+    # provider renders Decimal as a *string*, so the admin charts
+    # would receive "92.3" instead of 92.3. No column in either schema
+    # is numeric — only aggregate results are — so loading numeric as
+    # float loses nothing and matches SQLite exactly.
+    try:  # pragma: no cover - needs psycopg installed
+        from psycopg.types.numeric import FloatLoader
+
+        raw.adapters.register_loader("numeric", FloatLoader)
+    except (ImportError, AttributeError):  # pragma: no cover
+        pass
+
+
+def _postgres_pool(dsn: str):
+    """This process's pool for `dsn`, created on first use.
+
+    First use, not import: under gunicorn the pool must be born in the worker,
+    because its connections and background threads do not survive a fork.
+    `close_returns=True` is what keeps every call site unchanged: `_Connection`
+    commits or rolls back and then calls close(), and on a pooled connection
+    close() hands it back instead of ending it. The pool rolls back anything
+    left uncommitted and checks a connection is alive before lending it.
+    """
+    with _pools_lock:
+        pool = _pools.get(dsn)
+        if pool is None:
+            from psycopg.rows import dict_row
+            from psycopg_pool import ConnectionPool
+
+            pool = ConnectionPool(
+                dsn,
+                min_size=1,
+                max_size=DATABASE_POOL_SIZE,
+                kwargs={"row_factory": dict_row, "application_name": APPLICATION_NAME},
+                configure=_configure_postgres,
+                check=ConnectionPool.check_connection,
+                close_returns=True,
+                timeout=DATABASE_POOL_TIMEOUT_SECONDS,
+                # Recycle idle and long-lived connections, so a Supabase pooler
+                # restart or an idle cut-off never leaves us holding dead ones.
+                max_idle=300,
+                max_lifetime=1800,
+                name="travel-planner",
+                open=True,
+            )
+            _pools[dsn] = pool
+        return pool
+
+
 def connect(target: Path | str) -> _Connection:
-    """Open a connection to a SQLite path or a Postgres DSN."""
+    """Open a connection to a SQLite path, or borrow one for a Postgres DSN."""
     if is_postgres(target):
         import psycopg
-        from psycopg.rows import dict_row
 
         try:
-            raw = psycopg.connect(target, row_factory=dict_row)
-            if DATABASE_SCHEMA:
-                from psycopg import sql
+            if DATABASE_POOL_SIZE > 0:
+                raw = _postgres_pool(target).getconn()
+            else:
+                from psycopg.rows import dict_row
 
-                # Identifier() quotes it correctly; the schema name is
-                # case-sensitive and unquoted Postgres folds it to lowercase.
-                raw.execute(sql.SQL("SET search_path TO {}, public, extensions").format(
-                    sql.Identifier(DATABASE_SCHEMA)
-                ))
-                raw.commit()
-            # AVG() and ROUND() return `numeric` on Postgres and `float` on
-            # SQLite. psycopg maps numeric to Decimal, and Flask's JSON
-            # provider renders Decimal as a *string*, so the admin charts
-            # would receive "92.3" instead of 92.3. No column in either schema
-            # is numeric — only aggregate results are — so loading numeric as
-            # float loses nothing and matches SQLite exactly.
-            try:  # pragma: no cover - needs psycopg installed
-                from psycopg.types.numeric import FloatLoader
-
-                raw.adapters.register_loader("numeric", FloatLoader)
-            except (ImportError, AttributeError):  # pragma: no cover
-                pass
+                raw = psycopg.connect(target, row_factory=dict_row,
+                                      application_name=APPLICATION_NAME)
+                _configure_postgres(raw)
         except psycopg.OperationalError as error:
-            # The failure is almost always the pooler/direct distinction, and
-            # the driver's own message ("could not translate host name") does
-            # not hint at it. Say so once, here, rather than in a runbook.
+            # PoolTimeout is an OperationalError too. The failure is almost
+            # always the pooler/direct distinction, and the driver's own
+            # message ("could not translate host name") does not hint at it.
+            # Say so once, here, rather than in a runbook.
             raise psycopg.OperationalError(f"{error}\n\n{CONNECTION_HELP}") from error
         return _Connection(raw, "postgres")
     path = Path(target)
@@ -646,16 +717,17 @@ def connect(target: Path | str) -> _Connection:
     return _Connection(connection, "sqlite")
 
 
-def get_db() -> _Connection:
-    if "db" not in g:
-        g.db = connect(current_app.config["DATABASE"])
-    return g.db
+def _app_db() -> _Connection:
+    """A short-lived connection for the auth routes.
 
-
-def close_db(_error: BaseException | None = None) -> None:
-    connection = g.pop("db", None)
-    if connection is not None:
-        connection.close()
+    These used to share one connection per request (Flask's `g.db`), held until
+    the request ended. With a pool that is a deadlock waiting to happen: a
+    request holding one connection and asking for a second (the login page's
+    template checks admin status) can wait for ever once every pooled
+    connection is held that way. Every function here takes and returns its
+    own, like the rest of this module.
+    """
+    return connect(current_app.config["DATABASE"])
 
 
 def _rebuild_sqlite_table(connection, table: str, edit) -> None:
@@ -981,48 +1053,51 @@ def seed_login_user(path: Path | str, email: str, password_hash: str) -> None:
 
 
 def authenticate_user(email: str, password: str) -> sqlite3.Row | None:
-    user = get_db().execute(
-        "SELECT id, name, email, country, password_hash FROM users WHERE email = ?", (email.lower(),)
-    ).fetchone()
+    with _app_db() as db:
+        user = db.execute(
+            "SELECT id, name, email, country, password_hash FROM users WHERE email = ?",
+            (email.lower(),),
+        ).fetchone()
+    # Outside the block on purpose: the hash check is deliberately slow (scrypt),
+    # and no connection should sit idle in the pool's hands while it runs.
     return user if user and check_password_hash(user["password_hash"], password) else None
 
 
 def get_user_for_password_reset(email: str) -> sqlite3.Row | None:
     """Return only the authentication material needed to issue a reset token."""
-    return get_db().execute(
-        "SELECT email, password_hash FROM users WHERE email = ?", (email.strip().lower(),)
-    ).fetchone()
+    with _app_db() as db:
+        return db.execute(
+            "SELECT email, password_hash FROM users WHERE email = ?", (email.strip().lower(),)
+        ).fetchone()
 
 
 def replace_password(email: str, expected_hash: str, new_hash: str) -> bool:
     """Atomically replace a password once, invalidating the token that authorized it."""
-    db = get_db()
-    cursor = db.execute(
-        "UPDATE users SET password_hash = ? WHERE email = ? AND password_hash = ?",
-        (new_hash, email.strip().lower(), expected_hash),
-    )
-    db.commit()
-    return cursor.rowcount == 1
+    with _app_db() as db:
+        cursor = db.execute(
+            "UPDATE users SET password_hash = ? WHERE email = ? AND password_hash = ?",
+            (new_hash, email.strip().lower(), expected_hash),
+        )
+        return cursor.rowcount == 1
 
 
 def create_user(name: str, email: str, password_hash: str, country: str,
                 birthday: str) -> sqlite3.Row | None:
     """Create an account, returning None when its normalized email already exists."""
-    db = get_db()
-    try:
-        user_id = db.insert_returning_id(
-            """INSERT INTO users (name, email, password_hash, country, birthday)
-               VALUES (?, ?, ?, ?, ?)""",
-            (name.strip(), email.strip().lower(), password_hash, country.strip(), birthday),
-        )
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        return None
-    return db.execute(
-        "SELECT id, name, email, country, birthday FROM users WHERE id = ?",
-        (user_id,),
-    ).fetchone()
+    with _app_db() as db:
+        try:
+            user_id = db.insert_returning_id(
+                """INSERT INTO users (name, email, password_hash, country, birthday)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (name.strip(), email.strip().lower(), password_hash, country.strip(), birthday),
+            )
+        except IntegrityError:
+            db.rollback()
+            return None
+        return db.execute(
+            "SELECT id, name, email, country, birthday FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
 
 
 def is_database_admin(path: Path | str, email: str | None) -> bool:
@@ -1796,7 +1871,6 @@ def init_db_command() -> None:
 
 
 def init_app(app: Flask) -> None:
-    app.teardown_appcontext(close_db)
     app.cli.add_command(init_db_command)
     initialize(app.config["DATABASE"])
     seed_login_user(app.config["DATABASE"], app.config["LOGIN_EMAIL"],
