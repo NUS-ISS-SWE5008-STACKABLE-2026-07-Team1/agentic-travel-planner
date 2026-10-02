@@ -227,3 +227,13 @@ def test_the_metrics_collector_may_reach_agents_metrics_but_not_a2a():
     policy = (K8S / "networkpolicy.yaml").read_text(encoding="utf-8")
     collector = policy[policy.index("gmp-system"):]
     assert "port: 9090" in collector and "port: 8000" not in collector
+
+
+def test_the_metrics_adapter_is_cluster_wide_and_kept_out_of_the_app_bundle():
+    """deploy/k8s forces everything into travel-planner; the adapter must not."""
+    adapter = K8S.parent / "k8s-cluster" / "custom-metrics-adapter.yaml"
+    text = adapter.read_text(encoding="utf-8")
+    assert "namespace: custom-metrics" in text and "v1beta1.custom.metrics.k8s.io" in text
+    assert not any("k8s-cluster" in item for item in _bundle(K8S))
+    # GKE's add-on manager owns this ClusterRole; redefining it would fight it.
+    assert "kind: ClusterRole\nmetadata:\n  name: external-metrics-reader" not in text
