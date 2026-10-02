@@ -42,9 +42,12 @@ spec:
             # the parent plan's audit trail instead of opening their own. Safe
             # only because networkpolicy.yaml makes web the sole caller.
             - {name: A2A_TRUST_CALLER_REQUEST_ID, value: "true"}
-          # Measured locally: ~135 MiB after a plan.
+          # Measured on GKE, 2026-09-18 to 10-02 (one reading a minute): CPU
+          # median 3m, p99 7m, peak 157m (a pod's first minute only); memory
+          # median 142 MiB, peak 202 MiB. 384Mi keeps ~1.9x over that peak.
+          # Watch for OOMKilled restarts — the restart alert covers it.
           resources:
-            requests: {cpu: 250m, memory: 512Mi}
+            requests: {cpu: 100m, memory: 384Mi}
             limits: {memory: 1Gi}
           securityContext:
             allowPrivilegeEscalation: false

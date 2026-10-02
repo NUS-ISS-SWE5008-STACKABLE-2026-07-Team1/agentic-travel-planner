@@ -45,12 +45,15 @@ spec:
             - secretRef: {name: app-secrets}
           env:
             - {name: A2A_INTERNAL_ENABLED, value: "true"}
-          # Measured locally: ~150 MiB after a plan. Autopilot bills requests,
-          # so these are sized to the measurement with headroom, not guessed.
-          # If Autopilot rewrites the limit to equal the request, that is its
-          # policy for this cluster version; watch for OOMKilled restarts.
+          # Autopilot bills requests, so these are sized to measurement on GKE,
+          # 2026-09-18 to 10-02 (one reading a minute): CPU median 7m, p99 45m,
+          # above 100m only in a pod's first minute (and once in a load test,
+          # a since-fixed 50 ms polling loop); memory median 130 MiB, peak
+          # 181 MiB. 384Mi keeps ~2x over that peak. If Autopilot rewrites the
+          # limit to equal the request, that is its policy for this cluster
+          # version; watch for OOMKilled restarts.
           resources:
-            requests: {cpu: 250m, memory: 512Mi}
+            requests: {cpu: 100m, memory: 384Mi}
             limits: {memory: 1Gi}
           securityContext:
             allowPrivilegeEscalation: false
