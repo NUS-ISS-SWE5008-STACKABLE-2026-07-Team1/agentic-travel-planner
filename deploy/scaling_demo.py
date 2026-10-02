@@ -127,6 +127,26 @@ def start_load(plans: int, waves: int, interval: float) -> None:
     kubectl("apply", "-f", "-", stdin=json.dumps(job))
 
 
+def db_stats() -> tuple[int, int]:
+    """(sessions ever opened on the database, connections open now).
+
+    `sessions` counts every connection made, however short, which a 15 s
+    sample of open connections would miss: unpooled, each call's connection
+    lives for milliseconds. Each call here opens one session itself; the
+    caller subtracts those. Excludes this probe from "open now".
+    """
+    pod = kubectl("get", "pods", "-l", "app=postgres", "-o", "jsonpath={.items[0].metadata.name}")
+    out = kubectl("exec", pod, "--", "psql", "-U", "travel", "-d", "travel", "-tAc",
+                  "SELECT (SELECT sessions FROM pg_stat_database WHERE datname = 'travel'), "
+                  "(SELECT count(*) FROM pg_stat_activity WHERE datname = 'travel' "
+                  "AND pid <> pg_backend_pid())", check=False).strip()
+    try:
+        opened, open_now = (int(x) for x in out.split("|"))
+    except ValueError:
+        return -1, -1
+    return opened, open_now
+
+
 def snapshot(started: float) -> dict:
     hpas = json.loads(kubectl("get", "hpa", "-o", "json"))["items"]
     pods = json.loads(kubectl("get", "pods", "-o", "json"))["items"]
@@ -144,6 +164,7 @@ def snapshot(started: float) -> dict:
     job = kubectl("get", "job", "load", "-o", "jsonpath={.status.succeeded}{.status.failed}",
                   check=False)
     row["job_done"] = bool(job.strip())
+    row["db_opened"], row["db_open"] = db_stats()
     return row
 
 
@@ -160,6 +181,7 @@ def _line(row: dict) -> str:
         r = row.get(role, {})
         cells.append(f"{role}: {_per_pod(str(r.get('gauge', '?'))):>5} per pod, "
                      f"desired {r.get('desired', '?')}, pods {r.get('ready', '?')}")
+    cells.append(f"db: {row.get('db_open', '?')} open")
     return "  |  ".join(cells)
 
 
@@ -237,8 +259,16 @@ def main() -> None:
         peak = {role: max((r.get(role, {}).get("ready") or 0) for r in timeline)
                 for role in ("web", "agents")}
         final = {role: timeline[-1].get(role, {}).get("ready") for role in ("web", "agents")}
+        # Sessions opened by the app during the load: the counter's rise minus
+        # the one session each sample's own probe opened.
+        loaded = [r for r in timeline if r.get("db_opened", -1) >= 0]
+        app_sessions = (loaded[-1]["db_opened"] - loaded[0]["db_opened"] - (len(loaded) - 1)
+                        if len(loaded) > 1 else "?")
+        peak_open = max((r.get("db_open", 0) for r in loaded), default="?")
         report[3:3] = [f"**{verdict}** · peak pods: web {peak['web']}, agents {peak['agents']} · "
-                       f"after cooldown: web {final['web']}, agents {final['agents']}", ""]
+                       f"after cooldown: web {final['web']}, agents {final['agents']}", "",
+                       f"Database: **{app_sessions} connections opened** by the app over the run, "
+                       f"at most {peak_open} open at once (sampled every 15 s).", ""]
     finally:
         if args.keep:
             print(f"\n--keep: namespace {NAMESPACE} left running; delete it with\n"
