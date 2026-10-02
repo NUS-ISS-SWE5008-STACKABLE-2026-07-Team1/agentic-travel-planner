@@ -224,8 +224,12 @@ def test_deploys_roll_instead_of_stopping_everything(role):
 
 
 def test_the_metrics_collector_may_reach_agents_metrics_but_not_a2a():
+    """On Autopilot the collectors run in gke-gmp-system. Naming gmp-system
+    (the Standard-cluster namespace) silently blocked them: the agents HPA
+    showed <unknown> while web, which has no NetworkPolicy, worked."""
     policy = (K8S / "networkpolicy.yaml").read_text(encoding="utf-8")
-    collector = policy[policy.index("gmp-system"):]
+    assert "kubernetes.io/metadata.name: gke-gmp-system}" in policy
+    collector = policy[policy.index("gke-gmp-system}"):]
     assert "port: 9090" in collector and "port: 8000" not in collector
 
 
