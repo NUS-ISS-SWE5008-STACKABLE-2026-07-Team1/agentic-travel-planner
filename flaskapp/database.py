@@ -156,7 +156,10 @@ CREATE TABLE IF NOT EXISTS planning_jobs (
     completed_at TEXT,
     error_type TEXT,
     session_status TEXT NOT NULL DEFAULT 'active',
-    session_ended_at TEXT
+    session_ended_at TEXT,
+    worker TEXT,
+    heartbeat_at REAL,
+    response_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS intake_messages (
@@ -393,7 +396,10 @@ CREATE TABLE IF NOT EXISTS planning_jobs (
     completed_at TEXT,
     error_type TEXT,
     session_status TEXT NOT NULL DEFAULT 'active',
-    session_ended_at TEXT
+    session_ended_at TEXT,
+    worker TEXT,
+    heartbeat_at DOUBLE PRECISION,
+    response_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS intake_messages (
@@ -947,6 +953,15 @@ def initialize(target: Path | str) -> None:
             )
         if "session_ended_at" not in job_columns:
             connection.execute("ALTER TABLE planning_jobs ADD COLUMN session_ended_at TEXT")
+        # Job state that any web pod can read (jobs.py). Nullable, no default:
+        # an old row has no worker, heartbeat or stored response, and saying so
+        # is the truth. REAL is spelled DOUBLE PRECISION on Postgres, as in the
+        # schema text.
+        heartbeat_type = "DOUBLE PRECISION" if connection.dialect == "postgres" else "REAL"
+        for name, kind in (("worker", "TEXT"), ("heartbeat_at", heartbeat_type),
+                           ("response_json", "TEXT")):
+            if name not in job_columns:
+                connection.execute(f"ALTER TABLE planning_jobs ADD COLUMN {name} {kind}")
         _repoint_flight_eval_run_fk(connection)
 
 
@@ -1125,14 +1140,18 @@ def save_audit_event(path: Path | str, item: dict[str, Any]) -> None:
 
 
 def create_planning_job(path: Path | str, request_id: str, user_id: int | None,
-                        request_payload: Any) -> None:
+                        request_payload: Any, *, worker: str | None = None,
+                        heartbeat_at: float | None = None) -> None:
     with connect(path) as db:
         db.execute(
-            """INSERT INTO planning_jobs (request_id, user_id, status, request_json)
-               VALUES (?, ?, 'queued', ?)
+            """INSERT INTO planning_jobs
+                   (request_id, user_id, status, request_json, worker, heartbeat_at)
+               VALUES (?, ?, 'queued', ?, ?, ?)
                ON CONFLICT(request_id) DO UPDATE SET status = 'queued',
-                   request_json = excluded.request_json""",
-            (request_id, user_id, _json(request_payload)),
+                   request_json = excluded.request_json, worker = excluded.worker,
+                   heartbeat_at = excluded.heartbeat_at, response_json = NULL,
+                   error_type = NULL, completed_at = NULL""",
+            (request_id, user_id, _json(request_payload), worker, heartbeat_at),
         )
 
 
@@ -1257,6 +1276,121 @@ def update_planning_job(path: Path | str, request_id: str, status: str,
                WHERE request_id = ?""",
             (status, error_type, status, request_id),
         )
+
+
+# --- Plan state shared by every web pod --------------------------------------
+#
+# A plan's status used to live only in the memory of the pod running it, so a
+# status poll that reached another pod got 404 (ADR-0005). These functions make
+# `planning_jobs` the record instead. Every transition is a conditional UPDATE
+# on the current status, so two pods racing (a cancel on one, completion on the
+# other) cannot overwrite each other: whichever lands first wins, and the other
+# sees rowcount 0.
+
+ACTIVE_JOB_STATUSES = ("queued", "processing")
+_ACTIVE = "('queued', 'processing')"
+
+
+def get_planning_job(path: Path | str, request_id: str) -> dict[str, Any] | None:
+    with connect(path) as db:
+        row = db.execute(
+            """SELECT request_id, user_id, status, error_type, worker, heartbeat_at,
+                      response_json
+               FROM planning_jobs WHERE request_id = ?""",
+            (request_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def start_planning_job(path: Path | str, request_id: str) -> bool:
+    """queued -> processing. False if it was cancelled while it waited."""
+    with connect(path) as db:
+        cursor = db.execute(
+            "UPDATE planning_jobs SET status = 'processing' "
+            "WHERE request_id = ? AND status = 'queued'",
+            (request_id,),
+        )
+        return cursor.rowcount == 1
+
+
+def finish_planning_job(path: Path | str, request_id: str, status: str, *,
+                        error_type: str | None = None, response: Any = None) -> bool:
+    """Record the outcome, unless the job already ended (e.g. was cancelled)."""
+    with connect(path) as db:
+        cursor = db.execute(
+            f"""UPDATE planning_jobs SET status = ?, error_type = ?, response_json = ?,
+                   completed_at = CURRENT_TIMESTAMP
+                WHERE request_id = ? AND status IN {_ACTIVE}""",
+            (status, error_type, _json(response) if response is not None else None,
+             request_id),
+        )
+        return cursor.rowcount == 1
+
+
+def cancel_planning_job(path: Path | str, request_id: str,
+                        user_id: int | None) -> str | None:
+    """Cancel the owner's job from any pod. Returns its resulting status.
+
+    None if there is no such job or it is not this user's; an absent user_id
+    owns nothing. A job that already ended keeps its status. The pod running
+    the job notices on its next heartbeat.
+    """
+    if user_id is None:
+        return None
+    with connect(path) as db:
+        row = db.execute(
+            "SELECT user_id, status FROM planning_jobs WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if row is None or row["user_id"] != user_id:
+            return None
+        cursor = db.execute(
+            f"""UPDATE planning_jobs SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP
+                WHERE request_id = ? AND status IN {_ACTIVE}""",
+            (request_id,),
+        )
+        if cursor.rowcount == 1:
+            return "cancelled"
+        return db.execute(
+            "SELECT status FROM planning_jobs WHERE request_id = ?", (request_id,)
+        ).fetchone()["status"]
+
+
+def heartbeat_planning_jobs(path: Path | str, request_ids: Iterable[str],
+                            now: float) -> set[str]:
+    """Mark this pod's jobs alive; return those another pod has cancelled."""
+    ids = list(request_ids)
+    if not ids:
+        return set()
+    marks = ", ".join("?" for _ in ids)
+    with connect(path) as db:
+        db.execute(
+            f"""UPDATE planning_jobs SET heartbeat_at = ?
+                WHERE request_id IN ({marks}) AND status IN {_ACTIVE}""",
+            (now, *ids),
+        )
+        rows = db.execute(
+            f"""SELECT request_id FROM planning_jobs
+                WHERE request_id IN ({marks}) AND status = 'cancelled'""",
+            tuple(ids),
+        ).fetchall()
+        return {row["request_id"] for row in rows}
+
+
+def fail_lost_planning_job(path: Path | str, request_id: str, stale_before: float) -> bool:
+    """Fail a job whose pod stopped sending heartbeats (it died or was removed).
+
+    Conditional on the heartbeat still being stale, so a job whose pod is only
+    slow is never failed under it.
+    """
+    with connect(path) as db:
+        cursor = db.execute(
+            f"""UPDATE planning_jobs SET status = 'failed', error_type = 'WorkerLost',
+                   completed_at = CURRENT_TIMESTAMP
+                WHERE request_id = ? AND status IN {_ACTIVE}
+                  AND (heartbeat_at IS NULL OR heartbeat_at < ?)""",
+            (request_id, stale_before),
+        )
+        return cursor.rowcount == 1
 
 
 def save_agent_run(path: Path | str, request_id: str, agent: str, status: str,

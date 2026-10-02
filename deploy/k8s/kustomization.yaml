@@ -23,7 +23,7 @@ resources:
   - configmap.yaml
   - services.yaml
   - networkpolicy.yaml
-  # Both autoscalers, capped at one pod until job and task state leave memory.
+  # Both autoscalers, capped at one pod; see the file for what lifts the cap.
   - hpa.yaml
   - pdb.yaml
   # Access option D: public, behind Identity-Aware Proxy. These two belong

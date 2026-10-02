@@ -5,8 +5,8 @@ consequences when the answer is no:
 
 - **Liveness** (`/healthz`) failing makes Kubernetes *restart* the container.
   It must therefore depend on nothing outside this process. If it checked the
-  database, a Supabase blip would restart every pod at once — killing the
-  planning jobs held in `jobs.py`'s in-memory dicts — and the restarted pods
+  database, a Supabase blip would restart every pod at once — killing every
+  plan those pods were running — and the restarted pods
   would find the database exactly as unreachable as before.
 - **Readiness** (`/readyz`) failing only takes the pod *out of the load
   balancer* until it recovers. That is the right response to a dependency
