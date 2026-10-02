@@ -403,6 +403,15 @@ EMPTY_LEG_DATE = "2026-09-12"   # SIN-NRT is stocked, but not on this date
 
 
 def _empty_leg_context():
+    """A context whose traveller asked for a date the route does not fly.
+
+    The tests below pass `depart_date=EMPTY_LEG_DATE` explicitly rather than
+    relying on the default. `search_flights` recovers the *traveller's own*
+    empty date automatically now (see `test_flight_empty_leg_recovery.py`), so a
+    default search here would return the recovered flights and these tests would
+    never see the empty-result reporting they exist to check. An explicitly
+    named date is the case that still reports rather than recovers.
+    """
     request = _request()
     context = request.trip_context.model_copy(update={"depart_date": EMPTY_LEG_DATE})
     return tools.ToolContext.for_request(
@@ -414,7 +423,9 @@ def _empty_leg_context():
 def test_exclusions_are_grouped_by_cause_not_by_row():
     """One bucket per cause. Twelve rows excluded for `wrong_date` is a signal;
     twelve distinct strings is noise."""
-    result = tools.search_flights(_empty_leg_context(), direction="OUTBOUND")
+    result = tools.search_flights(
+        _empty_leg_context(), direction="OUTBOUND", depart_date=EMPTY_LEG_DATE
+    )
     histogram = result["exclusion_reason_histogram"]
 
     assert result["included_count"] == 0, "scenario is no longer an empty leg"
@@ -425,7 +436,9 @@ def test_exclusions_are_grouped_by_cause_not_by_row():
 def test_empty_leg_reports_dates_the_route_actually_flies():
     """Derived from real rows, never guessed. This is what makes a second search
     worth issuing rather than a shot in the dark."""
-    result = tools.search_flights(_empty_leg_context(), direction="OUTBOUND")
+    result = tools.search_flights(
+        _empty_leg_context(), direction="OUTBOUND", depart_date=EMPTY_LEG_DATE
+    )
 
     nearby = result["dates_this_route_flies_nearby"]
     assert nearby, "an empty leg gave the caller nothing to act on"
@@ -437,7 +450,7 @@ def test_suggested_dates_are_inside_the_search_envelope():
     """Suggesting a date the envelope would then refuse would send the caller
     into a guaranteed rejection."""
     ctx = _empty_leg_context()
-    result = tools.search_flights(ctx, direction="OUTBOUND")
+    result = tools.search_flights(ctx, direction="OUTBOUND", depart_date=EMPTY_LEG_DATE)
 
     for day in result["dates_this_route_flies_nearby"]:
         follow_up = tools.search_flights(ctx, direction="OUTBOUND", depart_date=day)
@@ -447,7 +460,9 @@ def test_suggested_dates_are_inside_the_search_envelope():
 def test_suggested_dates_actually_have_flights():
     """The suggestion must be true: searching one of them must return rows."""
     ctx = _empty_leg_context()
-    suggested = tools.search_flights(ctx, direction="OUTBOUND")["dates_this_route_flies_nearby"]
+    suggested = tools.search_flights(
+        ctx, direction="OUTBOUND", depart_date=EMPTY_LEG_DATE
+    )["dates_this_route_flies_nearby"]
 
     found = tools.search_flights(ctx, direction="OUTBOUND", depart_date=suggested[0])
     assert found["included_count"] > 0, f"{suggested[0]} was suggested but has no flights"
