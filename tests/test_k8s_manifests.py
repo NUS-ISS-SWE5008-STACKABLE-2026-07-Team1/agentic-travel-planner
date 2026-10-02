@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 K8S = Path(__file__).resolve().parents[1] / "deploy" / "k8s"
 
 
@@ -143,3 +145,85 @@ def test_no_role_scales_past_one_pod_unless_any_pod_can_serve_any_request():
                 f"{role} answers some requests from one pod's memory, so a second "
                 "pod breaks plans in flight. See this test's docstring."
             )
+
+
+# --- scaling on work in flight, and draining before removal -------------------
+
+APP = K8S / "app"
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _hpa(role: str) -> str:
+    text = (K8S / "hpa.yaml").read_text(encoding="utf-8")
+    return next(doc for doc in text.split("\n---\n") if f"name: {role}}}" in doc)
+
+
+def _number(pattern: str, text: str) -> int:
+    return int(re.search(pattern, text).group(1))
+
+
+@pytest.mark.parametrize("role, gauge", [
+    ("web", "travel_planner_plans_in_flight"),
+    ("agents", "travel_planner_a2a_calls_in_flight"),
+])
+def test_each_role_scales_on_the_gauge_it_publishes(role, gauge):
+    """CPU never reflects this app's load; the HPA must read work in flight,
+    and the gauge name must match what the code serves, or the metric is
+    silently absent and only CPU is left."""
+    assert f"prometheus.googleapis.com|{gauge}|gauge" in _hpa(role)
+    served = (ROOT / "gunicorn.conf.py").read_text(encoding="utf-8") + (
+        ROOT / "scripts" / "a2a_server.py").read_text(encoding="utf-8")
+    assert f'"{gauge}"' in served
+    manifest = (APP / f"{role}.yaml").read_text(encoding="utf-8")
+    assert "{name: metrics, containerPort: 9090}" in manifest
+    assert '{name: METRICS_PORT, value: "9090"}' in manifest
+
+
+def test_the_gauges_are_scraped():
+    assert "pod-monitoring.yaml" in _bundle(K8S)
+    text = (K8S / "pod-monitoring.yaml").read_text(encoding="utf-8")
+    assert "port: metrics" in text and "values: [web, agents]" in text
+
+
+@pytest.mark.parametrize("role", ["web", "agents"])
+def test_scale_down_is_slow_and_one_pod_at_a_time(role):
+    hpa = _hpa(role)
+    down = hpa[hpa.index("scaleDown:"):]
+    assert _number(r"stabilizationWindowSeconds: (\d+)", down) >= 300
+    assert "{type: Pods, value: 1, periodSeconds: 300}" in down
+
+
+def test_a_web_pod_drains_running_plans_before_it_is_killed():
+    """preStop + gunicorn's graceful wait must fit inside the grace period, or
+    Kubernetes kills the pod mid-plan anyway."""
+    web = (APP / "web.yaml").read_text(encoding="utf-8")
+    graceful = _number(r"graceful_timeout = (\d+)",
+                       (ROOT / "gunicorn.conf.py").read_text(encoding="utf-8"))
+    pre_stop = _number(r"sleep: \{seconds: (\d+)\}", web)
+    grace = _number(r"terminationGracePeriodSeconds: (\d+)", web)
+    assert pre_stop + graceful < grace
+    assert graceful >= 250, "a plan takes ~3.5 minutes on GKE"
+    assert '"--config", "gunicorn.conf.py"' in (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+
+def test_an_agents_pod_outlives_the_calls_it_is_serving():
+    agents = (APP / "agents.yaml").read_text(encoding="utf-8")
+    config = (ROOT / "flaskapp" / "config.py").read_text(encoding="utf-8")
+    call_timeout = _number(r'FLIGHT_AGENT_A2A_TIMEOUT_SECONDS", "(\d+)"', config)
+    pre_stop = _number(r"sleep: \{seconds: (\d+)\}", agents)
+    assert pre_stop + call_timeout < _number(r"terminationGracePeriodSeconds: (\d+)", agents)
+
+
+@pytest.mark.parametrize("role", ["web", "agents"])
+def test_deploys_roll_instead_of_stopping_everything(role):
+    """Recreate stopped every pod before starting new ones, cutting off every
+    plan in flight. Rolling is only safe because any pod serves any request."""
+    manifest = (APP / f"{role}.yaml").read_text(encoding="utf-8")
+    assert "type: RollingUpdate" in manifest and "Recreate" not in manifest
+    assert "maxUnavailable: 0" in manifest
+
+
+def test_the_metrics_collector_may_reach_agents_metrics_but_not_a2a():
+    policy = (K8S / "networkpolicy.yaml").read_text(encoding="utf-8")
+    collector = policy[policy.index("gmp-system"):]
+    assert "port: 9090" in collector and "port: 8000" not in collector

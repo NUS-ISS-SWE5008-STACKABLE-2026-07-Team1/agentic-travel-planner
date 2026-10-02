@@ -180,6 +180,16 @@ def cancel_job(database_path: str, request_id: str, user_id: int | None) -> Plan
     return PlanningJob(request_id=request_id, user_id=user_id, status=status)
 
 
+def plans_in_flight() -> int:
+    """Plans this pod is running or has queued: the web role's real load.
+
+    What the web autoscaler targets (flaskapp/metrics.py, deploy/k8s/hpa.yaml).
+    Queued plans count, because a queue is exactly when another pod helps.
+    """
+    with _lock:
+        return len(_running)
+
+
 def _is_lost(row: dict[str, Any]) -> bool:
     heartbeat = row["heartbeat_at"]
     return heartbeat is None or heartbeat < time.time() - LOST_AFTER_SECONDS

@@ -1,28 +1,32 @@
-# Horizontal Pod Autoscalers for both roles — CAPPED AT ONE POD for now.
+# Horizontal Pod Autoscalers: 1 to 3 pods per role, scaled on WORK IN FLIGHT.
 #
-# These existed in the cluster since 2026-09-19 (created by hand for the
-# scaling proof, maxReplicas 3) but were never in git. Capped on 2026-10-02
-# because a second pod of either role broke plans in flight:
+# History. These were created by hand for the 2026-09-19 scaling proof (CPU,
+# max 3, not in git) and capped at one on 2026-10-02, because a second pod of
+# either role broke plans in flight. Both causes are fixed — web's job state is
+# in planning_jobs, agents' client makes one blocking call — so any pod can
+# serve any request (tests/test_k8s_manifests.py re-imposes the cap if either
+# regresses).
 #
-#   web     job state lived in jobs.py's module dicts, so a status poll that
-#           reached the other pod got 404 while the plan still ran.
-#   agents  the client polled GetTask, which could reach a pod that never saw
-#           the task (tasks are in an InMemoryTaskStore).
+# Why not CPU. A plan spends nearly all its time waiting on the model: measured
+# 2026-09-18 to 10-02, web p99 45m CPU, agents p99 7m. A pod running four plans
+# looks idle, so CPU would never add a pod when one is needed. What fills a pod:
 #
-# Both are fixed (state in planning_jobs; one blocking SendMessage), so the
-# test no longer holds the cap. It stays at one until two more pieces land:
-# a scaling signal that reflects this app's load (below), and scale-down that
-# does not remove a pod mid-plan.
+#   web     4 plans at once (jobs.MAX_CONCURRENT_PLANS); more wait in a queue.
+#           Target 3 per pod: add a pod before the queue starts, not after.
+#   agents  specialist calls run in asyncio's default thread pool, 12 threads
+#           on these 8-CPU nodes; a plan makes up to 4 calls at once.
+#           Target 8 per pod: two plans' worth, leaving headroom.
 #
-# CPU is also the wrong signal for this app: a plan spends nearly all its time
-# waiting on the model. Measured 2026-09-18 to 10-02, one reading per minute:
-# web p99 45m CPU, agents p99 7m; every reading above 80m except one load-test
-# incident is a pod's first minute, which the autoscaler ignores. A pod is
-# really full at 4 concurrent plans (jobs.py ThreadPoolExecutor), which CPU
-# does not show.
+# Both gauges come from flaskapp/metrics.py via pod-monitoring.yaml and reach
+# the HPA through the Custom Metrics Stackdriver Adapter. CPU stays as a second
+# metric for request floods; the HPA follows whichever asks for more pods. If
+# the adapter is missing the HPA still scales up on CPU, and never down on a
+# metric it cannot read.
 #
-# tests/test_k8s_manifests.py re-imposes the cap automatically if either fix
-# regresses.
+# Scale-down is deliberately slow (10-minute window, one pod per 5 minutes),
+# and a removed pod drains first (web.yaml / agents.yaml): it stops taking new
+# work and finishes what it is running. Scale-up is immediate, two pods a
+# minute.
 #
 # Applied by hand with the rest of this directory (`kubectl apply -k deploy/k8s`),
 # not by the pipeline, whose RBAC cannot touch autoscalers.
@@ -33,12 +37,23 @@ metadata:
 spec:
   scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: web}
   minReplicas: 1
-  maxReplicas: 1
+  maxReplicas: 3
   metrics:
+    - type: Pods
+      pods:
+        metric: {name: "prometheus.googleapis.com|travel_planner_plans_in_flight|gauge"}
+        target: {type: AverageValue, averageValue: "3"}
     - type: Resource
       resource:
         name: cpu
         target: {type: Utilization, averageUtilization: 80}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies: [{type: Pods, value: 2, periodSeconds: 60}]
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies: [{type: Pods, value: 1, periodSeconds: 300}]
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -47,9 +62,20 @@ metadata:
 spec:
   scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: agents}
   minReplicas: 1
-  maxReplicas: 1
+  maxReplicas: 3
   metrics:
+    - type: Pods
+      pods:
+        metric: {name: "prometheus.googleapis.com|travel_planner_a2a_calls_in_flight|gauge"}
+        target: {type: AverageValue, averageValue: "8"}
     - type: Resource
       resource:
         name: cpu
         target: {type: Utilization, averageUtilization: 80}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies: [{type: Pods, value: 2, periodSeconds: 60}]
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies: [{type: Pods, value: 1, periodSeconds: 300}]

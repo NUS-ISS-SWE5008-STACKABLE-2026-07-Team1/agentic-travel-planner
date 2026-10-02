@@ -23,7 +23,10 @@ resources:
   - configmap.yaml
   - services.yaml
   - networkpolicy.yaml
-  # Both autoscalers, capped at one pod; see the file for what lifts the cap.
+  # Autoscaling on work in flight: the gauges' scrape config, then the HPAs.
+  # The Custom Metrics Stackdriver Adapter they read through is cluster-wide
+  # and installed separately; see hpa.yaml.
+  - pod-monitoring.yaml
   - hpa.yaml
   - pdb.yaml
   # Access option D: public, behind Identity-Aware Proxy. These two belong

@@ -12,7 +12,10 @@ import uvicorn
 from flaskapp import create_app
 from flaskapp.config import get_llm_settings
 from flaskapp.travel_ai.guardrails import LlmGuardrail, guardrail_settings
-from flaskapp.travel_ai.a2a_standard import ExecutorContext, build_a2a_application
+from flaskapp.metrics import start_metrics_server
+from flaskapp.travel_ai.a2a_standard import (
+    ExecutorContext, build_a2a_application, calls_in_flight,
+)
 from flaskapp.travel_ai.agents import SPECIALIST_NODE_FACTORIES
 from flaskapp.travel_ai.llm import build_llm
 from flaskapp.travel_ai.safeguards import screen_request_l2, validate_request
@@ -87,6 +90,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args()
     flask_app = create_app()
+    # For the agents autoscaler; a no-op unless METRICS_PORT is set.
+    start_metrics_server({
+        "travel_planner_a2a_calls_in_flight": (
+            "A2A calls this pod is serving (one per specialist task)", calls_in_flight,
+        ),
+    })
     uvicorn.run(
         create_application(flask_app),
         host=args.host or flask_app.config["A2A_HOST"],
