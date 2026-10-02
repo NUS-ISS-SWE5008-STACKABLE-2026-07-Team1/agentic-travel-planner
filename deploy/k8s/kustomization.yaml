@@ -23,6 +23,8 @@ resources:
   - configmap.yaml
   - services.yaml
   - networkpolicy.yaml
+  # Both autoscalers, capped at one pod until job and task state leave memory.
+  - hpa.yaml
   - pdb.yaml
   # Access option D: public, behind Identity-Aware Proxy. These two belong
   # together — iap.yaml carries the BackendConfig that puts Google sign-in in

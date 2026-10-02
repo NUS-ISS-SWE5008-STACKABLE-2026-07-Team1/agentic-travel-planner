@@ -103,3 +103,40 @@ def test_the_image_policy_refuses_placeholders_and_foreign_images():
         "us-west1-docker.pkg.dev/some-project/travel-planner/app",
     ):
         assert not _allowed(image), image
+
+
+def _max_replicas() -> dict[str, int]:
+    """maxReplicas per autoscaler in hpa.yaml, keyed by its target Deployment."""
+    text = (K8S / "hpa.yaml").read_text(encoding="utf-8")
+    return {
+        target: int(maximum)
+        for target, maximum in re.findall(
+            r"kind: Deployment, name: (\w+)\}.*?maxReplicas: (\d+)", text, re.S
+        )
+    }
+
+
+def test_the_autoscalers_are_applied_with_the_infrastructure():
+    assert "hpa.yaml" in _bundle(K8S)
+    assert set(_max_replicas()) == {"web", "agents"}
+
+
+def test_no_role_scales_past_one_pod_while_its_state_is_in_memory():
+    """A second pod of either role breaks plans in flight today.
+
+    web: the status poll can reach a pod without the job (404). agents: the
+    GetTask poll can reach a pod without the task. When the state moves into
+    the database the marker below disappears and this stops holding the cap.
+    """
+    source = Path(__file__).resolve().parents[1] / "flaskapp" / "travel_ai"
+    in_memory = {
+        "web": "_jobs: dict[" in (source / "jobs.py").read_text(encoding="utf-8"),
+        "agents": "InMemoryTaskStore()" in (source / "a2a_standard.py").read_text(encoding="utf-8"),
+    }
+    assert any(in_memory.values()), "the markers moved; update this test"
+    for role, maximum in _max_replicas().items():
+        if in_memory[role]:
+            assert maximum == 1, (
+                f"{role} keeps its state in process memory, so a second pod "
+                "breaks plans in flight. Move the state first (ADR 0017)."
+            )

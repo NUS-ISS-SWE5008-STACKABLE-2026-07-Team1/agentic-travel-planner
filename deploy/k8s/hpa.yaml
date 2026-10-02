@@ -1,0 +1,53 @@
+# Horizontal Pod Autoscalers for both roles — CAPPED AT ONE POD for now.
+#
+# These existed in the cluster since 2026-09-19 (created by hand for the
+# scaling proof, maxReplicas 3) but were never in git. They are here so the
+# cluster matches the repo, and capped because a second pod of either role
+# breaks plans today:
+#
+#   web     flaskapp/travel_ai/jobs.py keeps job state in module-level dicts.
+#           The browser polls GET .../status; a poll that lands on the other
+#           pod gets 404 "Planning job not found" while the plan still runs.
+#   agents  a2a_standard.py keeps A2A tasks in an InMemoryTaskStore; the
+#           client's GetTask poll can land on a pod that never saw the task.
+#
+# CPU is also the wrong signal for this app: a plan spends nearly all its time
+# waiting on the model. Measured 2026-09-18 to 10-02, one reading per minute:
+# web p99 45m CPU, agents p99 7m; every reading above 80m except one load-test
+# incident is a pod's first minute, which the autoscaler ignores. A pod is
+# really full at 4 concurrent plans (jobs.py ThreadPoolExecutor), which CPU
+# does not show.
+#
+# To scale a role: move its state into the database first (ADR 0017, Phase 1
+# for web, Phase 2 for agents), then raise maxReplicas here — and consider a
+# signal other than CPU. tests/test_k8s_manifests.py holds both at 1 until then.
+#
+# Applied by hand with the rest of this directory (`kubectl apply -k deploy/k8s`),
+# not by the pipeline, whose RBAC cannot touch autoscalers.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: web}
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 80}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agents
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: agents}
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 80}
