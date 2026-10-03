@@ -45,7 +45,11 @@ from flaskapp.database import save_agent_run, save_flight_eval_run
 from flaskapp.travel_ai.a2a import response_message
 from flaskapp.travel_ai.agents.base import make_specialist_node
 from flaskapp.travel_ai.agents.flight_agent.adapter import to_flight_request
-from flaskapp.travel_ai.agents.flight_agent.domain import _party_size
+from flaskapp.travel_ai.agents.flight_agent.domain import (
+    _party_size,
+    flyable_dates_for_leg,
+    leg_route_and_date,
+)
 from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION, PATH2_INSTRUCTION
 from flaskapp.travel_ai.agents.flight_agent.providers import get_inventory_provider
 from flaskapp.travel_ai.agents.flight_agent.providers.seed import INVENTORY_ASSUMPTION
@@ -53,7 +57,11 @@ from flaskapp.travel_ai.agents.flight_agent.reasoners import select_reasoner
 from flaskapp.travel_ai.agents.flight_agent.tools import ToolContext, budget_from_config
 from flaskapp.travel_ai.agents.loop import EVENT_BUDGET_EXHAUSTED
 from flaskapp.travel_ai.guardrails.specialist import make_postprocess, make_preflight
-from flaskapp.travel_ai.agents.flight_agent.schemas import FlightCandidate, FlightProposal
+from flaskapp.travel_ai.agents.flight_agent.schemas import (
+    FlightCandidate,
+    FlightProposal,
+    FlightProposalRequest,
+)
 from flaskapp.travel_ai.schemas import AgentFinding, Option, OptionSchedule, TravelRequest
 from flaskapp.travel_ai.terminal import log_payload
 from flaskapp.travel_ai.usage import TokenUsageCallback
@@ -278,26 +286,76 @@ def _candidate_to_option(
     )
 
 
-def _coverage_warnings(proposal: FlightProposal) -> list[str]:
-    """Name an empty leg explicitly.
+# How far either side of the traveller's own date a coverage warning may look
+# for dates to name. Deliberately wider than `tools.MAX_DATE_SHIFT_DAYS`, which
+# bounds what the agent may silently search: naming a date someone can choose to
+# ask for costs them nothing, while moving them to it unasked is a decision only
+# they can make. Two weeks is about as far as a trip date usually bends.
+COVERAGE_SUGGESTION_WINDOW_DAYS = 14
+
+# At most this many dates in one warning. A fortnight of a thrice-weekly route
+# is a dozen dates, which reads as a timetable rather than as an answer; the
+# nearest few are the ones a traveller would actually consider.
+COVERAGE_SUGGESTION_MAX_DATES = 3
+
+
+def _coverage_warnings(
+    proposal: FlightProposal,
+    request: FlightProposalRequest | None = None,
+    inventory: list | None = None,
+) -> list[str]:
+    """Name an empty leg explicitly, and say what to ask for instead.
 
     A proposal with an outbound but no return is a partial answer, and saying
     so is more useful to the orchestrator than a shorter option list it has to
     infer the meaning of.
+
+    The dates come from `flyable_dates_for_leg` — real rows, nearest first —
+    because "no flight is available" without them leaves the traveller to retry
+    blind. A real request for 29 Nov returned exactly that, while the route flew
+    on the 25th and the 4th and nothing in the answer said so.
+
+    The wording names the traveller's own date and the route, and nothing about
+    where the agent looked. Which inventory was loaded is an implementation
+    detail of ours, not a fact about their trip.
     """
-    return [
-        f"No {direction.lower()} flight in the loaded inventory satisfies these "
-        "dates and constraints."
-        for direction in ("OUTBOUND", "RETURN")
-        if not any(c.direction == direction for c in proposal.candidates)
-    ]
+    warnings: list[str] = []
+    for direction in ("OUTBOUND", "RETURN"):
+        if any(c.direction == direction for c in proposal.candidates):
+            continue
+        leg = direction.lower()
+        if request is None:
+            # No request to read a date off: name the empty leg and stop.
+            warnings.append(f"No {leg} flight is available for the dates requested.")
+            continue
+        asked = leg_route_and_date(request, direction)[2].isoformat()
+        flying = flyable_dates_for_leg(
+            inventory or [], request, direction,
+            within_days=COVERAGE_SUGGESTION_WINDOW_DAYS,
+        )[:COVERAGE_SUGGESTION_MAX_DATES]
+        if flying:
+            warnings.append(
+                f"No {leg} flight is available on {asked}. This route flies on "
+                f"{', '.join(flying)} — ask for one of those dates instead."
+            )
+        else:
+            warnings.append(
+                f"No {leg} flight is available on {asked} for this route and "
+                "the requirements given."
+            )
+    return warnings
 
 
 def _build_finding(
     proposal: FlightProposal, response, currency: str, unresolved: list[str], assumption: str,
     party_size: int = 1,
+    request: FlightProposalRequest | None = None,
+    inventory: list | None = None,
 ) -> AgentFinding:
-    warnings = list(unresolved) + _coverage_warnings(proposal)
+    # Optional so the many tests that only care about options keep their
+    # call shape; without them an empty leg is still named, just without
+    # the dates to ask for instead.
+    warnings = list(unresolved) + _coverage_warnings(proposal, request, inventory or [])
     if response.escalate and response.escalation_reason:
         warnings.append(f"Escalation requested: {response.escalation_reason}")
     if response.acknowledgment_applied is not None:
@@ -580,6 +638,15 @@ def create_node(llm, tracer, provider=None, config=None):
                 # `travel_request.travellers`, so the displayed cost cannot
                 # drift from the ranked one if the adapter's mapping changes.
                 party_size=_party_size(ctx.base_request.trip_context),
+                # `resolved_request` keeps the traveller's own date on any leg
+                # that found nothing (that is its contract), so the warning
+                # names the date they asked for — while a leg that did move is
+                # not warned about at all, only disclosed by `date_shift_notes`.
+                request=ctx.resolved_request(),
+                # Everything the cache saw, not the first fetch: on the loop
+                # path a later search may be the only one that touched the
+                # dates worth naming.
+                inventory=ctx.cache.all_rows or inventory,
             )
             log_payload(f"REQUEST {state['request_id']} | {NAME.upper()} RESPONSE", finding)
             tracer.record("agent_completed", NAME, {

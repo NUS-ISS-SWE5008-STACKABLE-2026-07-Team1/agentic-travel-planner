@@ -72,6 +72,11 @@ DIRECTIONS = ("OUTBOUND", "RETURN")
 # five dates inside a 42-day window) without turning "Tuesday" into "next week".
 MAX_DATE_SHIFT_DAYS = 3
 
+# An empty leg recovered itself onto a date the route actually flies. Its own
+# event rather than a second `agent_tool_called`, so a trace can tell a search
+# the model asked for from one the code made on its behalf.
+EVENT_AUTO_DATE_RETRY = "agent_auto_date_retry"
+
 # Ranked results returned to the model per search. Enough to choose between,
 # small enough that several searches do not crowd out the conversation.
 MAX_ROWS_RETURNED = 12
@@ -445,21 +450,20 @@ def _tool(func):
     return func
 
 
-@_tool
-def search_flights(
+def _search_leg_once(
     ctx: ToolContext,
-    *,
     direction: str,
-    depart_date: str | None = None,
-    origin_airports: list[str] | None = None,
-    dest_airports: list[str] | None = None,
-) -> dict:
-    """Search real inventory for one leg, optionally shifting date or airports."""
-    refusal = _validate_search_args(ctx, direction, depart_date, origin_airports, dest_airports)
-    if refusal is not None:
-        ctx.record(EVENT_TOOL_REJECTED, {"tool": "search_flights", "reason_code": refusal["error"]})
-        return refusal
+    depart_date: str | None,
+    origin_airports: list[str] | None,
+    dest_airports: list[str] | None,
+) -> tuple[dict, list]:
+    """One search of one leg: fetch, screen, rank, record. Returns (result, candidates).
 
+    Split out of `search_flights` so the automatic retry below runs the search
+    it replaces rather than a second implementation of it. A retry that screened
+    or ranked differently from the search it stands in for would make the trace
+    describe work that did not happen.
+    """
     request = _search_request(ctx, direction, depart_date, origin_airports, dest_airports)
     rows, notes = ctx.cache.rows_for(request)
     ctx.notes.extend(note for note in notes if note not in ctx.notes)
@@ -509,7 +513,83 @@ def search_flights(
                 f"No flights on {leg_date.isoformat()}. This route flies on "
                 f"{', '.join(nearby)} — search again with one of those dates."
             )
-    return result
+    return result, candidates
+
+
+@_tool
+def search_flights(
+    ctx: ToolContext,
+    *,
+    direction: str,
+    depart_date: str | None = None,
+    origin_airports: list[str] | None = None,
+    dest_airports: list[str] | None = None,
+) -> dict:
+    """Search real inventory for one leg, optionally shifting date or airports.
+
+    An empty leg retries itself once, in code, on the nearest date the route
+    actually flies inside the envelope.
+
+    **Why this is not left to the model.** Returning `suggestion` and trusting
+    the caller to act on it was the previous behaviour, and it failed in
+    production: handed "this route flies on 2026-11-30", the model spent its
+    remaining tool calls probing +/-1 day on both legs, hit `MAX_TOOL_CALLS`,
+    and the request returned nothing — while a flight it had been told about
+    sat one search away. That is the same class of mistake `domain.py` exists
+    to prevent. Which flights are chosen is a code decision here; which *date*
+    gets searched when the traveller's own has no inventory is the same kind of
+    decision, and is now made the same way.
+
+    The retry costs no model turn and no tool call, only a cache lookup the
+    budget still governs. `suggestion` survives for the case the retry cannot
+    reach: a route whose nearest flying date is outside the envelope, where the
+    answer belongs to the traveller rather than to the agent.
+    """
+    refusal = _validate_search_args(ctx, direction, depart_date, origin_airports, dest_airports)
+    if refusal is not None:
+        ctx.record(EVENT_TOOL_REJECTED, {"tool": "search_flights", "reason_code": refusal["error"]})
+        return refusal
+
+    result, candidates = _search_leg_once(
+        ctx, direction, depart_date, origin_airports, dest_airports
+    )
+    if candidates:
+        return result
+
+    # Only the traveller's own date recovers itself. A caller that named a date
+    # asked a question about *that* date, and answering about a different one
+    # would be a silent substitution rather than a recovery — it would also let
+    # a widened search that came back empty rewrite the request, which
+    # `resolved_request` exists to prevent. So an explicit `depart_date` keeps
+    # the honest empty result and the suggestion, and the model decides.
+    if depart_date is not None:
+        return result
+
+    # Every date `_nearby_dates` returns is already inside the envelope and
+    # already known to have rows on this route, so the retry cannot widen the
+    # search past what the caller was allowed to ask for itself. Exactly one
+    # retry: `_search_leg_once` is called directly rather than recursing, so a
+    # route with repeated empty dates cannot loop.
+    nearby = result.get("dates_this_route_flies_nearby") or []
+    if not nearby:
+        return result
+    retried, retried_candidates = _search_leg_once(
+        ctx, direction, nearby[0], origin_airports, dest_airports
+    )
+    if not retried_candidates:
+        return result
+    ctx.record(EVENT_AUTO_DATE_RETRY, {
+        "direction": direction,
+        "from_date": result["searched_date"],
+        "to_date": retried["searched_date"],
+        "included_count": retried["included_count"],
+    })
+    # Named so the model's rationale can explain the move rather than discover
+    # it. `ctx.effective_dates` is what carries the shift into the proposal, and
+    # `ctx.date_shift_notes()` is what discloses it to the traveller — neither
+    # depends on the model noticing this key.
+    retried["auto_retried_from_date"] = result["searched_date"]
+    return retried
 
 
 @_tool
