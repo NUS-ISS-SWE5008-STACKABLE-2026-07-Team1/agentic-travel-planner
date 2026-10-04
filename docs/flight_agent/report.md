@@ -5,7 +5,7 @@ Responsible-AI position, testing and known limitations for the Flight Agent.
 Was Part B of `docs/progress.md` until 2026-08-23, when that file became a
 personal working log and stopped being tracked. Nothing in this document changed
 in the move; only its location did. `docs/flight_agent/design.md` covers the
-architecture, `inventory_sources.md` the seed/Duffel split, and
+architecture, `inventory_sources.md` the seed source, and
 `mode-eval.md` the live measurements.
 
 ---
@@ -426,7 +426,7 @@ who is blocked, not by size.
 | 2 | **Renegotiation loop is unwired.** `FlightConstraints` and `negotiation_history` are implemented and tested, but no orchestrator loop issues them. | ~half day | Carried over. The tool loop does not replace this — it is intra-agent, renegotiation is inter-agent. |
 | 3 | **Estimated output is not visually distinct.** The no-inventory path is distinguished only by a warning list, which readers skim past. | frontend | `design.md` §3 option 1's presentational half, deliberately deferred. |
 | 4 | **`agent_relaxation_applied` records model free text** in an audit trail specified to hold counts only. | ~30 min | Pre-existing. Narrow to a reason code. |
-| 5 | **Duffel multi-airport fan-out never exercised live.** Provider is built and unit-tested; the billed path is not. | ~2 h | Also re-read `FLIGHT_AGENT_MAX_PROVIDER_CALLS` first: it bounds `fetch` calls, and one fetch can be four billed searches. |
+| 5 | **Before adding a live supplier, re-size `FLIGHT_AGENT_MAX_PROVIDER_CALLS`.** It bounds `fetch` calls, and a live fetch can be several billed searches. | ~1 h | The Duffel provider was removed on 2026-10-04 as unused. |
 | 6 | Sharpen the multi-gap fixture so limitation 4 can be resolved either way. | ~1 h | Carried over. |
 
 ### 7.2 Guardrails and evaluation
@@ -490,5 +490,4 @@ Also outstanding, and newly relevant:
 | Live demos | `scripts/demo_golden_scenario.py`, `scripts/demo_multi_gap_relaxation.py` |
 | Scenario log generator | `scripts/report_flight_scenarios.py` |
 | End-to-end harness | `scripts/e2e_test.py` |
-| Duffel smoke test | `scripts/duffel_smoke.py` |
 | Earlier report draft | `docs/individual_reports/flight_agent.md` (predates integration) |

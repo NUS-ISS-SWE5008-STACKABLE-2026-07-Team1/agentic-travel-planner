@@ -119,8 +119,7 @@ CITY_FLIGHT_NO_BASE = 600
 # same shape would not be.
 #
 # London, because `places.py` already resolves LHR/LGW/STN/LTN, SIN-LHR is
-# already stocked (so the two hubs connect), and `scripts/duffel_smoke.py` already
-# uses LHR-JFK as its reference search.
+# already stocked (so the two hubs connect).
 #
 # Two rules, both load-bearing:
 #

@@ -64,10 +64,9 @@ class LoopBudget:
     Defaults are chosen for the seed provider, where re-searching is free
     in-memory refiltering, and are safe if a billed provider is switched on.
     Note that `max_provider_calls` bounds calls to `fetch`, NOT supplier
-    searches: `duffel.fetch` fans out over airport pairs and can issue up to
-    `MAX_AIRPORTS_PER_CITY ** 2` billed POSTs per call, so 2 here can mean 8
-    billed searches. Sized accordingly rather than renamed, because `fetch` is
-    the only unit this module can actually observe.
+    searches: a live provider that fanned out over airport pairs could issue
+    several billed searches per call. `fetch` is the only unit this module can
+    actually observe.
 
     Every `spend_*` returns False instead of raising when the limit is reached.
     Callers turn that into a refusal the model can read and conclude from.
