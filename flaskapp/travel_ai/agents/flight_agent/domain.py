@@ -681,21 +681,13 @@ def flyable_dates_for_leg(
 ) -> list[str]:
     """Dates this leg's route actually flies, nearest to the requested date first.
 
-    Pure, and derived from real rows rather than guessed — the same discipline
-    as `tools._nearby_dates`, but answering a different question, which is why
-    the window is a parameter rather than `MAX_DATE_SHIFT_DAYS`.
+    Pure, and derived from real rows rather than guessed. It reads the whole
+    dataset at once, which only static data allows. The agent deliberately no
+    longer uses it: a real supplier has to be searched one date at a time (see
+    `tools.search_flights`). It remains for tests that state a scenario's
+    premise ("this route flies on 30 Nov") independently of the code under test.
 
-    `tools._nearby_dates` bounds what the agent may *silently search* on the
-    traveller's behalf, so it is deliberately tight. This bounds what the
-    traveller is *told they could ask for instead*, where the same narrowness
-    is a defect: a route flying four days either side of a date with no
-    inventory leaves them to retry blind, which is precisely how a real request
-    for 29 Nov returned nothing useful. Telling someone a date they must
-    re-confirm is cheap; the agent moving them there unasked is not.
-
-    Route matching only — seats, budget and the rest are not applied, because a
-    date that exists but fails a filter is still a date worth naming, and the
-    warning says "available", not "bookable".
+    Route matching only — seats, budget and the rest are not applied.
     """
     origin, dest, asked = leg_route_and_date(request, direction)
     flying: set[date] = set()

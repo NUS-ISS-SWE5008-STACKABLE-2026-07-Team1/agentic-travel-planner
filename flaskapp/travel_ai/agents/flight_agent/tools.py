@@ -54,6 +54,7 @@ from flaskapp.travel_ai.agents.flight_agent.schemas import (
     PreferenceAcknowledgment,
 )
 from flaskapp.travel_ai.agents.loop import (
+    BUDGET_NOTE,
     EVENT_TOOL_CALLED,
     EVENT_TOOL_REJECTED,
     REASON_BUDGET_EXHAUSTED,
@@ -72,10 +73,15 @@ DIRECTIONS = ("OUTBOUND", "RETURN")
 # five dates inside a 42-day window) without turning "Tuesday" into "next week".
 MAX_DATE_SHIFT_DAYS = 3
 
-# An empty leg recovered itself onto a date the route actually flies. Its own
-# event rather than a second `agent_tool_called`, so a trace can tell a search
-# the model asked for from one the code made on its behalf.
+# The code walked nearby dates for an empty leg. Its own event rather than more
+# `agent_tool_called` entries, so a trace can tell a search the model asked for
+# from the ones the code made on its behalf.
 EVENT_AUTO_DATE_RETRY = "agent_auto_date_retry"
+
+# Which way the empty-leg walk may move a date. The model sets it only when the
+# traveller gave a reason ("I must be back by the 5th" -> earlier); the code
+# still does the walking. "either" is the default and means nearest first.
+SHIFT_PREFERENCES = ("either", "earlier", "later")
 
 # Ranked results returned to the model per search. Enough to choose between,
 # small enough that several searches do not crowd out the conversation.
@@ -162,6 +168,10 @@ class ToolContext:
     # survive into the final proposal is a tool that does nothing. Empty means
     # nobody expressed a preference, and the deterministic default applies.
     effective_priority: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Direction -> every date a search actually ran for. The traveller-facing
+    # warning may only claim dates that are in here: "no flight between 26 Nov
+    # and 2 Dec" must mean those days were searched, not that we peeked.
+    searched_dates: dict[str, set[str]] = field(default_factory=dict)
 
     @classmethod
     def for_request(
@@ -403,33 +413,35 @@ def _reason_histogram(screening) -> dict[str, int]:
     return histogram
 
 
-def _nearby_dates(
-    ctx: "ToolContext", request: FlightProposalRequest, direction: str, rows,
-) -> list[str]:
-    """Dates this route DOES fly, inside the search envelope, nearest first.
+def _walk_offsets(max_days: int, preference: str) -> list[int]:
+    """Day offsets the empty-leg walk tries, in order.
 
-    Derived from real rows, never guessed. Returned only when a leg comes back
-    empty, which is the one moment the caller needs it: knowing the route flies on
-    the 10th and the 15th is what turns "no flights" into a second search, and it
-    is information the caller cannot obtain by reasoning.
+    Nearest first, and the earlier day first when two are equally near
+    (-1, +1, -2, +2, ...). `preference` drops one side entirely; it never
+    reorders the side that is left.
     """
-    origin, dest = _leg_airports(request, direction)
-    base = _leg_date(ctx.base_request, direction)
-    origins, dests = set(origin), set(dest)
-    candidates: set[date] = set()
-    for item in rows:
-        if item.origin_airport not in origins or item.dest_airport not in dests:
-            continue
-        try:
-            flown = date.fromisoformat(item.dep_ts[:10])
-        except ValueError:
-            continue
-        if abs((flown - base).days) <= ctx.max_date_shift_days:
-            candidates.add(flown)
-    return [
-        day.isoformat()
-        for day in sorted(candidates, key=lambda d: (abs((d - base).days), d))
-    ]
+    offsets: list[int] = []
+    for distance in range(1, max_days + 1):
+        if preference in ("either", "earlier"):
+            offsets.append(-distance)
+        if preference in ("either", "later"):
+            offsets.append(distance)
+    return offsets
+
+
+def _keeps_trip_in_order(ctx: "ToolContext", direction: str, day: date) -> bool:
+    """Whether moving this leg to `day` still leaves a trip that makes sense.
+
+    An outbound may not depart after the return, and a return may not depart
+    before the outbound. The other leg's date is the one it actually found
+    flights on, if it moved, and the traveller's own otherwise. Same-day is
+    allowed: a day trip is a real trip.
+    """
+    other = "RETURN" if direction == "OUTBOUND" else "OUTBOUND"
+    other_day = date.fromisoformat(
+        ctx.effective_dates.get(other) or _leg_date(ctx.base_request, other).isoformat()
+    )
+    return day <= other_day if direction == "OUTBOUND" else day >= other_day
 
 
 # --- The callable half of the registry ------------------------------------
@@ -456,13 +468,18 @@ def _search_leg_once(
     depart_date: str | None,
     origin_airports: list[str] | None,
     dest_airports: list[str] | None,
+    *,
+    record: bool = True,
 ) -> tuple[dict, list]:
     """One search of one leg: fetch, screen, rank, record. Returns (result, candidates).
 
-    Split out of `search_flights` so the automatic retry below runs the search
-    it replaces rather than a second implementation of it. A retry that screened
-    or ranked differently from the search it stands in for would make the trace
-    describe work that did not happen.
+    Split out of `search_flights` so the empty-leg walk below runs the same
+    search it stands in for rather than a second implementation of it. A walk
+    that screened or ranked differently from a normal search would make the
+    trace describe work that did not happen.
+
+    `record=False` is for the walk's own steps: they are reported once, as one
+    `EVENT_AUTO_DATE_RETRY`, rather than as tool calls the model never made.
     """
     request = _search_request(ctx, direction, depart_date, origin_airports, dest_airports)
     rows, notes = ctx.cache.rows_for(request)
@@ -470,6 +487,10 @@ def _search_leg_once(
 
     origin, dest = _leg_airports(request, direction)
     leg_date = _leg_date(request, direction)
+    # Only a search that actually ran counts as searched. Out of budget, the
+    # cache hands back rows it already had, which says nothing about this date.
+    if BUDGET_NOTE not in notes:
+        ctx.searched_dates.setdefault(direction, set()).add(leg_date.isoformat())
     screening = screen_leg(
         rows, request, origin=origin, dest=dest, leg_date=leg_date, direction=direction
     )
@@ -485,13 +506,14 @@ def _search_leg_once(
     if candidates:
         ctx.effective_dates[direction] = leg_date.isoformat()
 
-    ctx.record(EVENT_TOOL_CALLED, {
-        "tool": "search_flights",
-        "direction": direction,
-        "date_shift_days": shift,
-        "included_count": len(candidates),
-        "excluded_count": sum(1 for s in screening if not s.included),
-    })
+    if record:
+        ctx.record(EVENT_TOOL_CALLED, {
+            "tool": "search_flights",
+            "direction": direction,
+            "date_shift_days": shift,
+            "included_count": len(candidates),
+            "excluded_count": sum(1 for s in screening if not s.included),
+        })
     result = {
         "direction": direction,
         "searched_date": leg_date.isoformat(),
@@ -502,18 +524,20 @@ def _search_leg_once(
         "exclusion_reason_histogram": _reason_histogram(screening),
         "notes": notes,
     }
-    if not candidates:
-        # The one moment this is worth the tokens: an empty leg, where knowing
-        # which nearby dates the route actually flies is what makes a second
-        # search worth issuing rather than a guess.
-        nearby = _nearby_dates(ctx, request, direction, rows)
-        result["dates_this_route_flies_nearby"] = nearby
-        if nearby:
-            result["suggestion"] = (
-                f"No flights on {leg_date.isoformat()}. This route flies on "
-                f"{', '.join(nearby)} — search again with one of those dates."
-            )
     return result, candidates
+
+
+def _is_travellers_own_date(ctx: ToolContext, direction: str, depart_date: str | None) -> bool:
+    """Whether this search is for the date the traveller asked for.
+
+    Left out, or written in as the same date: both mean the traveller's date.
+    Checking only "left out" was the bug this replaced. A live model (gpt-5, 4
+    Oct) wrote the traveller's own date into every search, so the walk below
+    never ran, and a return flight three days away was never searched.
+    """
+    if depart_date is None:
+        return True
+    return date.fromisoformat(depart_date) == _leg_date(ctx.base_request, direction)
 
 
 @_tool
@@ -524,27 +548,39 @@ def search_flights(
     depart_date: str | None = None,
     origin_airports: list[str] | None = None,
     dest_airports: list[str] | None = None,
+    shift_preference: str = "either",
 ) -> dict:
     """Search real inventory for one leg, optionally shifting date or airports.
 
-    An empty leg retries itself once, in code, on the nearest date the route
-    actually flies inside the envelope.
+    If the traveller's own date has no flights, the code walks nearby dates
+    itself, one real search at a time: -1, +1, -2, +2, -3, +3 days, earlier
+    first on a tie, stopping at the first date with flights. `shift_preference`
+    ("earlier" / "later") lets the model keep the walk to one side when the
+    traveller gave a reason; the code still does the walking.
 
-    **Why this is not left to the model.** Returning `suggestion` and trusting
-    the caller to act on it was the previous behaviour, and it failed in
-    production: handed "this route flies on 2026-11-30", the model spent its
-    remaining tool calls probing +/-1 day on both legs, hit `MAX_TOOL_CALLS`,
-    and the request returned nothing — while a flight it had been told about
-    sat one search away. That is the same class of mistake `domain.py` exists
-    to prevent. Which flights are chosen is a code decision here; which *date*
-    gets searched when the traveller's own has no inventory is the same kind of
-    decision, and is now made the same way.
+    **Why the walk searches date by date instead of looking the answer up.** On
+    the seed data every row is already loaded, so the nearest flying date could
+    simply be read off. A real supplier cannot be read like that: each date is a
+    separate, billed search. The walk behaves the same way on both, so what is
+    tested here is what a live supplier would do.
 
-    The retry costs no model turn and no tool call, only a cache lookup the
-    budget still governs. `suggestion` survives for the case the retry cannot
-    reach: a route whose nearest flying date is outside the envelope, where the
-    answer belongs to the traveller rather than to the agent.
+    **Why this is not left to the model.** On 2 Oct the model was told "this
+    route flies on 2026-11-30", spent its tool calls probing other dates, and
+    returned nothing. Which date to try next is a mechanical decision, so code
+    makes it, the same way `domain.py` decides which flights.
+
+    The walk costs no model turn and no tool call. Each date is a real search
+    through the cache, which the provider budget still governs. A date the
+    model names that is NOT the traveller's own is answered as asked: replying
+    about a different date would be a silent substitution.
     """
+    if shift_preference not in SHIFT_PREFERENCES:
+        ctx.record(EVENT_TOOL_REJECTED, {"tool": "search_flights", "reason_code": REASON_INVALID_ARGS})
+        return _refusal(
+            REASON_INVALID_ARGS,
+            f"shift_preference must be one of {list(SHIFT_PREFERENCES)}.",
+            allowed={"shift_preference": list(SHIFT_PREFERENCES)},
+        )
     refusal = _validate_search_args(ctx, direction, depart_date, origin_airports, dest_airports)
     if refusal is not None:
         ctx.record(EVENT_TOOL_REJECTED, {"tool": "search_flights", "reason_code": refusal["error"]})
@@ -553,43 +589,52 @@ def search_flights(
     result, candidates = _search_leg_once(
         ctx, direction, depart_date, origin_airports, dest_airports
     )
-    if candidates:
+    if candidates or not _is_travellers_own_date(ctx, direction, depart_date):
         return result
 
-    # Only the traveller's own date recovers itself. A caller that named a date
-    # asked a question about *that* date, and answering about a different one
-    # would be a silent substitution rather than a recovery — it would also let
-    # a widened search that came back empty rewrite the request, which
-    # `resolved_request` exists to prevent. So an explicit `depart_date` keeps
-    # the honest empty result and the suggestion, and the model decides.
-    if depart_date is not None:
-        return result
+    base = _leg_date(ctx.base_request, direction)
+    tried = [base.isoformat()]
+    for offset in _walk_offsets(ctx.max_date_shift_days, shift_preference):
+        day = base + timedelta(days=offset)
+        if not _keeps_trip_in_order(ctx, direction, day):
+            continue
+        step, step_candidates = _search_leg_once(
+            ctx, direction, day.isoformat(), origin_airports, dest_airports, record=False,
+        )
+        if BUDGET_NOTE in step["notes"]:
+            # Out of searches. Stop rather than keep asking: the cache would only
+            # hand back rows it already has, which says nothing about this date.
+            break
+        tried.append(day.isoformat())
+        if step_candidates:
+            ctx.record(EVENT_AUTO_DATE_RETRY, {
+                "direction": direction,
+                "from_date": base.isoformat(),
+                "to_date": day.isoformat(),
+                "dates_searched": len(tried),
+                "included_count": step["included_count"],
+            })
+            # Named so the model's rationale can explain the move rather than
+            # discover it. `ctx.effective_dates` carries the shift into the
+            # proposal and `ctx.date_shift_notes()` discloses it to the
+            # traveller; neither depends on the model noticing this key.
+            step["auto_retried_from_date"] = base.isoformat()
+            step["dates_searched"] = tried
+            return step
 
-    # Every date `_nearby_dates` returns is already inside the envelope and
-    # already known to have rows on this route, so the retry cannot widen the
-    # search past what the caller was allowed to ask for itself. Exactly one
-    # retry: `_search_leg_once` is called directly rather than recursing, so a
-    # route with repeated empty dates cannot loop.
-    nearby = result.get("dates_this_route_flies_nearby") or []
-    if not nearby:
-        return result
-    retried, retried_candidates = _search_leg_once(
-        ctx, direction, nearby[0], origin_airports, dest_airports
-    )
-    if not retried_candidates:
-        return result
     ctx.record(EVENT_AUTO_DATE_RETRY, {
         "direction": direction,
-        "from_date": result["searched_date"],
-        "to_date": retried["searched_date"],
-        "included_count": retried["included_count"],
+        "from_date": base.isoformat(),
+        "to_date": None,
+        "dates_searched": len(tried),
+        "included_count": 0,
     })
-    # Named so the model's rationale can explain the move rather than discover
-    # it. `ctx.effective_dates` is what carries the shift into the proposal, and
-    # `ctx.date_shift_notes()` is what discloses it to the traveller — neither
-    # depends on the model noticing this key.
-    retried["auto_retried_from_date"] = result["searched_date"]
-    return retried
+    result["dates_searched"] = tried
+    result["note"] = (
+        f"No flights on {base.isoformat()} or on the nearby dates searched "
+        f"({', '.join(sorted(tried))}). Do not search these dates again."
+    )
+    return result
 
 
 @_tool
@@ -722,11 +767,23 @@ TOOL_SPECS: list[dict] = [
                         "type": "string",
                         "description": (
                             "ISO date (YYYY-MM-DD) for this leg. Must be within "
-                            f"{MAX_DATE_SHIFT_DAYS} days of the traveller's own date."
+                            f"{MAX_DATE_SHIFT_DAYS} days of the traveller's own date. "
+                            "Leave it out (or give the traveller's own date) to search "
+                            "their date: if that has no flights, nearby dates are "
+                            "searched for you automatically, nearest first."
                         ),
                     },
                     "origin_airports": {"type": "array", "items": {"type": "string"}},
                     "dest_airports": {"type": "array", "items": {"type": "string"}},
+                    "shift_preference": {
+                        "type": "string",
+                        "enum": list(SHIFT_PREFERENCES),
+                        "description": (
+                            "Which way the automatic nearby-date search may move this "
+                            "leg. Use 'earlier' or 'later' only when the traveller gave "
+                            "a reason (e.g. must be back by a date); otherwise 'either'."
+                        ),
+                    },
                 },
                 "required": ["direction"],
             },

@@ -83,12 +83,16 @@ guess at what a search might return.
 How to work:
 
 1. Call `search_flights` for OUTBOUND and for RETURN.
-2. If a leg comes back with NO options at all, the only fix is to search again —
-   move the date by a day or two, or try a different resolved airport. The
-   exclusion histogram in the result tells you the real hard-constraint problem:
-   dates that do not match, a party too large for the seats left, and so on.
-   `acknowledge_unmet_preference` cannot help here — it is not a search, so it
-   cannot turn zero options into more.
+2. When you search the traveller's own date and it has no flights, nearby dates
+   are searched for you automatically, nearest first, up to the allowed limit.
+   The result lists them in `dates_searched`; do not search those dates again.
+   If the traveller gave a reason a date can only move one way (e.g. they must
+   be back by a certain day), pass `shift_preference` "earlier" or "later".
+   If a leg still has NO options, try a different resolved airport, or stop and
+   say so. The exclusion histogram in the result tells you the real
+   hard-constraint problem: dates that do not match, a party too large for the
+   seats left, and so on. `acknowledge_unmet_preference` cannot help here — it
+   is not a search, so it cannot turn zero options into more.
 3. If a leg DOES have options, but every single one of them shares the same one
    drawback the traveller asked to avoid (e.g. all remaining rows are red-eyes),
    call `acknowledge_unmet_preference` to say so. This never changes which flights
