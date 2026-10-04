@@ -364,7 +364,7 @@ def create_node(llm, tracer, provider=None, config=None):
         try:
             proposal, ranked_transport, response = run_hotel_agent(
                 adapted.request, hotel_inventory, transport_options,
-                StructuredLLM(llm), tracer=_InnerTracer(tracer),
+                StructuredLLM(llm, callbacks=[usage]), tracer=_InnerTracer(tracer),
             )
             screening = screen_hotels(adapted.request, hotel_inventory, ctx.dest_city_slug)
 

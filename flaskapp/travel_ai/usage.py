@@ -25,11 +25,13 @@ class TokenUsageCallback(BaseCallbackHandler):
                 "output_tokens": raw.get("completion_tokens", 0),
                 "total_tokens": raw.get("total_tokens", 0),
             }
-        self.input_tokens += int(usage.get("input_tokens", 0) or 0)
-        self.output_tokens += int(usage.get("output_tokens", 0) or 0)
-        self.total_tokens += int(
-            usage.get("total_tokens", self.input_tokens + self.output_tokens) or 0
-        )
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        # This call's own sum when the provider omits a total. Using the running
+        # totals here would re-add every earlier call's tokens on each new one.
+        self.total_tokens += int(usage.get("total_tokens") or input_tokens + output_tokens)
 
     def as_dict(self) -> dict[str, int]:
         return {

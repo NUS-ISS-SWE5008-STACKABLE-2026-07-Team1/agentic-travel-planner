@@ -64,7 +64,7 @@ class StructuredLLM(Protocol):
     `.with_structured_output(FlightAgentResponse, ...)` — lets tests inject a
     stub without importing langchain_openai at all."""
 
-    def invoke(self, messages: list[Any]) -> FlightAgentResponse: ...
+    def invoke(self, messages: list[Any], config: dict | None = None) -> FlightAgentResponse: ...
 
 
 class ChatModel(Protocol):
@@ -121,8 +121,12 @@ def invoke_structured(
     proposal: FlightProposal,
     tracer=None,
     agent: str = AGENT,
+    callbacks: list | None = None,
 ) -> FlightAgentResponse:
     """Ask the model, verify, retry once, then fall back. Never raises.
+
+    `callbacks` reach every attempt, including a rejected one: a sample that
+    fails grounding was still paid for, so the node's token count includes it.
 
     `ground` returns the flight IDs the response cited that it had no business
     citing — empty means grounded. Both callers pass a check over a set they
@@ -135,7 +139,7 @@ def invoke_structured(
     """
     for attempt in range(MAX_ATTEMPTS):
         try:
-            response = structured_llm.invoke(messages)
+            response = structured_llm.invoke(messages, config={"callbacks": callbacks or []})
         except Exception as exc:  # noqa: BLE001 - any model failure falls back
             if tracer is not None:
                 tracer.record("agent_llm_attempt_failed", agent, {

@@ -87,6 +87,7 @@ class FlightReasoner(Protocol):
         llm,
         *,
         tracer=None,
+        callbacks: list | None = None,
     ) -> ReasoningOutcome: ...
 
 
@@ -103,9 +104,9 @@ class StructuredReasoner:
     name = "grounded"
     is_loop = False
 
-    def run(self, ctx, inventory, llm, *, tracer=None) -> ReasoningOutcome:
+    def run(self, ctx, inventory, llm, *, tracer=None, callbacks=None) -> ReasoningOutcome:
         proposal, response = run_flight_agent(
-            ctx.base_request, inventory, llm, tracer=tracer
+            ctx.base_request, inventory, llm, tracer=tracer, callbacks=callbacks
         )
         return ReasoningOutcome(
             proposal=proposal,
@@ -126,8 +127,10 @@ class AgenticReasoner:
     name = "agentic"
     is_loop = True
 
-    def run(self, ctx, inventory, llm, *, tracer=None) -> ReasoningOutcome:
-        proposal, response = run_agentic_flight_agent(ctx, llm, tracer=tracer)
+    def run(self, ctx, inventory, llm, *, tracer=None, callbacks=None) -> ReasoningOutcome:
+        proposal, response = run_agentic_flight_agent(
+            ctx, llm, tracer=tracer, callbacks=callbacks
+        )
         return ReasoningOutcome(
             proposal=proposal,
             response=response,

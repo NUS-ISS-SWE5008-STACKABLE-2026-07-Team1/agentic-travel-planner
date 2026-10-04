@@ -624,6 +624,9 @@ def create_node(llm, tracer, provider=None, config=None):
             eval_run.escalated_to_loop = reasoner.is_loop
             outcome = reasoner.run(
                 ctx, inventory, llm, tracer=_InnerTracer(tracer, eval_run.signals),
+                # Without this the counter saw no model call, and every run on
+                # this path recorded zero tokens in agent_runs and the eval table.
+                callbacks=[usage],
             )
             notes.extend(note for note in outcome.notes if note not in notes)
             finding = _build_finding(
