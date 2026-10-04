@@ -28,7 +28,7 @@ class StubStructured:
         self._responses = list(responses)
         self.calls = 0
 
-    def invoke(self, messages):
+    def invoke(self, messages, config=None):
         response = self._responses[min(self.calls, len(self._responses) - 1)]
         self.calls += 1
         if isinstance(response, Exception):
