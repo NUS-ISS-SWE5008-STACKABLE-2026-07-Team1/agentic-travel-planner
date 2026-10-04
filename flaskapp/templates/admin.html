@@ -18,7 +18,7 @@
       </div>
       <nav class="nav nav-pills flex-column gap-2 p-2" role="tablist">
         <button class="nav-link active admin-nav-link" data-admin-tab="critical" type="button" role="tab" aria-selected="true" title="Application Dashboard"><i class="bi bi-speedometer2"></i><span class="sidebar-label">Application Dashboard</span></button>
-        <button class="nav-link admin-nav-link" data-admin-tab="performance" type="button" role="tab" aria-selected="false" title="Agent Performance"><i class="bi bi-cpu"></i><span class="sidebar-label">Agent Performance</span></button>
+        <button class="nav-link admin-nav-link" data-admin-tab="performance" type="button" role="tab" aria-selected="false" title="LLM Token Tracking"><i class="bi bi-cpu"></i><span class="sidebar-label">LLM Token Tracking</span></button>
         <button class="nav-link admin-nav-link" data-admin-tab="logs" type="button" role="tab" aria-selected="false" title="System Processing Logs"><i class="bi bi-journal-text"></i><span class="sidebar-label">System Processing Logs</span></button>
         <button class="nav-link admin-nav-link" data-admin-tab="prompts" type="button" role="tab" aria-selected="false" title="Prompts And Guardrails"><i class="bi bi-shield-check"></i><span class="sidebar-label">Prompts & Guardrails</span></button>
         <button class="nav-link admin-nav-link" data-admin-tab="administrators" type="button" role="tab" aria-selected="false" title="Administrator Registration"><i class="bi bi-person-gear"></i><span class="sidebar-label">Admin Registration</span></button>
@@ -44,9 +44,9 @@
       <section class="admin-tab-panel d-none" data-panel="performance" role="tabpanel">
         <div class="card border-0 shadow-sm mb-4"><div class="card-body p-4"><h2 class="h5">All token consumption</h2><div id="admin-token-totals" class="row g-3 my-1"></div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>User</th><th>Requests</th><th>Input</th><th>Output</th><th>Total</th><th>Last request</th></tr></thead><tbody id="admin-user-consumption"></tbody></table></div></div></div>
         <div class="row g-4">
-          <div class="col-12"><div class="card border-0 shadow-sm admin-card"><div class="card-body p-4"><h2 class="h5">Token Consumption By Agent</h2><p id="selected-request-label" class="small text-body-secondary">Cumulative token usage across all recorded requests.</p><div class="admin-chart-wrap"><canvas id="agent-token-chart"></canvas></div></div></div></div>
+          <div class="col-12"><div class="card border-0 shadow-sm admin-card"><div class="card-body p-4"><h2 class="h5">Token Consumption by Agent and Application</h2><p id="selected-request-label" class="small text-body-secondary">Cumulative token usage across all recorded requests. Application includes intake extraction and shared LLM guardrails.</p><div class="admin-chart-wrap"><canvas id="agent-token-chart"></canvas></div></div></div></div>
           <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body p-4"><h2 class="h5">Individual Agent Token Consumption Trend</h2><p id="agent-trend-description" class="small text-body-secondary">Daily token consumption by agent over the last 31 days.</p><div class="agent-history-chart-wrap"><canvas id="agent-token-trend-chart"></canvas></div></div></div></div>
-          <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body p-4"><h2 class="h5">Agent Performance</h2><p class="small text-body-secondary">Completion rate and average tokens used for each agent.</p><div class="agent-history-chart-wrap"><canvas id="agent-performance-chart"></canvas></div></div></div></div>
+          <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body p-4"><h2 class="h5">LLM Token Tracking</h2><p class="small text-body-secondary">Completion rate and average tokens used by agents and application services.</p><div class="agent-history-chart-wrap"><canvas id="agent-performance-chart"></canvas></div></div></div></div>
         </div>
       </section>
 

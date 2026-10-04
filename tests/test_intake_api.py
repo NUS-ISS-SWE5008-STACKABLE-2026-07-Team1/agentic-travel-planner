@@ -32,7 +32,9 @@ def stub_extraction(monkeypatch, intent, question="Got it."):
     monkeypatch.setattr("flaskapp.travel_ai.api.build_llm", lambda **_: object())
     monkeypatch.setattr(
         "flaskapp.travel_ai.api.extract_intent",
-        lambda _llm, _prompt: IntakeExtraction(question=question, intent=intent),
+        lambda _llm, _prompt, callbacks=None: IntakeExtraction(
+            question=question, intent=intent
+        ),
     )
 
 
@@ -195,7 +197,7 @@ def test_pii_is_redacted_before_it_reaches_the_model_or_the_database(monkeypatch
     seen_by_model = []
     monkeypatch.setattr(
         "flaskapp.travel_ai.api.extract_intent",
-        lambda _llm, prompt: seen_by_model.append(prompt) or IntakeExtraction(
+        lambda _llm, prompt, callbacks=None: seen_by_model.append(prompt) or IntakeExtraction(
             question="Got it.", intent=ExtractedIntent(destination="Tokyo"),
         ),
     )
@@ -221,7 +223,7 @@ def test_dates_in_the_prompt_are_not_redacted_as_phone_numbers(monkeypatch):
     seen_by_model = []
     monkeypatch.setattr(
         "flaskapp.travel_ai.api.extract_intent",
-        lambda _llm, prompt: seen_by_model.append(prompt) or IntakeExtraction(
+        lambda _llm, prompt, callbacks=None: seen_by_model.append(prompt) or IntakeExtraction(
             question="Got it.", intent=ExtractedIntent(destination="Tokyo"),
         ),
     )
@@ -301,7 +303,8 @@ def test_the_reported_tokyo_prompt_with_a_card_is_planned_not_rejected(monkeypat
         session["user_id"] = 1
     stub_extraction(monkeypatch, ExtractedIntent(destination="Tokyo"))
     monkeypatch.setattr(
-        "flaskapp.travel_ai.api.build_guardrail", lambda _config: BlockingPiiGuardrail()
+        "flaskapp.travel_ai.api.build_guardrail",
+        lambda _config, callbacks=None: BlockingPiiGuardrail(),
     )
     stored = []
     monkeypatch.setattr(
