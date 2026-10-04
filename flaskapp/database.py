@@ -1507,6 +1507,36 @@ def save_agent_run(path: Path | str, request_id: str, agent: str, status: str,
             )
 
 
+def add_application_token_usage(path: Path | str, request_id: str,
+                                usage: dict[str, int] | None = None) -> None:
+    """Add non-agent LLM consumption to the request's Application category.
+
+    A request can spend application tokens in several places (intake extraction,
+    input screening and output screening), so this is deliberately additive.
+    ``save_agent_run`` remains replacement-based because each agent owns one run
+    row; using it here would make the last application call erase earlier calls.
+    """
+    usage = usage or {}
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    output_tokens = int(usage.get("output_tokens", 0) or 0)
+    total_tokens = int(usage.get("total_tokens", 0) or input_tokens + output_tokens)
+    if not (input_tokens or output_tokens or total_tokens):
+        return
+    with connect(path) as db:
+        db.execute(
+            """INSERT INTO agent_runs (
+                   request_id, agent, status, completed_at,
+                   input_tokens, output_tokens, total_tokens
+               ) VALUES (?, 'Application', 'completed', CURRENT_TIMESTAMP, ?, ?, ?)
+               ON CONFLICT(request_id, agent) DO UPDATE SET
+                   status = 'completed', completed_at = CURRENT_TIMESTAMP,
+                   input_tokens = agent_runs.input_tokens + excluded.input_tokens,
+                   output_tokens = agent_runs.output_tokens + excluded.output_tokens,
+                   total_tokens = agent_runs.total_tokens + excluded.total_tokens""",
+            (request_id, input_tokens, output_tokens, total_tokens),
+        )
+
+
 def save_flight_eval_run(
     path: Path | str,
     *,

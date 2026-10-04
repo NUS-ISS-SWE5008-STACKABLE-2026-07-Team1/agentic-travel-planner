@@ -365,11 +365,26 @@ def test_admin_page_and_activity_require_configured_admin(tmp_path):
     }
     assert dashboard["platform"]["total_requests"] == 0
     assert dashboard["logs"] == []
-    # Five agents, the deterministic gates, PII redaction, and the L2 classifier.
-    assert len(dashboard["prompts"]) == 8
+    # Every execution prompt, shared prompt and agent/application guardrail.
+    assert len(dashboard["prompts"]) == 23
     agents = {item["agent"] for item in dashboard["prompts"]}
     assert "LLM guardrail classifier (L2)" in agents
     assert "PII redaction (L1)" in agents
+    assert "Shared agent system policy" in agents
+    assert "Flight grounded reasoning prompt" in agents
+    assert "Flight fallback prompt" in agents
+    assert "Flight tool-loop prompt" in agents
+    assert "Hotel & transport grounded reasoning prompt" in agents
+    assert "Hotel & transport fallback prompt" in agents
+    assert "Risk & advisory grounded reasoning prompt" in agents
+    assert "Accessibility agent" in agents
+    assert "Orchestrator agent" in agents
+    assert "Orchestrator conversational intake prompt" in agents
+    assert "L2 input-classifier prompt" in agents
+    assert "L2 output-classifier prompt" in agents
+    assert "Accessibility agent guardrails" in agents
+    assert "Orchestrator agent guardrails" in agents
+    assert all(item["kind"] and item["owner"] for item in dashboard["prompts"])
 
     with client.session_transaction() as session:
         session["user_email"] = "SECOND-ADMIN@example.com"

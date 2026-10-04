@@ -18,6 +18,7 @@ from flaskapp.travel_ai.safeguards import assess_plan, disclose_unconsulted
 from flaskapp.travel_ai.schemas import PlanPackage, PlanResponse, PlanSection, TravelRequest
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.terminal import log_payload
+from flaskapp.travel_ai.usage import TokenUsageCallback
 from flaskapp.travel_ai.agents.accessibility_agent.integration import enforce_cross_agent_vetoes
 
 
@@ -88,8 +89,11 @@ class TravelPlanningService:
             temperature=self.temperature, timeout=self.timeout, endpoint=self.endpoint,
             api_version=self.api_version, base_url=self.base_url,
         )
+        application_usage = TokenUsageCallback()
         guardrail = (
-            LlmGuardrail.from_settings(self.guardrail_settings)
+            LlmGuardrail.from_settings(
+                self.guardrail_settings, callbacks=[application_usage]
+            )
             if self.guardrail_settings else None
         )
         # Select once and reuse for graph composition and message addressing.
@@ -123,12 +127,19 @@ class TravelPlanningService:
             )
             for name in selected
         ]
-        result = graph.invoke({
-            "request_id": request_id,
-            "request": request.model_dump(mode="json"),
-            "findings": [],
-            "messages": messages,
-        })
+        try:
+            result = graph.invoke({
+                "request_id": request_id,
+                "request": request.model_dump(mode="json"),
+                "findings": [],
+                "messages": messages,
+            })
+        finally:
+            if self.database_path:
+                from flaskapp.database import add_application_token_usage
+                add_application_token_usage(
+                    self.database_path, request_id, application_usage.as_dict()
+                )
         findings, vetoed_candidates = enforce_cross_agent_vetoes(result["findings"])
         plan = result["plan"]
         if vetoed_candidates:

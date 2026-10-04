@@ -1559,10 +1559,19 @@ if (adminMonitor) {
       const title = document.createElement("h2");
       title.className = "h5";
       title.textContent = prompt.agent;
+      const metadata = document.createElement("div");
+      metadata.className = "d-flex flex-wrap gap-2 mb-3";
+      const kind = document.createElement("span");
+      kind.className = "badge text-bg-primary";
+      kind.textContent = prompt.kind || "Prompt";
+      const owner = document.createElement("span");
+      owner.className = "badge text-bg-secondary";
+      owner.textContent = prompt.owner || "Application";
+      metadata.append(kind, owner);
       const instruction = document.createElement("pre");
       instruction.className = "prompt-instruction mb-0";
       instruction.textContent = prompt.instruction;
-      body.append(title, instruction); card.append(body); column.append(card); container.append(column);
+      body.append(title, metadata, instruction); card.append(body); column.append(card); container.append(column);
     });
   };
 
@@ -1582,9 +1591,9 @@ if (adminMonitor) {
 
   const tabCopy = {
     critical: ["Application Dashboard", "Platform performance, access, adoption, and engagement."],
-    performance: ["Agent Performance", "Agent execution, request logs, and token consumption."],
+    performance: ["LLM Token Tracking", "Token consumption by agents and application services."],
     logs: ["System Processing Logs", "End-to-end processing events for every transaction."],
-    prompts: ["Prompts And Guardrails", "Current agent instructions and deterministic safeguards."],
+    prompts: ["Prompts & Guardrails", "Complete runtime prompts and guardrail boundaries for every agent and application LLM call."],
     administrators: ["Administrator Registration", "Create or promote database-managed administrators."]
   };
   const setChartPeriod = (period) => {
