@@ -1,0 +1,19 @@
+# Managed Service for Prometheus scrapes each pod's work-in-flight gauge
+# (flaskapp/metrics.py) every 30 s, which is what the autoscalers in hpa.yaml
+# read, through the Custom Metrics Stackdriver Adapter.
+#
+# Cost, for comparison with the packages switched off on 2026-10-02: one gauge
+# per pod every 30 s is ~2,900 samples a day per pod — roughly 0.02% of the
+# ~13 million a day those packages were ingesting.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: work-in-flight
+spec:
+  selector:
+    matchExpressions:
+      - {key: app, operator: In, values: [web, agents]}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

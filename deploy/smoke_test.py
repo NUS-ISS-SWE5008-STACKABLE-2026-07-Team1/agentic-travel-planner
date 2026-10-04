@@ -21,6 +21,7 @@ worth of tokens.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -112,11 +113,13 @@ def login(base: str, email: str, password: str) -> tuple[requests.Session, str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base-url", default="http://127.0.0.1:5000")
-    parser.add_argument("--email", default="demo@example.com")
-    parser.add_argument("--password", default="TravelDemo2026!")
+    parser.add_argument("--email", default=os.getenv("E2E_LOGIN_EMAIL"))
+    parser.add_argument("--password", default=os.getenv("E2E_LOGIN_PASSWORD"))
     parser.add_argument("--timeout", type=int, default=300, help="seconds to wait for the plan")
     parser.add_argument("--request-id", help="resume waiting on an already-submitted plan")
     args = parser.parse_args()
+    if not args.email or not args.password:
+        parser.error("pass --email/--password or set E2E_LOGIN_EMAIL/E2E_LOGIN_PASSWORD")
     base = args.base_url.rstrip("/")
 
     for probe in ("/healthz", "/readyz"):

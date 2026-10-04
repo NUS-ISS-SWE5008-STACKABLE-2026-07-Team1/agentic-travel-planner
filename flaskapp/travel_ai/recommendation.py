@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from itertools import product
 
+from flaskapp.travel_ai.sections import with_display
 from flaskapp.travel_ai.schemas import (
     AgentFinding, Option, PlanRecommendation, TravelRequest,
 )
@@ -99,10 +100,15 @@ def recommend_package(
 
     total, chosen = best
     return PlanRecommendation(
-        items=chosen,
+        # Formatted here for the same reason a tier column's options are: this
+        # list is rendered by `optionCard`, which shows a flight as a card only
+        # when the schedule has been formatted, and falls back to the raw option
+        # name when it has not.
+        items=[with_display(item) for item in chosen],
         total=total,
         currency=currency,
         remaining=round(request.budget - total, 2),
+        travellers=request.travellers,
         note=_transfer_note(chosen, transfers, chosen[0].airport),
     )
 

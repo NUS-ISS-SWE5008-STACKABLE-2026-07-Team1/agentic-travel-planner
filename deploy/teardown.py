@@ -20,17 +20,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 
-PROJECT = "project-931fd286-f1d2-4105-9e5"
-REGION = "us-west1"
-CLUSTER = "travel-planner"
-REPOSITORY = "travel-planner"
-NODE_SA = "serviceAccount:1040773574528-compute@developer.gserviceaccount.com"
-MCP_USER = "user:erinellateo@gmail.com"
-BILLING_ACCOUNT = "01142B-B4310B-4AA253"
-BUDGET_NAME = "travel-planner GKE test"
+PROJECT = os.getenv("GCP_PROJECT_ID", "").strip()
+REGION = os.getenv("GCP_REGION", "us-west1").strip()
+CLUSTER = os.getenv("GKE_CLUSTER_NAME", "travel-planner").strip()
+REPOSITORY = os.getenv("GCP_ARTIFACT_REPOSITORY", "travel-planner").strip()
+NODE_SA = os.getenv("GKE_NODE_SERVICE_ACCOUNT", "").strip()
+MCP_USER = os.getenv("GCP_MCP_USER", "").strip()
+BILLING_ACCOUNT = os.getenv("GCP_BILLING_ACCOUNT", "").strip()
+BUDGET_NAME = os.getenv("GCP_BUDGET_NAME", "travel-planner GKE test").strip()
 
 
 def run(command: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -58,7 +59,10 @@ def step(apply: bool, label: str, command: str, exists: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--yes", action="store_true", help="actually delete (default: dry run)")
-    apply = parser.parse_args().yes
+    arguments = parser.parse_args()
+    if not PROJECT:
+        parser.error("GCP_PROJECT_ID must be set")
+    apply = arguments.yes
     print("DELETING" if apply else "DRY RUN — nothing will be changed. Re-run with --yes to delete.\n")
 
     clusters = gcloud_json(f"container clusters list --filter=name={CLUSTER}")
@@ -93,6 +97,8 @@ def main() -> None:
         (NODE_SA, "roles/container.defaultNodeServiceAccount", "project"),
         (MCP_USER, "roles/mcp.toolUser", "project"),
     ):
+        if not member:
+            continue
         step(apply, f"IAM {role} for {member}",
              f'gcloud projects remove-iam-policy-binding {PROJECT} --member="{member}" '
              f'--role="{role}" --condition=None --quiet',
@@ -146,6 +152,8 @@ def _rest_list(collection: str) -> list:
 
 
 def _rest_budget() -> str | None:
+    if not BILLING_ACCOUNT:
+        return None
     data = _rest("GET", f"https://billingbudgets.googleapis.com/v1/billingAccounts/{BILLING_ACCOUNT}/budgets")
     return next((b["name"] for b in data.get("budgets", []) if b.get("displayName") == BUDGET_NAME), None)
 

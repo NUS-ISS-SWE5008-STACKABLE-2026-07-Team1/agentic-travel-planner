@@ -39,12 +39,17 @@ an answer the orchestrator can act on; an exception is not.
 from __future__ import annotations
 
 import time
+from datetime import date
 
 from flaskapp.config import Config, get_llm_settings
 from flaskapp.database import save_agent_run, save_flight_eval_run
 from flaskapp.travel_ai.a2a import response_message
 from flaskapp.travel_ai.agents.base import make_specialist_node
 from flaskapp.travel_ai.agents.flight_agent.adapter import to_flight_request
+from flaskapp.travel_ai.agents.flight_agent.domain import (
+    _party_size,
+    leg_route_and_date,
+)
 from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION, PATH2_INSTRUCTION
 from flaskapp.travel_ai.agents.flight_agent.providers import get_inventory_provider
 from flaskapp.travel_ai.agents.flight_agent.providers.seed import INVENTORY_ASSUMPTION
@@ -52,7 +57,11 @@ from flaskapp.travel_ai.agents.flight_agent.reasoners import select_reasoner
 from flaskapp.travel_ai.agents.flight_agent.tools import ToolContext, budget_from_config
 from flaskapp.travel_ai.agents.loop import EVENT_BUDGET_EXHAUSTED
 from flaskapp.travel_ai.guardrails.specialist import make_postprocess, make_preflight
-from flaskapp.travel_ai.agents.flight_agent.schemas import FlightCandidate, FlightProposal
+from flaskapp.travel_ai.agents.flight_agent.schemas import (
+    FlightCandidate,
+    FlightProposal,
+    FlightProposalRequest,
+)
 from flaskapp.travel_ai.schemas import AgentFinding, Option, OptionSchedule, TravelRequest
 from flaskapp.travel_ai.terminal import log_payload
 from flaskapp.travel_ai.usage import TokenUsageCallback
@@ -208,12 +217,19 @@ def _accessibility_limitations(candidate: FlightCandidate) -> list[str]:
     return limitations
 
 
-def _candidate_to_option(candidate: FlightCandidate, currency: str, assumption: str) -> Option:
+def _candidate_to_option(
+    candidate: FlightCandidate, currency: str, assumption: str, party_size: int = 1
+) -> Option:
     """One ranked candidate as a shared-contract `Option`.
 
     `selection_factors` restates only what the deterministic ranking actually
     used, so the traveller-visible reasons match the code that produced the
     order rather than a model's account of it.
+
+    `party_size` must be the SAME one `domain.rank_flights` used, because
+    `estimated_cost` here has to equal `domain._effective_cost` there. If the
+    two drift, the cheapest option by the ranking stops being the cheapest
+    option on screen, and nothing in the UI would reveal it.
     """
     factors = [
         "Direct" if candidate.stops == 0 else f"{candidate.stops} stop(s)",
@@ -253,7 +269,16 @@ def _candidate_to_option(candidate: FlightCandidate, currency: str, assumption: 
             + ("non-stop." if candidate.stops == 0
                else f"{candidate.stops} stop{'s' if candidate.stops > 1 else ''}.")
         ),
-        estimated_cost=candidate.price + candidate.seat_fee_estimate,
+        # `price` is ONE seat; `seat_fee_estimate` is already the whole
+        # party's fee (see its docstring), so only the fare is multiplied.
+        # This is what the party is asked to pay, and what `recommend_package`
+        # sums into "closest to your budget".
+        estimated_cost=candidate.price * party_size + candidate.seat_fee_estimate,
+        # One seat, for the tier columns — the figure an airline quotes and the
+        # only one comparable across Budget, Comfort and Luxury. The party seat
+        # fee is deliberately excluded: it is a whole-party total, so dividing
+        # it out would invent a per-seat number nobody charges.
+        unit_cost=candidate.price,
         currency=currency,
         assumptions=[assumption],
         limitations=_accessibility_limitations(candidate),
@@ -261,25 +286,70 @@ def _candidate_to_option(candidate: FlightCandidate, currency: str, assumption: 
     )
 
 
-def _coverage_warnings(proposal: FlightProposal) -> list[str]:
-    """Name an empty leg explicitly.
+def _searched_span(asked: date, searched: set[str]) -> str:
+    """The dates a warning may say were checked, in the plainest true wording.
+
+    One date: "on 29 Nov". An unbroken run of days around it: "between 26 Nov
+    and 2 Dec". Anything else is listed, because "between" would claim days that
+    were never searched.
+    """
+    days = sorted({asked, *(date.fromisoformat(d) for d in searched)})
+    if len(days) == 1:
+        return f"on {asked.isoformat()}"
+    if (days[-1] - days[0]).days == len(days) - 1:
+        return f"between {days[0].isoformat()} and {days[-1].isoformat()}"
+    return f"on any of {', '.join(d.isoformat() for d in days)}"
+
+
+def _coverage_warnings(
+    proposal: FlightProposal,
+    request: FlightProposalRequest | None = None,
+    searched: dict[str, set[str]] | None = None,
+) -> list[str]:
+    """Name an empty leg explicitly, and say only what was actually searched.
 
     A proposal with an outbound but no return is a partial answer, and saying
     so is more useful to the orchestrator than a shorter option list it has to
     infer the meaning of.
+
+    The warning used to name dates the route flies up to two weeks away, read
+    straight off the loaded data. A real supplier offers no such view: each date
+    is a separate, billed search. So the warning now states the dates that were
+    searched and nothing more. The traveller is told the truth about what was
+    checked, and that a different date may work. It also cannot name an
+    outbound date after the return, which the old lookup did (4 Oct: "flies on
+    2026-12-04" for a trip returning 3 Dec).
+
+    The wording names the traveller's own date, and nothing about where the
+    agent looked. Which source was used is a detail of ours, not their trip.
     """
-    return [
-        f"No {direction.lower()} flight in the loaded inventory satisfies these "
-        "dates and constraints."
-        for direction in ("OUTBOUND", "RETURN")
-        if not any(c.direction == direction for c in proposal.candidates)
-    ]
+    warnings: list[str] = []
+    for direction in ("OUTBOUND", "RETURN"):
+        if any(c.direction == direction for c in proposal.candidates):
+            continue
+        leg = direction.lower()
+        if request is None:
+            # No request to read a date off: name the empty leg and stop.
+            warnings.append(f"No {leg} flight is available for the dates requested.")
+            continue
+        asked = leg_route_and_date(request, direction)[2]
+        span = _searched_span(asked, (searched or {}).get(direction, set()))
+        warnings.append(
+            f"No {leg} flight is available {span}. Try an earlier or later date."
+        )
+    return warnings
 
 
 def _build_finding(
-    proposal: FlightProposal, response, currency: str, unresolved: list[str], assumption: str
+    proposal: FlightProposal, response, currency: str, unresolved: list[str], assumption: str,
+    party_size: int = 1,
+    request: FlightProposalRequest | None = None,
+    searched: dict[str, set[str]] | None = None,
 ) -> AgentFinding:
-    warnings = list(unresolved) + _coverage_warnings(proposal)
+    # Optional so the many tests that only care about options keep their
+    # call shape; without them an empty leg is still named, just without
+    # the dates that were searched.
+    warnings = list(unresolved) + _coverage_warnings(proposal, request, searched)
     if response.escalate and response.escalation_reason:
         warnings.append(f"Escalation requested: {response.escalation_reason}")
     if response.acknowledgment_applied is not None:
@@ -290,7 +360,10 @@ def _build_finding(
     return AgentFinding(
         agent=NAME,
         summary=response.rationale,
-        options=[_candidate_to_option(c, currency, assumption) for c in proposal.candidates],
+        options=[
+            _candidate_to_option(c, currency, assumption, party_size)
+            for c in proposal.candidates
+        ],
         warnings=warnings,
         confidence=response.confidence,
     )
@@ -551,10 +624,25 @@ def create_node(llm, tracer, provider=None, config=None):
             eval_run.escalated_to_loop = reasoner.is_loop
             outcome = reasoner.run(
                 ctx, inventory, llm, tracer=_InnerTracer(tracer, eval_run.signals),
+                # Without this the counter saw no model call, and every run on
+                # this path recorded zero tokens in agent_runs and the eval table.
+                callbacks=[usage],
             )
             notes.extend(note for note in outcome.notes if note not in notes)
             finding = _build_finding(
-                outcome.proposal, outcome.response, travel_request.currency, notes, assumption
+                outcome.proposal, outcome.response, travel_request.currency, notes, assumption,
+                # From the same trip context `domain` ranked with, not from
+                # `travel_request.travellers`, so the displayed cost cannot
+                # drift from the ranked one if the adapter's mapping changes.
+                party_size=_party_size(ctx.base_request.trip_context),
+                # `resolved_request` keeps the traveller's own date on any leg
+                # that found nothing (that is its contract), so the warning
+                # names the date they asked for — while a leg that did move is
+                # not warned about at all, only disclosed by `date_shift_notes`.
+                request=ctx.resolved_request(),
+                # Only the dates a search actually ran for. The single-shot
+                # path searches the traveller's own date and nothing else.
+                searched=ctx.searched_dates,
             )
             log_payload(f"REQUEST {state['request_id']} | {NAME.upper()} RESPONSE", finding)
             tracer.record("agent_completed", NAME, {

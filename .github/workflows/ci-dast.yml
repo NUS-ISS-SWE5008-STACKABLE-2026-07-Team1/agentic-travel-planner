@@ -13,43 +13,48 @@
 # session survived the scan" step below fails. A clean report from a logged-out
 # scan is the failure mode this exists to prevent.
 #
-# Note the wording. Nothing here BLOCKS anything — see the trigger note below.
+# Note the wording: this job does not block a merge BY ITSELF. Its findings are
+# advisory; what fails it is a broken scan. Whether a failure stops a merge is
+# decided by the branch ruleset, not here — see the trigger note below.
 # =============================================================================
 name: CI — DAST
 
 on:
-  # PUSH ONLY, on the two shared branches. Team decision, 2026-08-18, and it
-  # reverses the pull-request-only choice made in PR #13 the day before.
+  # BOTH EVENTS, on the two shared branches. 2026-10-02, replacing the
+  # push-only choice of 2026-08-18.
   #
-  # The reasoning that changed it: a pull_request run cannot BLOCK anything
-  # here. Branch protection — the setting that refuses a merge until named
-  # checks pass — is a paid feature, and this org is on GitHub Free with a
-  # private repo. So a red PR check is a note on a screen that anyone can merge
-  # straight past. Earlier comments in this repo described PR checks as
-  # "gating"; that was wrong, and this note exists so nobody believes it again.
+  # That choice rested on two things that have since stopped being true:
   #
-  # Given nothing blocks either way, push is the more complete of the two:
-  #   - merging a pull request IS a push to the base branch, so this catches
-  #     everything that lands;
-  #   - it also catches a direct push, which a pull_request trigger never sees.
+  #   1. "A red PR check is only a note, because branch protection is a paid
+  #      feature and this repo is private." The repo is public now, so rulesets
+  #      are available, and a required check genuinely refuses the merge.
+  #   2. "Running both events pays ~5m40s twice per merge." Public repos get
+  #      free standard runners, so that cost is gone.
   #
-  # What we give up: finding a DAST problem before it reaches the shared branch
-  # rather than after. Judged an acceptable trade for this job specifically,
-  # because the authenticated scan costs ~5m40s and running it on both events
-  # pays that twice for every merge.
+  # Both events earn their place, and they are not the same scan:
   #
-  # ci-checks.yml deliberately keeps BOTH triggers. It is ~2 minutes, and
-  # failing tests are worth knowing about before you merge, not after.
+  #   - pull_request scans a PREVIEW of the merge, before anything lands. This
+  #     is the one a ruleset can gate on.
+  #   - push scans what ACTUALLY landed on the shared branch — the very commit
+  #     deploy-gke.yml then ships. It also still catches a direct push, which a
+  #     pull_request run never sees; relevant until the ruleset is on, and
+  #     afterwards for anyone who can bypass it.
+  #
+  # Needs no secrets (the app under scan uses a per-run key and the stub
+  # provider), so this runs on pull requests from forks too.
   push:
+    branches: [main, release]
+
+  pull_request:
     branches: [main, release]
 
   workflow_dispatch:
 
-  # Consequence to expect: DAST no longer appears as a check on pull requests.
-  # A PR will show three checks, not four. That is this decision working, not a
-  # broken pipeline. If branch protection ever becomes available, add
-  # pull_request back FIRST — a required check that never runs on a PR would
-  # block every merge forever.
+  # BEFORE ADDING THIS TO THE REQUIRED-CHECK LIST: let it report on a few real
+  # pull requests first. A required check that never runs on a PR leaves every
+  # merge stuck on "Expected — waiting for status to be reported", with no
+  # error to explain it. Six green push runs are not evidence about a different
+  # event.
 
 permissions:
   contents: read
@@ -83,6 +88,7 @@ jobs:
       # app defect. Fixing it properly means terminating TLS in CI — not worth
       # it for this module.
       SESSION_COOKIE_SECURE: "false"
+      DAST_LOGIN_EMAIL: browser-scan@example.com
 
       # ---- Item 14, part 2: a stub model, never a real provider key --------
       # Without a model, POST /travel-plans fails immediately and ZAP only ever
@@ -115,6 +121,16 @@ jobs:
       - name: Prepare CI instance directory
         run: mkdir -p ci-instance/traces
 
+      - name: Generate ephemeral login credential
+        run: |
+          password=$(python -c 'import secrets; print(secrets.token_urlsafe(24))')
+          password_hash=$(DAST_PASSWORD="$password" python -c 'import os; from werkzeug.security import generate_password_hash; print(generate_password_hash(os.environ["DAST_PASSWORD"]))')
+          echo "::add-mask::$password"
+          echo "E2E_LOGIN_EMAIL=$DAST_LOGIN_EMAIL" >> "$GITHUB_ENV"
+          echo "E2E_LOGIN_PASSWORD=$password" >> "$GITHUB_ENV"
+          echo "LOGIN_EMAIL=$DAST_LOGIN_EMAIL" >> "$GITHUB_ENV"
+          echo "LOGIN_PASSWORD_HASH=$password_hash" >> "$GITHUB_ENV"
+
       # ---- Stub provider ---------------------------------------------------
       # See scripts/ci_stub_provider.py (also a draft in this folder).
       # UNVERIFIED: this is the piece item 14 says to budget an afternoon for.
@@ -127,11 +143,9 @@ jobs:
           done
           echo "::error::Stub provider did not start"; cat stub.log; exit 1
 
-      # No seeding step is needed. flaskapp/__init__.py -> database.init_app()
-      # calls initialize() then seed_login_user() on every startup, so the
-      # demo account exists even against an empty database.
-      # (This corrects item 13 piece 1 in the owner notes, which assumed a
-      #  seeded user was a prerequisite created by untracking the sqlite file.)
+      # LOGIN_EMAIL and a per-run password hash were placed in GITHUB_ENV
+      # above, so startup seeds an isolated account without publishing a
+      # reusable credential in this workflow.
       - name: Start app
         run: |
           nohup python app.py > app.log 2>&1 &
@@ -163,8 +177,8 @@ jobs:
           fi
           curl -s -b jar -c jar -X POST http://127.0.0.1:5000/ \
             -d "csrf_token=${token}" \
-            -d "email=demo@example.com" \
-            -d "password=TravelDemo2026!" \
+            -d "email=${DAST_LOGIN_EMAIL}" \
+            -d "password=${E2E_LOGIN_PASSWORD}" \
             -o /dev/null
           code=$(curl -s -b jar -o /dev/null -w '%{http_code}' \
             http://127.0.0.1:5000/api/v1/admin/activity)

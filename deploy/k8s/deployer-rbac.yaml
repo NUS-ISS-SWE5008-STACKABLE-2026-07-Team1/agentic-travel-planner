@@ -1,3 +1,19 @@
+# BOOTSTRAP ONLY — NOT part of `kubectl apply -k deploy/k8s`.
+#
+# The subject below is a placeholder (no project-specific identity in git), so
+# applying this file as-is would replace the pipeline's real permission with a
+# user that does not exist, and every deploy after that fails "forbidden". It
+# is therefore left out of kustomization.yaml, and
+# tests/test_k8s_manifests.py fails CI if it or any other placeholder is put
+# back into that bundle. Apply it on its own, filling the placeholder in memory:
+#
+#   sed "s/REPLACE_WITH_GCP_DEPLOY_SERVICE_ACCOUNT/github-deployer@${GCP_PROJECT_ID}.iam.gserviceaccount.com/" \
+#     deploy/k8s/deployer-rbac.yaml | kubectl apply -n travel-planner -f -
+#
+# Needed once per cluster (done for this one on 2026-09-21), and again only if
+# the permissions below change — or to recover if the placeholder was ever
+# applied by mistake, then re-run the failed deploy.
+#
 # What .github/workflows/deploy-gke.yml may do inside the cluster: change the
 # image the two Deployments run, watch them roll out, and read enough to explain
 # a failure. Nothing else.
@@ -17,8 +33,7 @@
 #
 # Deliberately absent: `secrets` (the pipeline needs no application secret),
 # `create`/`delete` on anything, and every other kind — the Ingress, IAP
-# BackendConfig, NetworkPolicy and ConfigMap stay a manual `kubectl apply -k`.
-apiVersion: rbac.authorization.k8s.io/v1
+# BackendConfig, NetworkPolicy and ConfigMap stay a manual `kubectl apply -k`.apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: github-deployer
@@ -39,7 +54,9 @@ metadata:
   name: github-deployer
 subjects:
   - kind: User
-    name: github-deployer@project-931fd286-f1d2-4105-9e5.iam.gserviceaccount.com
+    # Replace during environment provisioning with the GitHub deployer's
+    # service-account principal. Do not commit a project-specific identity.
+    name: REPLACE_WITH_GCP_DEPLOY_SERVICE_ACCOUNT
     apiGroup: rbac.authorization.k8s.io
 roleRef:
   kind: Role

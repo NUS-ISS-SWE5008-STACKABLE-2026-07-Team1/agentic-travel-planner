@@ -1,4 +1,5 @@
 import importlib
+import os
 
 from flaskapp.config import get_llm_settings
 from flaskapp.database import is_postgres
@@ -92,4 +93,26 @@ def test_pii_redaction_is_on_by_default_and_can_be_turned_off(monkeypatch):
     monkeypatch.setenv("PII_REDACTION_ENABLED", "false")
     assert importlib.reload(flaskapp.config).Config.PII_REDACTION_ENABLED is False
     monkeypatch.delenv("PII_REDACTION_ENABLED")
+    importlib.reload(flaskapp.config)
+
+
+def test_login_credentials_have_no_source_code_default(monkeypatch):
+    original_email = os.environ.get("LOGIN_EMAIL")
+    original_hash = os.environ.get("LOGIN_PASSWORD_HASH")
+    monkeypatch.setenv("LOGIN_EMAIL", "")
+    monkeypatch.setenv("LOGIN_PASSWORD_HASH", "")
+    import flaskapp.config
+
+    reloaded = importlib.reload(flaskapp.config)
+    assert reloaded.Config.LOGIN_EMAIL == ""
+    assert reloaded.Config.LOGIN_PASSWORD_HASH == ""
+
+    if original_email is None:
+        monkeypatch.delenv("LOGIN_EMAIL")
+    else:
+        monkeypatch.setenv("LOGIN_EMAIL", original_email)
+    if original_hash is None:
+        monkeypatch.delenv("LOGIN_PASSWORD_HASH")
+    else:
+        monkeypatch.setenv("LOGIN_PASSWORD_HASH", original_hash)
     importlib.reload(flaskapp.config)

@@ -106,7 +106,7 @@ def _opening_messages(ctx: tools.ToolContext) -> list:
     ]
 
 
-def build_flight_subgraph(llm, ctx: tools.ToolContext):
+def build_flight_subgraph(llm, ctx: tools.ToolContext, callbacks: list | None = None):
     """Compile the two-node loop: `plan` proposes tool calls, `act` runs them.
 
     `plan` ends the loop when the model returns no tool calls, or when the budget
@@ -114,6 +114,9 @@ def build_flight_subgraph(llm, ctx: tools.ToolContext):
     `run_agentic_flight_agent`, so that the loop's exit condition and the shape of
     its output stay separable — and so the structured call is made exactly once
     however the loop ended.
+
+    `callbacks` are passed on each model turn so the node's token count covers
+    every turn of the loop, not only the final structured answer.
     """
     bound = llm.bind_tools(tools.TOOL_SPECS)
 
@@ -126,7 +129,7 @@ def build_flight_subgraph(llm, ctx: tools.ToolContext):
             # An empty AIMessage carries no tool calls, so `_should_act` routes to
             # END without needing a second signal.
             return {"messages": [AIMessage(content="")]}
-        return {"messages": [bound.invoke(state["messages"])]}
+        return {"messages": [bound.invoke(state["messages"], config={"callbacks": callbacks or []})]}
 
     def act(state: LoopState) -> dict:
         last = state["messages"][-1]
@@ -153,6 +156,7 @@ def build_flight_subgraph(llm, ctx: tools.ToolContext):
 
 def _terminal_response(
     llm, ctx: tools.ToolContext, messages: list, proposal: FlightProposal, tracer,
+    callbacks: list | None = None,
 ) -> FlightAgentResponse:
     """The one structured turn, with the same retry-then-fallback contract the
     single-shot path has always had.
@@ -176,6 +180,7 @@ def _terminal_response(
         proposal=proposal,
         tracer=tracer,
         agent=AGENT,
+        callbacks=callbacks,
     )
 
 
@@ -184,6 +189,7 @@ def run_agentic_flight_agent(
     llm,
     *,
     tracer=None,
+    callbacks: list | None = None,
 ) -> tuple[FlightProposal, FlightAgentResponse]:
     """Run the loop and return what the single-shot path returns.
 
@@ -226,7 +232,7 @@ def run_agentic_flight_agent(
         proposal = propose_flights(request, rows)
         return proposal, blocked_input_response(proposal, screened)
 
-    graph = build_flight_subgraph(llm, ctx)
+    graph = build_flight_subgraph(llm, ctx, callbacks)
     messages = _opening_messages(ctx)
     try:
         # `LoopBudget` is the primary control; `recursion_limit` is what catches a
@@ -261,7 +267,7 @@ def run_agentic_flight_agent(
     # ordering was chosen, which is the common case and the golden-safe one.
     proposal = ctx.final_proposal(ctx.cache.all_rows or rows)
 
-    response = _terminal_response(llm, ctx, messages, proposal, tracer)
+    response = _terminal_response(llm, ctx, messages, proposal, tracer, callbacks)
     if ctx.acknowledgment_applied is not None:
         response = response.model_copy(update={"acknowledgment_applied": ctx.acknowledgment_applied})
 

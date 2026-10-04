@@ -22,3 +22,15 @@ docs/security/cicd-status.html
 
 # pytest-playwright failure screenshots, videos and traces (see ci-checks.yml).
 test-results/
+
+# Local document/presentation generation workspaces.
+.codex-presentation-work/
+.codex-report-work/
+.codex-doc-work/
+.codex-doc-fix/
+
+# Locally generated presentation and Word deliverables.
+*.ppt
+*.pptx
+*.doc
+*.docx

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -521,11 +522,45 @@ class _AgentCardCacheHeaders(BaseHTTPMiddleware):
         return response
 
 
+_calls_in_flight = 0
+_calls_lock = threading.Lock()
+
+
+def calls_in_flight() -> int:
+    """JSON-RPC calls this process is serving now; the agents role's load.
+
+    The client makes one blocking SendMessage per specialist (a2a_client.py),
+    so a call in flight is a specialist task in flight. This is what the
+    agents autoscaler targets (flaskapp/metrics.py, deploy/k8s/hpa.yaml).
+    """
+    return _calls_in_flight
+
+
+class _CountCallsInFlight:
+    """Pure ASGI, not BaseHTTPMiddleware, so nothing buffers a long call."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        global _calls_in_flight
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+        with _calls_lock:
+            _calls_in_flight += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            with _calls_lock:
+                _calls_in_flight -= 1
+
+
 # Exported so a host application composing these routes into its own Starlette
 # app carries the middleware with them. `combined.py` builds a new Starlette
 # from `a2a_app.routes`, which silently drops anything attached to the inner
 # app — the Agent Card cache headers vanished exactly that way.
-A2A_MIDDLEWARE: tuple = (Middleware(_AgentCardCacheHeaders),)
+A2A_MIDDLEWARE: tuple = (Middleware(_CountCallsInFlight), Middleware(_AgentCardCacheHeaders))
 
 
 def _add_agent_routes(routes, agent_name, executor, base_url, task_store, at_root=False) -> None:

@@ -24,6 +24,7 @@ Usage (server must already be running on :5000):
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -36,8 +37,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from flaskapp.travel_ai.agents.flight_agent.seed_data import SEED_FLIGHT_INVENTORY
 
-DEMO_EMAIL = "demo@example.com"
-DEMO_PASSWORD = "TravelDemo2026!"
+DEMO_EMAIL = os.getenv("E2E_LOGIN_EMAIL", "").strip()
+DEMO_PASSWORD = os.getenv("E2E_LOGIN_PASSWORD", "")
 POLL_TIMEOUT_SECONDS = 300
 POLL_INTERVAL_SECONDS = 3
 
@@ -274,6 +275,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:5000")
     args = parser.parse_args()
+
+    if not DEMO_EMAIL or not DEMO_PASSWORD:
+        parser.error("E2E_LOGIN_EMAIL and E2E_LOGIN_PASSWORD must be set")
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")

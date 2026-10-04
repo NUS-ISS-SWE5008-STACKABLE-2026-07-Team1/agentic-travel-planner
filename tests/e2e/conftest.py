@@ -13,6 +13,7 @@ never touch the real dev database.
 from __future__ import annotations
 
 import sqlite3
+import secrets
 import threading
 from dataclasses import dataclass
 from http.server import HTTPServer
@@ -21,6 +22,7 @@ import pytest
 from flask import Flask
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.serving import make_server
+from werkzeug.security import generate_password_hash
 
 from scripts.ci_stub_provider import Handler as StubLlmHandler
 
@@ -47,6 +49,8 @@ def stub_llm_base_url():
 class LiveServer:
     base_url: str
     app: Flask
+    login_email: str
+    login_password: str
 
 
 @pytest.fixture(scope="session")
@@ -65,6 +69,8 @@ def live_server(tmp_path_factory, stub_llm_base_url) -> LiveServer:
 
     db_path = tmp_path_factory.mktemp("e2e-db") / "travel_planner.sqlite3"
     trace_dir = tmp_path_factory.mktemp("e2e-traces")
+    login_email = "browser-test@example.com"
+    login_password = secrets.token_urlsafe(24)
 
     class E2EConfig(Config):
         DATABASE = db_path
@@ -80,13 +86,20 @@ def live_server(tmp_path_factory, stub_llm_base_url) -> LiveServer:
         LLM_API_KEY = "stub-not-a-real-key"
         LLM_BASE_URL = stub_llm_base_url
         LLM_MODEL = "stub-model"
+        LOGIN_EMAIL = login_email
+        LOGIN_PASSWORD_HASH = generate_password_hash(login_password)
 
     app = create_app(config_object=E2EConfig)
     server = make_server("127.0.0.1", 0, app, threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield LiveServer(base_url=f"http://127.0.0.1:{server.server_port}", app=app)
+        yield LiveServer(
+            base_url=f"http://127.0.0.1:{server.server_port}",
+            app=app,
+            login_email=login_email,
+            login_password=login_password,
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)

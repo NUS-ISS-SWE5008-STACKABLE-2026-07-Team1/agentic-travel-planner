@@ -39,9 +39,9 @@
 # credential as `github-deployer`. Nothing long-lived is stored in GitHub: the
 # three repository VARIABLES below are identifiers, not secrets.
 #
-#   GCP_PROJECT_ID    project-931fd286-f1d2-4105-9e5
-#   GCP_WIF_PROVIDER  projects/1040773574528/locations/global/workloadIdentityPools/github/providers/agentic-travel-planner
-#   GCP_DEPLOY_SA     github-deployer@project-931fd286-f1d2-4105-9e5.iam.gserviceaccount.com
+#   GCP_PROJECT_ID    Google Cloud project identifier
+#   GCP_WIF_PROVIDER  Full Workload Identity provider resource name
+#   GCP_DEPLOY_SA     GitHub deployer service-account identity
 #
 # ROLLING BACK
 #
@@ -230,14 +230,13 @@ jobs:
         id: rollout
         run: |
           set -euo pipefail
-          # Apply the Deployments exactly as committed, with only the tag
-          # swapped in — in this checkout, never committed back. So git stays
+          # Apply the Deployments exactly as committed, with only the image
+          # location and tag injected in this checkout, never committed back. So git stays
           # the record of how the pods are configured, and a change to probes or
           # resources ships with the code. See deploy/k8s/app/kustomization.yaml
           # for why these two are applied apart from the rest of deploy/k8s.
-          sed -i "s|^\(    newTag:\).*|\1 ${TAG}|" deploy/k8s/app/kustomization.yaml
-          grep -q "newTag: ${TAG}$" deploy/k8s/app/kustomization.yaml \
-            || { echo "::error::could not set the image tag"; exit 1; }
+          # Quotes the tag: a commit id like 7750e40 is otherwise a YAML number.
+          bash deploy/set_image.sh "$IMAGE" "$TAG"
           # Both together, then wait on both: they share one image and one A2A
           # contract, so they should change together rather than one at a time.
           kubectl apply -k deploy/k8s/app

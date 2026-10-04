@@ -15,10 +15,15 @@ mid-plan.
 Three things learned from the SDK that are not obvious and are easy to get
 wrong:
 
-1. **`SendMessage` returns a task handle, not a result.** The server replies as
-   soon as the task is created (`TASK_STATE_SUBMITTED`) and does the work
-   afterwards, so the client polls `GetTask` until the task reaches a terminal
-   state. That is the protocol's model, not a quirk of ours.
+1. **`SendMessage` can return a handle or the result — the client chooses.**
+   `SendMessageConfiguration.return_immediately` (which the SDK sets from
+   `ClientConfig.polling`) makes the server reply at `TASK_STATE_SUBMITTED` and
+   leaves the client to poll `GetTask`. We send it **false**, so the server
+   holds the request open until the task is terminal and returns it finished.
+   That is what lets the agents role run more than one pod: the task store is
+   in memory (`InMemoryTaskStore`), and a `GetTask` poll routed by the Service
+   to a sibling pod would ask about a task that pod never saw. With one
+   blocking call, a task lives and dies inside one HTTP request on one pod.
 2. **The `A2A-Version` header decides which protocol version you are speaking.**
    Omit it and the server treats you as v0.3 and rejects you with `-32009`.
    The SDK client sets it; hand-rolled HTTP would not.
@@ -54,16 +59,10 @@ EVENT_CALL_STARTED = "a2a_call_started"
 EVENT_CALL_COMPLETED = "a2a_call_completed"
 EVENT_CALL_FAILED = "a2a_transport_failed"
 
-# Poll fast at first, then back off. A specialist takes 30-80 seconds, so a flat
-# 50ms interval spent ~1,200 requests per agent waiting for one that was never
-# going to arrive sooner: one real plan on GKE put ~5,100 JSON-RPC calls through
-# the agents pod, and its own health probe timed out mid-plan. Starting at 50ms
-# keeps a stubbed test (which completes immediately) as fast as it was, while
-# the ceiling bounds a real wait to roughly 80 polls instead of 1,200. The cost
-# is up to `_POLL_CEILING_SECONDS` of extra latency on the last poll.
-_POLL_INTERVAL_SECONDS = 0.05
-_POLL_BACKOFF = 1.5
-_POLL_CEILING_SECONDS = 2.0
+# History: this client used to poll `GetTask`, first every 50ms (one real plan
+# on GKE put ~5,100 JSON-RPC calls through the agents pod and its health probe
+# timed out), then with backoff. Both are gone: see point 1 above. One call per
+# specialist, and no state on the server that outlives it.
 
 
 class RemoteAgentError(RuntimeError):
@@ -123,7 +122,7 @@ async def _request_finding(
     import httpx
     from a2a.client import ClientConfig, create_client
     from a2a.helpers import get_data_parts, new_data_message
-    from a2a.types import GetTaskRequest, Role, SendMessageRequest, TaskState
+    from a2a.types import Role, SendMessageRequest, TaskState
 
     # Built inside the coroutine deliberately: an AsyncClient created on one
     # event loop and closed on another raises, and this module makes a new loop
@@ -138,7 +137,9 @@ async def _request_finding(
             # Matches the Agent Card, which declares streaming false because
             # the executors emit no incremental updates.
             streaming=False,
-            polling=True,
+            # False = return_immediately false: one blocking call, no GetTask.
+            # See point 1 in the module docstring before changing this.
+            polling=False,
             supported_protocol_bindings=["JSONRPC"],
             accepted_output_modes=["application/json"],
         )
@@ -169,17 +170,15 @@ async def _request_finding(
         if task is None:
             raise RemoteAgentError(f"{agent_name} returned no task for the request")
 
-        terminal = _terminal_states()
-        deadline = time.monotonic() + deadline_seconds
-        interval = _POLL_INTERVAL_SECONDS
-        while task.status.state not in terminal:
-            if time.monotonic() > deadline:
-                raise RemoteAgentError(
-                    f"{agent_name} did not finish within {deadline_seconds:.0f}s"
-                )
-            await asyncio.sleep(interval)
-            interval = min(interval * _POLL_BACKOFF, _POLL_CEILING_SECONDS)
-            task = await client.get_task(GetTaskRequest(id=task.id))
+        # A blocking call returns a terminal task. Anything else (an agent
+        # asking for input, which ours never do) is a failure here, NOT a cue
+        # to poll: a GetTask may reach a pod that never saw this task.
+        # The deadline is the HTTP client's timeout plus `_run_blocking`'s.
+        if task.status.state not in _terminal_states():
+            raise RemoteAgentError(
+                f"{agent_name} returned before finishing "
+                f"({TaskState.Name(task.status.state)})"
+            )
 
         if task.status.state != TaskState.TASK_STATE_COMPLETED:
             raise RemoteAgentError(

@@ -30,5 +30,5 @@ resources:
 # checkout at deploy time and never commits the change, so do not bump it here.
 images:
   - name: travel-planner
-    newName: us-west1-docker.pkg.dev/project-931fd286-f1d2-4105-9e5/travel-planner/app
+    newName: REPLACE_WITH_ARTIFACT_REGISTRY_IMAGE
     newTag: v3

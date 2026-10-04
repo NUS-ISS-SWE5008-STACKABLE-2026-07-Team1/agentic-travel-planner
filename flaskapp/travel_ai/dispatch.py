@@ -7,11 +7,18 @@ building a graph or touching a model.
 
 Two rules are not the traveller's to set, and neither is politeness:
 
-`risk_advisory_agent` runs for any scope that involves a journey. Visa and
-entry rules are not something to drop silently. The single exception is
-hotel-only, which collects no departure country at all — the agent reasons
-about entry FROM somewhere, so running it there would mean advising on a
-journey it knows nothing about.
+`risk_advisory_agent` runs for every scope. Visa and entry rules, local laws
+and seasonal disruption are not something to drop silently, and a hotel-only
+stay still happens somewhere that has all three.
+
+Hotel-only was once excluded here, on the grounds that the agent reasons about
+entry FROM a departure country that this scope does not collect. That was a
+claim about the implementation, and it was wrong: `RiskProposalRequest` carries
+`destination_slug`, `destination` and the dates, and no origin field at all.
+The agent is keyed on where you are going, never on where you set off from, so
+a missing origin costs it nothing. `test_risk_advisory_agent.py::
+test_the_grounded_path_needs_no_origin` pins that, so the exclusion cannot be
+reintroduced on the strength of the same wrong reason.
 
 `accessibility_agent` runs whenever any accessibility need is stated, whatever
 the scope. `safeguards.assess_plan` warns when needs are present and no
@@ -38,10 +45,10 @@ RISK = "risk_advisory_agent"
 _BY_SCOPE: dict[str, frozenset[str]] = {
     "both": frozenset({FLIGHT, HOTEL, ACCESSIBILITY, RISK}),
     "flights": frozenset({FLIGHT, RISK}),
-    # A stay, not a journey. Risk & Advisory reasons about visas and entry from
-    # the departure country, and a hotel-only request no longer collects one —
-    # so it would be advising on a journey it knows nothing about.
-    "hotel": frozenset({HOTEL}),
+    # A stay rather than a journey, but the advisory still applies: the
+    # traveller is somewhere with entry rules, local laws and a typhoon season,
+    # whether or not they asked us to book the flight that gets them there.
+    "hotel": frozenset({HOTEL, RISK}),
 }
 
 

@@ -1,0 +1,47 @@
+# A disposable database for the load test: emptyDir, so it disappears with the
+# namespace. The password comes from the Secret `loadtest-db`, created by
+# deploy/scaling_demo.py.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels: {app: postgres}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - {name: postgres, containerPort: 5432}
+          env:
+            - {name: POSTGRES_USER, value: travel}
+            - {name: POSTGRES_DB, value: travel}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: loadtest-db, key: password}}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "travel", "-d", "travel"]}
+            periodSeconds: 3
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: {app: postgres}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
