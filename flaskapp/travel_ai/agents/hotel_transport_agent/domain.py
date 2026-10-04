@@ -157,6 +157,54 @@ def _survivors(
     ]
 
 
+# --- Occupancy ----------------------------------------------------------------
+#
+# Deliberately NOT `schemas.CHILD_AGE_LIMIT`, which is 18. That constant answers
+# "who counts as a child on this trip" and drives `party` composition; this one
+# answers "who fills an adult place in a room". A 15-year-old is a child by the
+# first and an adult by the second, and both are correct for their own question.
+ROOM_ADULT_MIN_AGE = 13        # over 12, per the room policy
+ADULTS_PER_ROOM = 2
+CHILDREN_PER_ROOM = 2
+# A car seat is a car seat: a child occupies one, so this counts everybody.
+CAR_CAPACITY = 4
+PER_VEHICLE_MODES = frozenset({"taxi", "car"})
+
+
+def rooms_required(traveller_ages: list[int]) -> int:
+    """Rooms for a party, at two over-12s and two children per room.
+
+    Adults and children are counted into SEPARATE allowances rather than
+    against one headcount, because the policy is not "four to a room": three
+    adults and no children need two rooms, and so do two adults and three
+    children.
+
+    Never returns 0 — a party with no recorded ages still sleeps somewhere, and
+    a zero here would silently price a stay at nothing.
+    """
+    adults = sum(1 for age in traveller_ages if age >= ROOM_ADULT_MIN_AGE)
+    children = len(traveller_ages) - adults
+    return max(
+        1,
+        -(-adults // ADULTS_PER_ROOM),      # ceil, without importing math
+        -(-children // CHILDREN_PER_ROOM),
+    )
+
+
+def transport_units(mode: str, travellers: int) -> int:
+    """What a transfer is billed in: vehicles for a car, tickets for everyone else.
+
+    An unknown mode is priced per person on purpose. Over-stating a shared
+    vehicle inflates a total the traveller can check against a quote; quoting
+    one ticket to a family of five understates the trip, which is the error
+    that actually strands someone.
+    """
+    party = max(1, travellers)
+    if mode and mode.strip().lower() in PER_VEHICLE_MODES:
+        return -(-party // CAR_CAPACITY)
+    return party
+
+
 def propose_hotels(
     request: HotelProposalRequest,
     inventory: list[HotelInventoryItem],
@@ -167,6 +215,10 @@ def propose_hotels(
     ctx = request.trip_context
     city_slug = ctx.dest_city_slug
     nights = ctx.nights
+    # A stay is rooms x nights, not nights alone. Five adults cannot share one
+    # double, and pricing them as if they could understates the trip by two
+    # thirds — the figure `recommend_package` then calls affordable.
+    rooms = rooms_required(ctx.traveller_ages)
     prefs = ctx.hotel_preferences
     needs_assist = _needs_wheelchair(ctx.accessibility_needs)
 
@@ -194,7 +246,7 @@ def propose_hotels(
             accessible_bathroom=item.accessible_bathroom,
             amenities=list(item.amenities),
             source=item.source,
-            estimated_total_cost=round(item.price_per_night * nights, 2),
+            estimated_total_cost=round(item.price_per_night * nights * rooms, 2),
             currency=hotel_currency,
         )
         for item in survivors[:top_n]

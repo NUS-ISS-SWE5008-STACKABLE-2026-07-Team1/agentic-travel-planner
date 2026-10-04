@@ -1,0 +1,58 @@
+# The fake model: scripts/ci_stub_provider.py, the same OpenAI-compatible stub
+# CI uses, answering every agent with schema-valid JSON at no cost. Two
+# differences from CI, both added here rather than in the stub so this works
+# with whatever image production runs: a reply delay (STUB_DELAY_SECONDS), so a
+# plan takes minutes as with a real model and the autoscalers see work in
+# flight; and a ThreadingHTTPServer, so delayed replies do not queue.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stub
+  labels: {app: stub}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: stub}
+  template:
+    metadata:
+      labels: {app: stub}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: stub
+          image: travel-planner
+          command:
+            - python
+            - -c
+            - |
+              import os, time
+              from http.server import ThreadingHTTPServer
+              from scripts.ci_stub_provider import PORT, Handler
+              delay = float(os.environ.get("STUB_DELAY_SECONDS", "0"))
+              class Slow(Handler):
+                  def do_POST(self):
+                      time.sleep(delay)
+                      super().do_POST()
+              print(f"stub model on :{PORT}, {delay:g}s per reply", flush=True)
+              ThreadingHTTPServer(("0.0.0.0", PORT), Slow).serve_forever()
+          env:
+            # Overridden by deploy/scaling_demo.py --stub-delay.
+            - {name: STUB_DELAY_SECONDS, value: "30"}
+          ports:
+            - {name: http, containerPort: 8081}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stub
+spec:
+  selector: {app: stub}
+  ports:
+    - {name: http, port: 8081, targetPort: http}

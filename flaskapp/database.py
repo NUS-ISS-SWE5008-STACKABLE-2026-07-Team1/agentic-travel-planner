@@ -6,12 +6,13 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
 import click
-from flask import Flask, current_app, g
+from flask import Flask, current_app
 from werkzeug.security import check_password_hash
 
 # psycopg is imported lazily inside connect(), so a SQLite-only environment
@@ -88,7 +89,11 @@ CREATE TABLE IF NOT EXISTS agent_findings (
     agent TEXT NOT NULL,
     summary TEXT NOT NULL,
     warnings_json TEXT NOT NULL DEFAULT '[]',
-    confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1)
+    confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    -- When save_plan() stored this row, which is when the plan was saved, not
+    -- when the agent finished: that is agent_runs.completed_at. Nullable with
+    -- no default so a migrated database matches a fresh one; see initialize().
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS options (
@@ -109,7 +114,13 @@ CREATE TABLE IF NOT EXISTS options (
     -- Which airport an option lands at or serves. Defaulted rather than
     -- nullable: rows written before packages existed served no airport, and ''
     -- says that without a caller needing to handle None.
-    airport TEXT NOT NULL DEFAULT ''
+    airport TEXT NOT NULL DEFAULT '',
+    -- Copied from the owning finding so "every option for this request" is one
+    -- filter instead of a join. Nullable because ADD COLUMN cannot add NOT NULL
+    -- to a table with rows; initialize() backfills it from agent_findings.
+    request_id TEXT REFERENCES travel_requests(id) ON DELETE CASCADE,
+    -- Same meaning and reasoning as agent_findings.created_at.
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -146,7 +157,10 @@ CREATE TABLE IF NOT EXISTS planning_jobs (
     completed_at TEXT,
     error_type TEXT,
     session_status TEXT NOT NULL DEFAULT 'active',
-    session_ended_at TEXT
+    session_ended_at TEXT,
+    worker TEXT,
+    heartbeat_at REAL,
+    response_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS intake_messages (
@@ -315,7 +329,11 @@ CREATE TABLE IF NOT EXISTS agent_findings (
     agent TEXT NOT NULL,
     summary TEXT NOT NULL,
     warnings_json TEXT NOT NULL DEFAULT '[]',
-    confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1)
+    confidence DOUBLE PRECISION NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    -- When save_plan() stored this row, which is when the plan was saved, not
+    -- when the agent finished: that is agent_runs.completed_at. Nullable with
+    -- no default so a migrated database matches a fresh one; see initialize().
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS options (
@@ -336,7 +354,13 @@ CREATE TABLE IF NOT EXISTS options (
     -- Which airport an option lands at or serves. Defaulted rather than
     -- nullable: rows written before packages existed served no airport, and ''
     -- says that without a caller needing to handle None.
-    airport TEXT NOT NULL DEFAULT ''
+    airport TEXT NOT NULL DEFAULT '',
+    -- Copied from the owning finding so "every option for this request" is one
+    -- filter instead of a join. Nullable because ADD COLUMN cannot add NOT NULL
+    -- to a table with rows; initialize() backfills it from agent_findings.
+    request_id TEXT REFERENCES travel_requests(id) ON DELETE CASCADE,
+    -- Same meaning and reasoning as agent_findings.created_at.
+    created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS a2a_messages (
@@ -373,7 +397,10 @@ CREATE TABLE IF NOT EXISTS planning_jobs (
     completed_at TEXT,
     error_type TEXT,
     session_status TEXT NOT NULL DEFAULT 'active',
-    session_ended_at TEXT
+    session_ended_at TEXT,
+    worker TEXT,
+    heartbeat_at DOUBLE PRECISION,
+    response_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS intake_messages (
@@ -506,8 +533,9 @@ class _Connection:
 
     Both dialects commit AND close on a clean context exit. sqlite3 alone would
     commit and leave the connection open; psycopg alone would close. Making
-    them agree is what lets `with connect(...)` mean one thing in all 21 call
-    sites.
+    them agree is what lets `with connect(...)` mean one thing in every call
+    site. On Postgres "close" returns the connection to this process's pool
+    (see `_postgres_pool`), so a `with` block borrows rather than opens.
     """
 
     def __init__(self, raw, dialect: str):
@@ -576,39 +604,108 @@ CONNECTION_HELP = (
 DATABASE_SCHEMA = os.getenv("DATABASE_SCHEMA", "").strip()
 
 
+# Connections per process kept open and reused, instead of one opened and
+# closed per call. A single plan's audit trail alone used to open ~31; with
+# web and agents each autoscaling to 3 pods, a burst could approach Supabase's
+# limit of 60. Per process this is the ceiling, not a reservation: the pool
+# keeps 1 open and grows to this only while that many threads are inside a
+# `with connect(...)` at once, which is brief. Worst case 3 web + 3 agents
+# pods x 5 = 30. Set DATABASE_POOL_SIZE=0 to go back to a connection per call.
+DATABASE_POOL_SIZE = int(os.getenv("DATABASE_POOL_SIZE", "5"))
+# How long a caller waits for a free connection (or for the database to come
+# back) before the request fails.
+DATABASE_POOL_TIMEOUT_SECONDS = float(os.getenv("DATABASE_POOL_TIMEOUT_SECONDS", "30"))
+
+# Shown in pg_stat_activity, so the database can say how many connections
+# this app holds: SELECT count(*) FROM pg_stat_activity
+#                 WHERE application_name = 'travel-planner'
+APPLICATION_NAME = "travel-planner"
+
+_pools: dict[str, Any] = {}
+_pools_lock = threading.Lock()
+
+
+def _configure_postgres(raw) -> None:
+    """Session settings every Postgres connection needs, applied once when it
+    is opened — pooled connections keep them for life."""
+    if DATABASE_SCHEMA:
+        from psycopg import sql
+
+        # Identifier() quotes it correctly; the schema name is
+        # case-sensitive and unquoted Postgres folds it to lowercase.
+        raw.execute(sql.SQL("SET search_path TO {}, public, extensions").format(
+            sql.Identifier(DATABASE_SCHEMA)
+        ))
+        raw.commit()
+    # AVG() and ROUND() return `numeric` on Postgres and `float` on
+    # SQLite. psycopg maps numeric to Decimal, and Flask's JSON
+    # provider renders Decimal as a *string*, so the admin charts
+    # would receive "92.3" instead of 92.3. No column in either schema
+    # is numeric — only aggregate results are — so loading numeric as
+    # float loses nothing and matches SQLite exactly.
+    try:  # pragma: no cover - needs psycopg installed
+        from psycopg.types.numeric import FloatLoader
+
+        raw.adapters.register_loader("numeric", FloatLoader)
+    except (ImportError, AttributeError):  # pragma: no cover
+        pass
+
+
+def _postgres_pool(dsn: str):
+    """This process's pool for `dsn`, created on first use.
+
+    First use, not import: under gunicorn the pool must be born in the worker,
+    because its connections and background threads do not survive a fork.
+    `close_returns=True` is what keeps every call site unchanged: `_Connection`
+    commits or rolls back and then calls close(), and on a pooled connection
+    close() hands it back instead of ending it. The pool rolls back anything
+    left uncommitted and checks a connection is alive before lending it.
+    """
+    with _pools_lock:
+        pool = _pools.get(dsn)
+        if pool is None:
+            from psycopg.rows import dict_row
+            from psycopg_pool import ConnectionPool
+
+            pool = ConnectionPool(
+                dsn,
+                min_size=1,
+                max_size=DATABASE_POOL_SIZE,
+                kwargs={"row_factory": dict_row, "application_name": APPLICATION_NAME},
+                configure=_configure_postgres,
+                check=ConnectionPool.check_connection,
+                close_returns=True,
+                timeout=DATABASE_POOL_TIMEOUT_SECONDS,
+                # Recycle idle and long-lived connections, so a Supabase pooler
+                # restart or an idle cut-off never leaves us holding dead ones.
+                max_idle=300,
+                max_lifetime=1800,
+                name="travel-planner",
+                open=True,
+            )
+            _pools[dsn] = pool
+        return pool
+
+
 def connect(target: Path | str) -> _Connection:
-    """Open a connection to a SQLite path or a Postgres DSN."""
+    """Open a connection to a SQLite path, or borrow one for a Postgres DSN."""
     if is_postgres(target):
         import psycopg
-        from psycopg.rows import dict_row
 
         try:
-            raw = psycopg.connect(target, row_factory=dict_row)
-            if DATABASE_SCHEMA:
-                from psycopg import sql
+            if DATABASE_POOL_SIZE > 0:
+                raw = _postgres_pool(target).getconn()
+            else:
+                from psycopg.rows import dict_row
 
-                # Identifier() quotes it correctly; the schema name is
-                # case-sensitive and unquoted Postgres folds it to lowercase.
-                raw.execute(sql.SQL("SET search_path TO {}, public, extensions").format(
-                    sql.Identifier(DATABASE_SCHEMA)
-                ))
-                raw.commit()
-            # AVG() and ROUND() return `numeric` on Postgres and `float` on
-            # SQLite. psycopg maps numeric to Decimal, and Flask's JSON
-            # provider renders Decimal as a *string*, so the admin charts
-            # would receive "92.3" instead of 92.3. No column in either schema
-            # is numeric — only aggregate results are — so loading numeric as
-            # float loses nothing and matches SQLite exactly.
-            try:  # pragma: no cover - needs psycopg installed
-                from psycopg.types.numeric import FloatLoader
-
-                raw.adapters.register_loader("numeric", FloatLoader)
-            except (ImportError, AttributeError):  # pragma: no cover
-                pass
+                raw = psycopg.connect(target, row_factory=dict_row,
+                                      application_name=APPLICATION_NAME)
+                _configure_postgres(raw)
         except psycopg.OperationalError as error:
-            # The failure is almost always the pooler/direct distinction, and
-            # the driver's own message ("could not translate host name") does
-            # not hint at it. Say so once, here, rather than in a runbook.
+            # PoolTimeout is an OperationalError too. The failure is almost
+            # always the pooler/direct distinction, and the driver's own
+            # message ("could not translate host name") does not hint at it.
+            # Say so once, here, rather than in a runbook.
             raise psycopg.OperationalError(f"{error}\n\n{CONNECTION_HELP}") from error
         return _Connection(raw, "postgres")
     path = Path(target)
@@ -620,16 +717,17 @@ def connect(target: Path | str) -> _Connection:
     return _Connection(connection, "sqlite")
 
 
-def get_db() -> _Connection:
-    if "db" not in g:
-        g.db = connect(current_app.config["DATABASE"])
-    return g.db
+def _app_db() -> _Connection:
+    """A short-lived connection for the auth routes.
 
-
-def close_db(_error: BaseException | None = None) -> None:
-    connection = g.pop("db", None)
-    if connection is not None:
-        connection.close()
+    These used to share one connection per request (Flask's `g.db`), held until
+    the request ended. With a pool that is a deadlock waiting to happen: a
+    request holding one connection and asking for a second (the login page's
+    template checks admin status) can wait for ever once every pooled
+    connection is held that way. Every function here takes and returns its
+    own, like the rest of this module.
+    """
+    return connect(current_app.config["DATABASE"])
 
 
 def _rebuild_sqlite_table(connection, table: str, edit) -> None:
@@ -808,8 +906,76 @@ def _repoint_flight_eval_run_fk(connection) -> None:
     _rebuild_sqlite_table(connection, "flight_agent_eval_runs", repoint)
 
 
+def _add_trace_columns(connection, existing_columns) -> None:
+    """Add and backfill `options.request_id` and both `created_at` columns.
+
+    Every step is safe to repeat, because initialize() runs on every start.
+
+    The columns are added without a default. A "now" default on ADD COLUMN would
+    stamp every existing Postgres row with the deploy time, which is a false
+    fact, and SQLite rejects a non-constant default there anyway.
+
+    The backfills are exact, not estimates. `options.request_id` comes from the
+    option's own finding. `created_at` comes from `travel_plans.created_at`
+    because save_plan() is the only writer of all three tables and inserts the
+    plan, its findings and its options in one pass. A row with no plan row
+    stays NULL rather than being given a guessed time.
+
+    The index is created here and not in the schema constants: those run first,
+    and on an existing database the column would not exist yet.
+    """
+    option_columns = existing_columns("options")
+    if "request_id" not in option_columns:
+        connection.execute(
+            "ALTER TABLE options ADD COLUMN request_id TEXT "
+            "REFERENCES travel_requests(id) ON DELETE CASCADE"
+        )
+    if "created_at" not in option_columns:
+        connection.execute("ALTER TABLE options ADD COLUMN created_at TEXT")
+    if "created_at" not in existing_columns("agent_findings"):
+        connection.execute("ALTER TABLE agent_findings ADD COLUMN created_at TEXT")
+
+    connection.execute(
+        """UPDATE options SET request_id = (
+               SELECT f.request_id FROM agent_findings f WHERE f.id = options.finding_id
+           ) WHERE request_id IS NULL"""
+    )
+    connection.execute(
+        """UPDATE agent_findings SET created_at = (
+               SELECT p.created_at FROM travel_plans p
+               WHERE p.request_id = agent_findings.request_id
+           ) WHERE created_at IS NULL"""
+    )
+    connection.execute(
+        """UPDATE options SET created_at = (
+               SELECT f.created_at FROM agent_findings f WHERE f.id = options.finding_id
+           ) WHERE created_at IS NULL"""
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_options_request ON options(request_id)"
+    )
+
+
+# Taken at the start of initialize() on Postgres. Every pod runs initialize()
+# when it starts, and each step is "check, then change": is the column there?
+# no -> ADD COLUMN. Two pods starting together (web and agents on every deploy,
+# or a scale-out) can both see "missing" and both ALTER; the second fails with
+# "already exists" and its pod crashes on startup. With the lock, one pod sets
+# the schema up while the others wait a moment, then find nothing to do.
+#
+# Transaction-scoped (released by the commit or rollback at the end of
+# initialize), so a pod that dies mid-setup cannot leave it held. Keyed by the
+# schema, so Render's and GKE's setups, which share one Supabase database in
+# different schemas, never queue behind each other.
+SCHEMA_SETUP_LOCK_SQL = (
+    "SELECT pg_advisory_xact_lock(hashtext('travel-planner:schema-setup:' || current_schema()))"
+)
+
+
 def initialize(target: Path | str) -> None:
     with connect(target) as connection:
+        if connection.dialect == "postgres":
+            connection.execute(SCHEMA_SETUP_LOCK_SQL)
         connection.executescript(
             SCHEMA_POSTGRES if connection.dialect == "postgres" else SCHEMA_SQLITE
         )
@@ -854,6 +1020,7 @@ def initialize(target: Path | str) -> None:
             connection.execute(
                 "ALTER TABLE options ADD COLUMN airport TEXT NOT NULL DEFAULT ''"
             )
+        _add_trace_columns(connection, existing_columns)
         # `origin` was NOT NULL until hotel-only scope existed: a stay has no
         # departure country. Postgres can relax the constraint in place;
         # SQLite cannot, so the table is rebuilt with its rows copied across.
@@ -876,6 +1043,15 @@ def initialize(target: Path | str) -> None:
             )
         if "session_ended_at" not in job_columns:
             connection.execute("ALTER TABLE planning_jobs ADD COLUMN session_ended_at TEXT")
+        # Job state that any web pod can read (jobs.py). Nullable, no default:
+        # an old row has no worker, heartbeat or stored response, and saying so
+        # is the truth. REAL is spelled DOUBLE PRECISION on Postgres, as in the
+        # schema text.
+        heartbeat_type = "DOUBLE PRECISION" if connection.dialect == "postgres" else "REAL"
+        for name, kind in (("worker", "TEXT"), ("heartbeat_at", heartbeat_type),
+                           ("response_json", "TEXT")):
+            if name not in job_columns:
+                connection.execute(f"ALTER TABLE planning_jobs ADD COLUMN {name} {kind}")
         _repoint_flight_eval_run_fk(connection)
 
 
@@ -895,48 +1071,51 @@ def seed_login_user(path: Path | str, email: str, password_hash: str) -> None:
 
 
 def authenticate_user(email: str, password: str) -> sqlite3.Row | None:
-    user = get_db().execute(
-        "SELECT id, name, email, country, password_hash FROM users WHERE email = ?", (email.lower(),)
-    ).fetchone()
+    with _app_db() as db:
+        user = db.execute(
+            "SELECT id, name, email, country, password_hash FROM users WHERE email = ?",
+            (email.lower(),),
+        ).fetchone()
+    # Outside the block on purpose: the hash check is deliberately slow (scrypt),
+    # and no connection should sit idle in the pool's hands while it runs.
     return user if user and check_password_hash(user["password_hash"], password) else None
 
 
 def get_user_for_password_reset(email: str) -> sqlite3.Row | None:
     """Return only the authentication material needed to issue a reset token."""
-    return get_db().execute(
-        "SELECT email, password_hash FROM users WHERE email = ?", (email.strip().lower(),)
-    ).fetchone()
+    with _app_db() as db:
+        return db.execute(
+            "SELECT email, password_hash FROM users WHERE email = ?", (email.strip().lower(),)
+        ).fetchone()
 
 
 def replace_password(email: str, expected_hash: str, new_hash: str) -> bool:
     """Atomically replace a password once, invalidating the token that authorized it."""
-    db = get_db()
-    cursor = db.execute(
-        "UPDATE users SET password_hash = ? WHERE email = ? AND password_hash = ?",
-        (new_hash, email.strip().lower(), expected_hash),
-    )
-    db.commit()
-    return cursor.rowcount == 1
+    with _app_db() as db:
+        cursor = db.execute(
+            "UPDATE users SET password_hash = ? WHERE email = ? AND password_hash = ?",
+            (new_hash, email.strip().lower(), expected_hash),
+        )
+        return cursor.rowcount == 1
 
 
 def create_user(name: str, email: str, password_hash: str, country: str,
                 birthday: str) -> sqlite3.Row | None:
     """Create an account, returning None when its normalized email already exists."""
-    db = get_db()
-    try:
-        user_id = db.insert_returning_id(
-            """INSERT INTO users (name, email, password_hash, country, birthday)
-               VALUES (?, ?, ?, ?, ?)""",
-            (name.strip(), email.strip().lower(), password_hash, country.strip(), birthday),
-        )
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        return None
-    return db.execute(
-        "SELECT id, name, email, country, birthday FROM users WHERE id = ?",
-        (user_id,),
-    ).fetchone()
+    with _app_db() as db:
+        try:
+            user_id = db.insert_returning_id(
+                """INSERT INTO users (name, email, password_hash, country, birthday)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (name.strip(), email.strip().lower(), password_hash, country.strip(), birthday),
+            )
+        except IntegrityError:
+            db.rollback()
+            return None
+        return db.execute(
+            "SELECT id, name, email, country, birthday FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
 
 
 def is_database_admin(path: Path | str, email: str | None) -> bool:
@@ -1014,7 +1193,8 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
         )
         for finding in response.agent_findings:
             finding_id = db.insert_returning_id(
-                "INSERT INTO agent_findings (request_id, agent, summary, warnings_json, confidence) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO agent_findings (request_id, agent, summary, warnings_json, confidence, created_at) "
+                "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
                 (request_id, finding.agent, finding.summary, _json(finding.warnings), finding.confidence),
             )
             for option in finding.options:
@@ -1022,13 +1202,13 @@ def save_plan(path: Path | str, request: Any, response: Any, messages: Iterable[
                     """INSERT INTO options
                        (finding_id, name, description, estimated_cost, currency, source_urls_json,
                         assumptions_json, limitations_json, selection_factors_json, category,
-                        airport)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        airport, request_id, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
                     (finding_id, option.name, option.description, option.estimated_cost,
                      option.currency, _json(option.source_urls), _json(option.assumptions),
                      _json(option.limitations), _json(option.selection_factors),
                      getattr(option, "category", None),
-                     getattr(option, "airport", "") or ""),
+                     getattr(option, "airport", "") or "", request_id),
                 )
         for message in messages:
             item = message.model_dump(mode="json") if hasattr(message, "model_dump") else message
@@ -1053,14 +1233,18 @@ def save_audit_event(path: Path | str, item: dict[str, Any]) -> None:
 
 
 def create_planning_job(path: Path | str, request_id: str, user_id: int | None,
-                        request_payload: Any) -> None:
+                        request_payload: Any, *, worker: str | None = None,
+                        heartbeat_at: float | None = None) -> None:
     with connect(path) as db:
         db.execute(
-            """INSERT INTO planning_jobs (request_id, user_id, status, request_json)
-               VALUES (?, ?, 'queued', ?)
+            """INSERT INTO planning_jobs
+                   (request_id, user_id, status, request_json, worker, heartbeat_at)
+               VALUES (?, ?, 'queued', ?, ?, ?)
                ON CONFLICT(request_id) DO UPDATE SET status = 'queued',
-                   request_json = excluded.request_json""",
-            (request_id, user_id, _json(request_payload)),
+                   request_json = excluded.request_json, worker = excluded.worker,
+                   heartbeat_at = excluded.heartbeat_at, response_json = NULL,
+                   error_type = NULL, completed_at = NULL""",
+            (request_id, user_id, _json(request_payload), worker, heartbeat_at),
         )
 
 
@@ -1187,6 +1371,121 @@ def update_planning_job(path: Path | str, request_id: str, status: str,
         )
 
 
+# --- Plan state shared by every web pod --------------------------------------
+#
+# A plan's status used to live only in the memory of the pod running it, so a
+# status poll that reached another pod got 404 (ADR-0005). These functions make
+# `planning_jobs` the record instead. Every transition is a conditional UPDATE
+# on the current status, so two pods racing (a cancel on one, completion on the
+# other) cannot overwrite each other: whichever lands first wins, and the other
+# sees rowcount 0.
+
+ACTIVE_JOB_STATUSES = ("queued", "processing")
+_ACTIVE = "('queued', 'processing')"
+
+
+def get_planning_job(path: Path | str, request_id: str) -> dict[str, Any] | None:
+    with connect(path) as db:
+        row = db.execute(
+            """SELECT request_id, user_id, status, error_type, worker, heartbeat_at,
+                      response_json
+               FROM planning_jobs WHERE request_id = ?""",
+            (request_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def start_planning_job(path: Path | str, request_id: str) -> bool:
+    """queued -> processing. False if it was cancelled while it waited."""
+    with connect(path) as db:
+        cursor = db.execute(
+            "UPDATE planning_jobs SET status = 'processing' "
+            "WHERE request_id = ? AND status = 'queued'",
+            (request_id,),
+        )
+        return cursor.rowcount == 1
+
+
+def finish_planning_job(path: Path | str, request_id: str, status: str, *,
+                        error_type: str | None = None, response: Any = None) -> bool:
+    """Record the outcome, unless the job already ended (e.g. was cancelled)."""
+    with connect(path) as db:
+        cursor = db.execute(
+            f"""UPDATE planning_jobs SET status = ?, error_type = ?, response_json = ?,
+                   completed_at = CURRENT_TIMESTAMP
+                WHERE request_id = ? AND status IN {_ACTIVE}""",
+            (status, error_type, _json(response) if response is not None else None,
+             request_id),
+        )
+        return cursor.rowcount == 1
+
+
+def cancel_planning_job(path: Path | str, request_id: str,
+                        user_id: int | None) -> str | None:
+    """Cancel the owner's job from any pod. Returns its resulting status.
+
+    None if there is no such job or it is not this user's; an absent user_id
+    owns nothing. A job that already ended keeps its status. The pod running
+    the job notices on its next heartbeat.
+    """
+    if user_id is None:
+        return None
+    with connect(path) as db:
+        row = db.execute(
+            "SELECT user_id, status FROM planning_jobs WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if row is None or row["user_id"] != user_id:
+            return None
+        cursor = db.execute(
+            f"""UPDATE planning_jobs SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP
+                WHERE request_id = ? AND status IN {_ACTIVE}""",
+            (request_id,),
+        )
+        if cursor.rowcount == 1:
+            return "cancelled"
+        return db.execute(
+            "SELECT status FROM planning_jobs WHERE request_id = ?", (request_id,)
+        ).fetchone()["status"]
+
+
+def heartbeat_planning_jobs(path: Path | str, request_ids: Iterable[str],
+                            now: float) -> set[str]:
+    """Mark this pod's jobs alive; return those another pod has cancelled."""
+    ids = list(request_ids)
+    if not ids:
+        return set()
+    marks = ", ".join("?" for _ in ids)
+    with connect(path) as db:
+        db.execute(
+            f"""UPDATE planning_jobs SET heartbeat_at = ?
+                WHERE request_id IN ({marks}) AND status IN {_ACTIVE}""",
+            (now, *ids),
+        )
+        rows = db.execute(
+            f"""SELECT request_id FROM planning_jobs
+                WHERE request_id IN ({marks}) AND status = 'cancelled'""",
+            tuple(ids),
+        ).fetchall()
+        return {row["request_id"] for row in rows}
+
+
+def fail_lost_planning_job(path: Path | str, request_id: str, stale_before: float) -> bool:
+    """Fail a job whose pod stopped sending heartbeats (it died or was removed).
+
+    Conditional on the heartbeat still being stale, so a job whose pod is only
+    slow is never failed under it.
+    """
+    with connect(path) as db:
+        cursor = db.execute(
+            f"""UPDATE planning_jobs SET status = 'failed', error_type = 'WorkerLost',
+                   completed_at = CURRENT_TIMESTAMP
+                WHERE request_id = ? AND status IN {_ACTIVE}
+                  AND (heartbeat_at IS NULL OR heartbeat_at < ?)""",
+            (request_id, stale_before),
+        )
+        return cursor.rowcount == 1
+
+
 def save_agent_run(path: Path | str, request_id: str, agent: str, status: str,
                    usage: dict[str, int] | None = None, response: Any = None,
                    error_type: str | None = None) -> None:
@@ -1206,6 +1505,36 @@ def save_agent_run(path: Path | str, request_id: str, agent: str, status: str,
                 (status, usage.get("input_tokens", 0), usage.get("output_tokens", 0),
                  usage.get("total_tokens", 0), response_json, error_type, request_id, agent),
             )
+
+
+def add_application_token_usage(path: Path | str, request_id: str,
+                                usage: dict[str, int] | None = None) -> None:
+    """Add non-agent LLM consumption to the request's Application category.
+
+    A request can spend application tokens in several places (intake extraction,
+    input screening and output screening), so this is deliberately additive.
+    ``save_agent_run`` remains replacement-based because each agent owns one run
+    row; using it here would make the last application call erase earlier calls.
+    """
+    usage = usage or {}
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    output_tokens = int(usage.get("output_tokens", 0) or 0)
+    total_tokens = int(usage.get("total_tokens", 0) or input_tokens + output_tokens)
+    if not (input_tokens or output_tokens or total_tokens):
+        return
+    with connect(path) as db:
+        db.execute(
+            """INSERT INTO agent_runs (
+                   request_id, agent, status, completed_at,
+                   input_tokens, output_tokens, total_tokens
+               ) VALUES (?, 'Application', 'completed', CURRENT_TIMESTAMP, ?, ?, ?)
+               ON CONFLICT(request_id, agent) DO UPDATE SET
+                   status = 'completed', completed_at = CURRENT_TIMESTAMP,
+                   input_tokens = agent_runs.input_tokens + excluded.input_tokens,
+                   output_tokens = agent_runs.output_tokens + excluded.output_tokens,
+                   total_tokens = agent_runs.total_tokens + excluded.total_tokens""",
+            (request_id, input_tokens, output_tokens, total_tokens),
+        )
 
 
 def save_flight_eval_run(
@@ -1590,7 +1919,6 @@ def init_db_command() -> None:
 
 
 def init_app(app: Flask) -> None:
-    app.teardown_appcontext(close_db)
     app.cli.add_command(init_db_command)
     initialize(app.config["DATABASE"])
     seed_login_user(app.config["DATABASE"], app.config["LOGIN_EMAIL"],

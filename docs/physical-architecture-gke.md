@@ -16,7 +16,7 @@ left out — the component table at the end has a blank column for them.
 ```mermaid
 graph TB
     subgraph USERS["People"]
-        DEV["Developer browser<br/>5 allow-listed Google accounts"]
+        DEV["Developer browser<br/>6 allow-listed Google accounts"]
     end
 
     subgraph GOOGLE["Google Cloud — configured project"]
@@ -68,7 +68,7 @@ graph TB
         PGB["Supabase session pooler<br/><i>IPv4 · us-west-2 Oregon</i>"]
         PG[("Postgres<br/>schema travelplanner_gke<br/><i>Render's schema untouched</i>")]
         OAI["OpenAI<br/><i>gpt-5 · gpt-5-mini</i><br/>separate key, hard cap"]
-        WEBS["Serper / Duffel<br/><i>optional</i>"]
+        WEBS["Serper<br/><i>optional</i>"]
     end
 
     DEV -->|"HTTPS 443"| IP --> LB
@@ -112,7 +112,7 @@ graph TB
 For slides, where mermaid is inconvenient and icons go on top.
 
 ```
-                         Developer browser  (5 allow-listed Google accounts)
+                         Developer browser  (6 allow-listed Google accounts)
                                      |
                                      |  HTTPS 443
                                      v
@@ -152,7 +152,7 @@ For slides, where mermaid is inconvenient and icons go on top.
               +------------------------------+-----------------------------+
               |                              |                             |
               v                              v                             v
-   Supabase session pooler          OpenAI  gpt-5 / gpt-5-mini      Serper / Duffel
+   Supabase session pooler          OpenAI  gpt-5 / gpt-5-mini      Serper
    schema travelplanner_gke         (separate key, hard cap)        (optional)
    (Render's schema untouched)
 ```

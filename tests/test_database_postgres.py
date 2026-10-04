@@ -63,6 +63,46 @@ def test_generated_keys_come_back(database):
     assert isinstance(user_id, int) and user_id > 0
 
 
+def test_job_state_shared_between_pods_round_trips(database):
+    """jobs.py's cross-pod transitions, on the dialect that ships.
+
+    Conditional UPDATEs must report rowcount correctly, and the heartbeat must
+    keep sub-second precision (REAL would be float4 on Postgres, which cannot
+    even hold today's epoch to the second).
+    """
+    from flaskapp.database import (
+        cancel_planning_job, fail_lost_planning_job, finish_planning_job,
+        get_planning_job, heartbeat_planning_jobs, start_planning_job,
+    )
+
+    with connect(database) as db:
+        owner = db.insert_returning_id(
+            "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+            (f"{uuid.uuid4()}@example.com", "hash"),
+        )
+    now = 1_790_000_000.25
+    create_planning_job(database, "job-a", owner, {"x": 1}, worker="web-1", heartbeat_at=now)
+    assert start_planning_job(database, "job-a")
+    assert not start_planning_job(database, "job-a"), "already processing"
+    assert get_planning_job(database, "job-a")["heartbeat_at"] == now
+
+    assert cancel_planning_job(database, "job-a", owner) == "cancelled"
+    assert heartbeat_planning_jobs(database, ["job-a"], now + 10) == {"job-a"}
+    assert not finish_planning_job(database, "job-a", "completed", response={"y": 2})
+    assert get_planning_job(database, "job-a")["status"] == "cancelled"
+
+    create_planning_job(database, "job-b", owner, {"x": 1}, heartbeat_at=now)
+    assert not fail_lost_planning_job(database, "job-b", stale_before=now - 1)
+    assert fail_lost_planning_job(database, "job-b", stale_before=now + 1)
+    row = get_planning_job(database, "job-b")
+    assert (row["status"], row["error_type"]) == ("failed", "WorkerLost")
+
+    create_planning_job(database, "job-c", owner, {"x": 1}, heartbeat_at=now)
+    assert finish_planning_job(database, "job-c", "completed", response={"y": 2})
+    import json
+    assert json.loads(get_planning_job(database, "job-c")["response_json"]) == {"y": 2}
+
+
 def test_email_uniqueness_is_case_insensitive(database):
     with connect(database) as db:
         db.execute(
@@ -321,3 +361,85 @@ def test_a_legacy_flight_eval_runs_fk_is_repointed_at_planning_jobs(database):
         database, run_type="production", request_id=mid_plan,
         flight_agent_mode="auto", inventory_source="seed", outcome="success", latency_ms=1,
     )
+
+
+def test_trace_columns_are_added_and_backfilled_on_an_old_postgres_database(database):
+    """The same upgrade Render and GKE run on Supabase at their next start.
+
+    Postgres can drop a column that carries a REFERENCES clause, so the old
+    shape is made by dropping the three columns; that also drops the index.
+    Every later test's `initialize` restores them even if this one fails midway.
+    """
+    planned, unplanned = str(uuid.uuid4()), str(uuid.uuid4())
+    with connect(database) as db:
+        db.execute("ALTER TABLE options DROP COLUMN request_id")
+        db.execute("ALTER TABLE options DROP COLUMN created_at")
+        db.execute("ALTER TABLE agent_findings DROP COLUMN created_at")
+        for request_id in (planned, unplanned):
+            db.execute(
+                "INSERT INTO travel_requests (id, destination, departure_date, return_date, "
+                "travellers, currency, risk_tolerance) "
+                "VALUES (?, 'Japan', '2026-10-10', '2026-10-16', 1, 'SGD', 'medium')",
+                (request_id,),
+            )
+        db.execute(
+            "INSERT INTO travel_plans (request_id, title, summary, itinerary_json, "
+            "rationale_json, safety_passed, created_at) "
+            "VALUES (?, 't', 's', '[]', '[]', 1, '2026-01-02 03:04:05')",
+            (planned,),
+        )
+        finding_ids = {}
+        for request_id in (planned, unplanned):
+            finding_ids[request_id] = db.insert_returning_id(
+                "INSERT INTO agent_findings (request_id, agent, summary, confidence) "
+                "VALUES (?, 'flight_agent', 's', 0.5)",
+                (request_id,),
+            )
+            db.execute(
+                "INSERT INTO options (finding_id, name, description) VALUES (?, ?, 'd')",
+                (finding_ids[request_id], request_id),
+            )
+
+    initialize(database)
+    initialize(database)  # and idempotent once migrated
+
+    with connect(database) as db:
+        options = {row["name"]: (row["request_id"], row["created_at"]) for row in db.execute(
+            "SELECT name, request_id, created_at FROM options"
+        ).fetchall()}
+        index = db.execute(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() "
+            "AND indexname = 'idx_options_request'"
+        ).fetchone()
+    assert options == {
+        planned: (planned, "2026-01-02 03:04:05"),
+        unplanned: (unplanned, None),
+    }
+    assert index, "the request_id index must exist after migration"
+
+
+def test_save_plan_stamps_request_id_and_created_at_in_the_sqlite_format(database):
+    request_id = str(uuid.uuid4())
+    request = TravelRequest(
+        origin="Singapore", destination="Japan", departure_date="2026-10-10",
+        return_date="2026-10-16", travellers=1, traveller_ages=[30],
+        traveller_genders=["prefer_not_to_say"], traveller_accessibility_needs=[[]],
+        budget=3000,
+    )
+    response = PlanResponse(
+        request_id=request_id,
+        plan=TravelPlan(title="t", summary="s", itinerary=["Day 1"], rationale=["r"]),
+        agent_findings=[AgentFinding(
+            agent="flight_agent", summary="s", confidence=0.9,
+            options=[Option(name="A", description="d")],
+        )],
+        trace_url="/trace",
+    )
+    save_plan(database, request, response, [])
+
+    with connect(database) as db:
+        option = db.execute("SELECT request_id, created_at FROM options").fetchone()
+        finding = db.execute("SELECT created_at FROM agent_findings").fetchone()
+    assert option["request_id"] == request_id
+    for created in (option["created_at"], finding["created_at"]):
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", created), created

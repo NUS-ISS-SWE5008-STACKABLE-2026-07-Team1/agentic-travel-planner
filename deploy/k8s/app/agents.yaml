@@ -7,12 +7,16 @@ metadata:
   name: agents
   labels: {app: agents}
 spec:
-  # ONE. a2a_standard.py keeps tasks in an InMemoryTaskStore, and the client
-  # sends SendMessage then polls GetTask. With two replicas behind the Service,
-  # the poll can land on a pod that never saw the task and the specialist call
-  # fails. Raise this only after tasks move into a shared store.
+  # The starting count; deploy/k8s/hpa.yaml decides the rest. Tasks are still
+  # in an InMemoryTaskStore, but the client makes one blocking SendMessage and
+  # never polls GetTask (a2a_client.py), so a task lives and dies inside one
+  # request on one pod and any replica can take any call.
   replicas: 1
-  strategy: {type: Recreate}
+  # Rolling, with a drain (below): any replica can take any call, so old and new
+  # pods side by side are fine, and a deploy no longer cuts specialist calls off.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
   selector:
     matchLabels: {app: agents}
   template:
@@ -21,6 +25,10 @@ spec:
       # Eviction protection is pdb.yaml, not the safe-to-evict annotation; see
       # the note in web.yaml for why.
     spec:
+      # The drain: preStop sleeps 15 s while the Service stops routing here,
+      # then uvicorn stops accepting and finishes the calls it is serving. A
+      # specialist call is cut off by its client after 60 s anyway
+      # (FLIGHT_AGENT_A2A_TIMEOUT_SECONDS), so 15 + 60 < 90.
       terminationGracePeriodSeconds: 90
       securityContext:
         runAsNonRoot: true
@@ -34,6 +42,8 @@ spec:
           command: ["python", "-m", "scripts.a2a_server", "--host", "0.0.0.0", "--port", "8000"]
           ports:
             - {name: a2a, containerPort: 8000}
+            # A2A calls in flight, for the autoscaler (flaskapp/metrics.py).
+            - {name: metrics, containerPort: 9090}
           envFrom:
             - configMapRef: {name: app-config}
             - secretRef: {name: app-secrets}
@@ -42,9 +52,16 @@ spec:
             # the parent plan's audit trail instead of opening their own. Safe
             # only because networkpolicy.yaml makes web the sole caller.
             - {name: A2A_TRUST_CALLER_REQUEST_ID, value: "true"}
-          # Measured locally: ~135 MiB after a plan.
+            - {name: METRICS_PORT, value: "9090"}
+          lifecycle:
+            preStop:
+              sleep: {seconds: 15}
+          # Measured on GKE, 2026-09-18 to 10-02 (one reading a minute): CPU
+          # median 3m, p99 7m, peak 157m (a pod's first minute only); memory
+          # median 142 MiB, peak 202 MiB. 384Mi keeps ~1.9x over that peak.
+          # Watch for OOMKilled restarts — the restart alert covers it.
           resources:
-            requests: {cpu: 250m, memory: 512Mi}
+            requests: {cpu: 100m, memory: 384Mi}
             limits: {memory: 1Gi}
           securityContext:
             allowPrivilegeEscalation: false

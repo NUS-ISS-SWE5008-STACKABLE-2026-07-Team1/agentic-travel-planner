@@ -179,6 +179,7 @@ def create_node(llm, tracer, provider=None, config=None):
             proposal = propose_risks(adapted.request, provider)
             response = run_risk_agent(
                 adapted.request, proposal, llm, tracer=_InnerTracer(tracer),
+                callbacks=[usage],
             )
             finding = _build_finding(proposal, response, notes)
             log_payload(f"REQUEST {state['request_id']} | {NAME.upper()} RESPONSE", finding)

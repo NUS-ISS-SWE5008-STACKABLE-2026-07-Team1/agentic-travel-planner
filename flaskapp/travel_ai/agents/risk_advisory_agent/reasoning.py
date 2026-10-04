@@ -45,7 +45,7 @@ FALLBACK_RATIONALE = (
 
 
 class StructuredLLM(Protocol):
-    def invoke(self, messages: list[Any]) -> RiskAgentResponse: ...
+    def invoke(self, messages: list[Any], config: dict | None = None) -> RiskAgentResponse: ...
 
 
 class ChatModel(Protocol):
@@ -112,13 +112,15 @@ def _blocked_input_response(proposal: RiskProposal, screen_result: dict) -> Risk
 
 def _reason_over_proposal(
     request: RiskProposalRequest, proposal: RiskProposal, llm: ChatModel, tracer=None,
+    callbacks: list | None = None,
 ) -> RiskAgentResponse:
     structured_llm = llm.with_structured_output(RiskAgentResponse, method="json_schema")
     messages = _build_messages(request, proposal)
 
     for attempt in range(MAX_ATTEMPTS):
         try:
-            response = structured_llm.invoke(messages)
+            # On every attempt, including one rejected below: it was still paid for.
+            response = structured_llm.invoke(messages, config={"callbacks": callbacks or []})
         except Exception as exc:  # noqa: BLE001 - any LLM failure falls back, never propagates
             if tracer is not None:
                 tracer.record("agent_llm_attempt_failed", "risk_advisory_agent", {
@@ -150,6 +152,7 @@ def _reason_over_proposal(
 
 def run_risk_agent(
     request: RiskProposalRequest, proposal: RiskProposal, llm: ChatModel, *, tracer=None,
+    callbacks: list | None = None,
 ) -> RiskAgentResponse:
     """The tool (`propose_risks`, called by `agent.py` before this) already
     ran; this reasons over its output, fail-closed."""
@@ -171,7 +174,7 @@ def run_risk_agent(
             })
         return response
 
-    response = _reason_over_proposal(request, proposal, llm, tracer)
+    response = _reason_over_proposal(request, proposal, llm, tracer, callbacks)
     if tracer is not None:
         tracer.record("agent_completed", "risk_advisory_agent", {
             "escalate": response.escalate, "confidence": response.confidence,

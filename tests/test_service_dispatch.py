@@ -66,14 +66,15 @@ def planned(monkeypatch, tmp_path):
     return run
 
 
-def test_a_hotel_only_request_runs_the_hotel_agent_alone(planned):
-    """A stay, not a journey: no flights, and no advisory either.
+def test_a_hotel_only_request_runs_the_hotel_agent_and_the_advisory(planned):
+    """A stay, not a journey — but still somewhere with laws and entry rules.
 
-    Risk & Advisory reasons about visas and entry from the departure country,
-    which a hotel-only request no longer collects.
+    Asserted through the real graph rather than `specialists_for` alone: the
+    advisory node has to survive a request whose `origin` is None, not merely
+    appear in the selected tuple.
     """
     _response, called = planned(plan_scope="hotel", origin=None)
-    assert called == ["hotel_transport_agent"]
+    assert called == ["hotel_transport_agent", "risk_advisory_agent"]
 
 
 def test_a_default_request_still_runs_every_specialist(planned):
@@ -90,6 +91,9 @@ def test_the_plan_states_which_specialists_were_skipped(planned):
     limitations = " ".join(response.plan.limitations)
     assert "flight_agent" in limitations
     assert "hotel_transport_agent" not in limitations
+    # An agent that ran is not a limitation. Risk & Advisory now runs at every
+    # scope, so naming it here would report a gap the plan does not have.
+    assert "risk_advisory_agent" not in limitations
 
 
 def test_the_response_carries_ordered_sections(planned):

@@ -655,3 +655,52 @@ def screen_flights(
         direction="RETURN",
     )
     return outbound + inbound
+
+
+def leg_route_and_date(
+    request: FlightProposalRequest, direction: str
+) -> tuple[AirportCodes, AirportCodes, date]:
+    """This leg's origin, destination and requested date.
+
+    RETURN is the outbound route reversed, which `propose_flights` and
+    `screen_flights` each used to spell out inline. Naming it once keeps a new
+    per-leg reader from inventing a third spelling of the same swap.
+    """
+    ctx = request.trip_context
+    if direction == "OUTBOUND":
+        return ctx.origin_airports, ctx.dest_airports, _parse_date(ctx.depart_date)
+    return ctx.dest_airports, ctx.origin_airports, _parse_date(ctx.return_date)
+
+
+def flyable_dates_for_leg(
+    inventory: list[FlightInventoryItem],
+    request: FlightProposalRequest,
+    direction: str,
+    *,
+    within_days: int,
+) -> list[str]:
+    """Dates this leg's route actually flies, nearest to the requested date first.
+
+    Pure, and derived from real rows rather than guessed. It reads the whole
+    dataset at once, which only static data allows. The agent deliberately no
+    longer uses it: a real supplier has to be searched one date at a time (see
+    `tools.search_flights`). It remains for tests that state a scenario's
+    premise ("this route flies on 30 Nov") independently of the code under test.
+
+    Route matching only — seats, budget and the rest are not applied.
+    """
+    origin, dest, asked = leg_route_and_date(request, direction)
+    flying: set[date] = set()
+    for item in inventory:
+        if not _matches_route(item, origin, dest):
+            continue
+        try:
+            flown = _parse_ts(item.dep_ts).date()
+        except ValueError:
+            continue
+        if abs((flown - asked).days) <= within_days:
+            flying.add(flown)
+    return [
+        day.isoformat()
+        for day in sorted(flying, key=lambda d: (abs((d - asked).days), d))
+    ]

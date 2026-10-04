@@ -142,18 +142,8 @@ Multi-airport cities you'll hit in the demo data: Tokyo (NRT/HND), London
 
 ## 5. Where flight data actually comes from
 
-Two sources behind one interface. **Seed is the default and is what you should
-develop against.**
-
-| | `seed` (default) | `duffel` |
-|---|---|---|
-| Data | 1568 static rows | live supplier search |
-| Turned on by | nothing — it's the default | `FLIGHT_INVENTORY_SOURCE=duffel` + a token |
-| Prices | fixed, repeatable | change every call |
-| Cost | free | billed per search |
-
-Duffel is fully wired but **switched off**. You do not need a token, and you
-should not develop against live data — prices move, so nothing is reproducible.
+One source behind one interface: the **seed** dataset, 1568 static rows with
+fixed, repeatable prices. Develop against it — nothing else is wired.
 
 ### Cities with real flight inventory
 

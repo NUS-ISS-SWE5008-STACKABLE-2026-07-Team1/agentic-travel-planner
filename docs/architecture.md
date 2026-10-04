@@ -26,7 +26,6 @@ graph TB
     A["Administrator<br/><i>ADMIN_EMAILS</i>"]
     S["<b>Agentic Travel Planner</b><br/>Flask + LangGraph"]
     LLM["LLM Provider<br/><i>OpenAI / Anthropic / Google / …</i>"]
-    DUF["Duffel<br/><i>live flight inventory, opt-in</i>"]
     SER["Serper / Tavily<br/><i>accessibility evidence</i>"]
     PG["Supabase Postgres<br/><i>session pooler</i>"]
 
@@ -87,7 +86,6 @@ graph TB
     subgraph DATA["Data & providers"]
         DB[("12 tables")]
         SEED["Seed inventory<br/><i>1568 rows</i>"]
-        DUFFEL["Duffel adapter"]
         RET["Web retrieval"]
     end
 
@@ -95,7 +93,7 @@ graph TB
     INTAKE --> SVC
     GRAPH --> FL & HT & AC & RA
     FL & HT & AC & RA --> BARRIER --> OR
-    FL --> SEED & DUFFEL
+    FL --> SEED
     HT --> SEED
     AC --> RET
     AGENTS -.-> A2A & GR & TR
@@ -214,7 +212,7 @@ graph TB
         PG[("Postgres<br/>Travelplanner_schema")]
     end
 
-    EXT["LLM provider · Duffel · Serper"]
+    EXT["LLM provider · Serper"]
 
     BR -->|HTTPS| FLASK
     FLASK --> POOL --> AG

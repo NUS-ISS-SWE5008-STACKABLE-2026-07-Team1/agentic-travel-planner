@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from flaskapp.database import is_postgres
-from flaskapp.travel_ai.jobs import _run_plan, PlanningJob
+from flaskapp.travel_ai.jobs import _LocalRun, _run_plan
 from flaskapp.travel_ai.schemas import PlanResponse, TravelPlan
 import flaskapp.travel_ai.jobs as jobs_module
 
@@ -67,8 +67,10 @@ def test_jobs_run_plan_preserves_dsn_through_service_instantiation(monkeypatch):
         MockTravelPlanningService
     )
 
-    # Monkeypatch database functions to no-ops
-    monkeypatch.setattr("flaskapp.travel_ai.jobs.update_planning_job", MagicMock())
+    # Database functions: starting succeeds, and the outcome is recorded.
+    monkeypatch.setattr("flaskapp.travel_ai.jobs.start_planning_job", MagicMock(return_value=True))
+    finish = MagicMock(return_value=True)
+    monkeypatch.setattr("flaskapp.travel_ai.jobs.finish_planning_job", finish)
 
     # Create minimal settings dict with DSN
     settings = {
@@ -85,12 +87,8 @@ def test_jobs_run_plan_preserves_dsn_through_service_instantiation(monkeypatch):
     request = MagicMock()
 
     # Set up the required state and clean up afterwards
-    cancel_event = threading.Event()
-    test_job = PlanningJob(request_id="test-request-id", user_id=None)
-
     try:
-        jobs_module._jobs["test-request-id"] = test_job
-        jobs_module._cancel_events["test-request-id"] = cancel_event
+        jobs_module._running["test-request-id"] = _LocalRun(DSN, threading.Event())
 
         # Call _run_plan directly
         _run_plan("test-request-id", request, settings, user_id=None)
@@ -102,9 +100,8 @@ def test_jobs_run_plan_preserves_dsn_through_service_instantiation(monkeypatch):
             f"database_path no longer recognized as PostgreSQL DSN"
 
         # Verify the job reached completion, proving the path executed end-to-end
-        assert jobs_module._jobs["test-request-id"].status == "completed", \
-            f"job status is {jobs_module._jobs['test-request-id'].status}, expected 'completed'"
+        assert finish.call_args.args[:3] == (DSN, "test-request-id", "completed"), \
+            f"job outcome recorded as {finish.call_args}, expected 'completed' against the DSN"
     finally:
         # Clean up module globals to prevent test pollution
-        jobs_module._jobs.pop("test-request-id", None)
-        jobs_module._cancel_events.pop("test-request-id", None)
+        jobs_module._running.pop("test-request-id", None)

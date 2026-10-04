@@ -235,12 +235,8 @@ jobs:
           # the record of how the pods are configured, and a change to probes or
           # resources ships with the code. See deploy/k8s/app/kustomization.yaml
           # for why these two are applied apart from the rest of deploy/k8s.
-          sed -i "s|^\(    newName:\).*|\1 ${IMAGE}|" deploy/k8s/app/kustomization.yaml
-          sed -i "s|^\(    newTag:\).*|\1 ${TAG}|" deploy/k8s/app/kustomization.yaml
-          grep -q "newName: ${IMAGE}$" deploy/k8s/app/kustomization.yaml \
-            || { echo "::error::could not set the image location"; exit 1; }
-          grep -q "newTag: ${TAG}$" deploy/k8s/app/kustomization.yaml \
-            || { echo "::error::could not set the image tag"; exit 1; }
+          # Quotes the tag: a commit id like 7750e40 is otherwise a YAML number.
+          bash deploy/set_image.sh "$IMAGE" "$TAG"
           # Both together, then wait on both: they share one image and one A2A
           # contract, so they should change together rather than one at a time.
           kubectl apply -k deploy/k8s/app

@@ -550,7 +550,7 @@ if (agentChat) {
     // sections existed; the badge patterns simply do not match for other agents,
     // so the same card degrades to name, cost, description and sources. Keeping
     // two renderers for the same `Option` shape was the alternative.
-    const optionCard = (option) => {
+    const optionCard = (option, opts = {}) => {
       const card = document.createElement("div");
       card.className = "accessibility-evidence-card";
       const header = document.createElement("div");
@@ -611,10 +611,24 @@ if (agentChat) {
       card.append(description);
       // Flights and hotels are chosen on price; accessibility evidence has none,
       // so this is shown only when the specialist costed the option.
-      if (option.estimated_cost !== null && option.estimated_cost !== undefined) {
+      // A tier column asks "what does this flight cost?" and answers with one
+      // fare — per seat, the way an airline quotes it, and the only figure
+      // comparable across the three columns. The recommendation asks "can this
+      // party afford the trip?" and answers with the whole-party total. Same
+      // option, two different numbers, so each card says which it is showing.
+      const perTraveller = opts.perTraveller && option.unit_cost !== null
+        && option.unit_cost !== undefined;
+      const shown = perTraveller ? option.unit_cost : option.estimated_cost;
+      if (shown !== null && shown !== undefined) {
         const cost = document.createElement("p");
         cost.className = "fw-semibold small mb-2";
-        cost.textContent = `Estimated: ${option.currency || ""} ${option.estimated_cost}`;
+        let suffix = "";
+        if (perTraveller) {
+          suffix = " per traveller";
+        } else if (opts.travellers > 1) {
+          suffix = ` (${opts.travellers} travellers)`;
+        }
+        cost.textContent = `Estimated: ${option.currency || ""} ${shown}${suffix}`;
         card.append(cost);
       }
       const detailFactors = (option.selection_factors || []).filter(
@@ -682,7 +696,8 @@ if (agentChat) {
         box.append(total);
         const list = document.createElement("div");
         list.className = "plan-recommendation-items";
-        rec.items.forEach((option) => list.append(optionCard(option)));
+        rec.items.forEach((option) =>
+          list.append(optionCard(option, {travellers: rec.travellers || 1})));
         box.append(list);
       }
       if (rec.note) {
@@ -744,7 +759,7 @@ if (agentChat) {
           // A section that contributed nothing to this tier leaves an empty
           // cell, which is what keeps the columns aligned across rows.
           (group ? group.options : []).forEach((option) =>
-            cell.append(optionCard(option)));
+            cell.append(optionCard(option, {perTraveller: true})));
           grid.append(cell);
         });
       });
@@ -1544,10 +1559,19 @@ if (adminMonitor) {
       const title = document.createElement("h2");
       title.className = "h5";
       title.textContent = prompt.agent;
+      const metadata = document.createElement("div");
+      metadata.className = "d-flex flex-wrap gap-2 mb-3";
+      const kind = document.createElement("span");
+      kind.className = "badge text-bg-primary";
+      kind.textContent = prompt.kind || "Prompt";
+      const owner = document.createElement("span");
+      owner.className = "badge text-bg-secondary";
+      owner.textContent = prompt.owner || "Application";
+      metadata.append(kind, owner);
       const instruction = document.createElement("pre");
       instruction.className = "prompt-instruction mb-0";
       instruction.textContent = prompt.instruction;
-      body.append(title, instruction); card.append(body); column.append(card); container.append(column);
+      body.append(title, metadata, instruction); card.append(body); column.append(card); container.append(column);
     });
   };
 
@@ -1567,9 +1591,9 @@ if (adminMonitor) {
 
   const tabCopy = {
     critical: ["Application Dashboard", "Platform performance, access, adoption, and engagement."],
-    performance: ["Agent Performance", "Agent execution, request logs, and token consumption."],
+    performance: ["LLM Token Tracking", "Token consumption by agents and application services."],
     logs: ["System Processing Logs", "End-to-end processing events for every transaction."],
-    prompts: ["Prompts And Guardrails", "Current agent instructions and deterministic safeguards."],
+    prompts: ["Prompts & Guardrails", "Complete runtime prompts and guardrail boundaries for every agent and application LLM call."],
     administrators: ["Administrator Registration", "Create or promote database-managed administrators."]
   };
   const setChartPeriod = (period) => {

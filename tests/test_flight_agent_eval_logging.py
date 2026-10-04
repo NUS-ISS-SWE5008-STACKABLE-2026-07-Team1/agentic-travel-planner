@@ -241,7 +241,7 @@ def test_an_unresolvable_llm_config_leaves_provider_and_model_null(tmp_path):
 
 def test_the_single_shot_path_records_the_provider_call_it_spent(tmp_path):
     """The inventory fetch goes through ctx.cache on both paths and spends one
-    provider call — a billed search on Duffel. Zeroing it off-loop under-reported
+    provider call — a billed search on a live supplier. Zeroing it off-loop under-reported
     what a structured run costs."""
     db_path = tmp_path / "eval.sqlite3"
     initialize(db_path)

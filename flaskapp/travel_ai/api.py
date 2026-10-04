@@ -20,6 +20,7 @@ from flaskapp.travel_ai.guardrails import (
 from flaskapp.travel_ai.guardrails.pii import PiiRedactor
 from flaskapp.travel_ai.jobs import cancel_job, get_job, submit_plan
 from flaskapp.travel_ai.llm import build_llm
+from flaskapp.travel_ai.usage import TokenUsageCallback
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.agents.orchestrator_agent.intake import (
     clarification_question, compute_gaps, extract_intent, merge_answers,
@@ -29,6 +30,7 @@ from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
     ExtractedIntent, IntentResponse,
 )
 from flaskapp.database import (
+    add_application_token_usage,
     get_admin_activity, get_admin_token_summary, get_admins, get_platform_dashboard,
     end_user_request_session, get_recent_feedback, get_system_logs,
     owns_intake_request, owns_request, register_admin, save_intake_request,
@@ -64,6 +66,8 @@ def create_travel_plan():
     llm_settings, configuration_error = get_llm_settings(current_app.config)
     if configuration_error:
         return jsonify(error=configuration_error), 503
+    application_usage = TokenUsageCallback()
+    usage_request_id = None
     try:
         payload = request.get_json(force=False, silent=False)
         if not isinstance(payload, dict):
@@ -73,6 +77,9 @@ def create_travel_plan():
             current_app.config["DATABASE"], intake_request_id, session.get("user_id")
         ):
             return jsonify(error="Intake request not found"), 404
+        # An intake row already exists, so even a later L2 block can attribute
+        # the classifier spend to the request the traveller can see in admin.
+        usage_request_id = intake_request_id
         travel_request = validate_request(payload, current_app.config["MAX_INPUT_CHARS"])
         # L2 runs here rather than inside the background job so a rejected
         # traveller gets an immediate 422 instead of a job that fails ~75s
@@ -80,7 +87,10 @@ def create_travel_plan():
         # guards costs five large ones.
         guard_settings = guardrail_settings(current_app.config)
         input_verdict = screen_request_l2(
-            travel_request, LlmGuardrail.from_settings(guard_settings)
+            travel_request,
+            LlmGuardrail.from_settings(
+                guard_settings, callbacks=[application_usage]
+            ),
         )
         settings = {
             **llm_settings,
@@ -106,6 +116,7 @@ def create_travel_plan():
             if intake_request_id
             else submit_plan(travel_request, settings, session.get("user_id"))
         )
+        usage_request_id = job.request_id
         return jsonify(
             request_id=job.request_id,
             status=job.status,
@@ -123,6 +134,12 @@ def create_travel_plan():
     except Exception:
         current_app.logger.exception("Travel planning failed")
         return jsonify(error="Travel planning failed", retryable=True), 502
+    finally:
+        if usage_request_id:
+            add_application_token_usage(
+                current_app.config["DATABASE"], usage_request_id,
+                application_usage.as_dict(),
+            )
 
 
 @travel_api_bp.post("/travel-intents")
@@ -132,10 +149,12 @@ def create_travel_intent():
     if configuration_error:
         return jsonify(error=configuration_error), 503
     payload = request.get_json(silent=True) or {}
+    application_usage = TokenUsageCallback()
+    usage_request_id = None
     try:
         screened = screen_prompt(
             payload.get("prompt"), current_app.config["MAX_INPUT_CHARS"],
-            build_guardrail(current_app.config),
+            build_guardrail(current_app.config, callbacks=[application_usage]),
             PiiRedactor.from_config(current_app.config),
         )
         # From here on the raw prompt is out of scope by construction. The
@@ -151,10 +170,13 @@ def create_travel_intent():
             current.model_dump(mode="json"),
         ):
             return jsonify(error="Intake request not found"), 404
+        usage_request_id = intake_request_id
         save_intake_message(
             current_app.config["DATABASE"], intake_request_id, "user", prompt
         )
-        extraction = extract_intent(build_llm(**llm_settings), prompt)
+        extraction = extract_intent(
+            build_llm(**llm_settings), prompt, callbacks=[application_usage]
+        )
         intent = merge_intents(current, extraction.intent)
     except GuardrailBlocked as exc:
         current_app.logger.warning("L2 intake guardrail blocked: %s", exc.verdict.as_audit_details())
@@ -167,6 +189,12 @@ def create_travel_intent():
     except Exception:
         current_app.logger.exception("Travel intent extraction failed")
         return jsonify(error="The assistant is unavailable. Please retry.", retryable=True), 502
+    finally:
+        if usage_request_id:
+            add_application_token_usage(
+                current_app.config["DATABASE"], usage_request_id,
+                application_usage.as_dict(),
+            )
     if not save_intake_request(
         current_app.config["DATABASE"], intake_request_id, session.get("user_id"),
         intent.model_dump(mode="json"),
@@ -233,26 +261,31 @@ def _intent_response(extracted, question: str, request_id: str | None = None):
     ).model_dump(mode="json")
 
 
+# Error types worth naming to the traveller; anything else is generic.
+_JOB_ERROR_MESSAGES = {
+    "APITimeoutError": "Azure took too long to respond. Please retry the plan.",
+    "WorkerLost": "The server running this plan restarted. Please retry the plan.",
+}
+
+
 @travel_api_bp.get("/travel-plans/<uuid:request_id>/status")
 def get_travel_plan_status(request_id):
-    job = get_job(str(request_id), session.get("user_id"))
+    # Read from the database, not this pod's memory, so any web pod can
+    # answer for a plan running on another (jobs.py).
+    job = get_job(current_app.config["DATABASE"], str(request_id), session.get("user_id"))
     if job is None:
         return jsonify(error="Planning job not found"), 404
     body = {"request_id": job.request_id, "status": job.status}
     if job.response is not None:
-        body["response"] = job.response.model_dump(mode="json")
+        body["response"] = job.response
     if job.error:
-        body["error"] = (
-            "Azure took too long to respond. Please retry the plan."
-            if job.error == "APITimeoutError"
-            else "Travel planning failed"
-        )
+        body["error"] = _JOB_ERROR_MESSAGES.get(job.error, "Travel planning failed")
     return jsonify(body)
 
 
 @travel_api_bp.post("/travel-plans/<uuid:request_id>/cancel")
 def cancel_travel_plan(request_id):
-    job = cancel_job(str(request_id), session.get("user_id"))
+    job = cancel_job(current_app.config["DATABASE"], str(request_id), session.get("user_id"))
     if job is None:
         return jsonify(error="Planning job not found"), 404
     return jsonify(request_id=job.request_id, status=job.status)
@@ -285,18 +318,53 @@ def get_admin_monitoring_activity():
 
 def _prompt_catalog():
     from flaskapp.travel_ai.agents.accessibility_agent.prompt import INSTRUCTION as accessibility
-    from flaskapp.travel_ai.agents.flight_agent.prompt import INSTRUCTION as flight
-    from flaskapp.travel_ai.agents.hotel_transport_agent.prompt import INSTRUCTION as hotel
+    from flaskapp.travel_ai.agents.flight_agent.prompt import (
+        FLIGHT_AGENT_SYSTEM_PROMPT, FLIGHT_AGENT_TOOL_LOOP_PROMPT,
+        INSTRUCTION as flight, PATH2_INSTRUCTION as flight_fallback,
+    )
+    from flaskapp.travel_ai.agents.hotel_transport_agent.prompt import (
+        HOTEL_TRANSPORT_SYSTEM_PROMPT, INSTRUCTION as hotel,
+        PATH2_INSTRUCTION as hotel_fallback,
+    )
+    from flaskapp.travel_ai.agents.orchestrator_agent.intake_prompt import INTAKE_INSTRUCTION
     from flaskapp.travel_ai.agents.orchestrator_agent.prompt import INSTRUCTION as orchestrator
-    from flaskapp.travel_ai.agents.risk_advisory_agent.prompt import INSTRUCTION as risk
+    from flaskapp.travel_ai.agents.risk_advisory_agent.prompt import (
+        INSTRUCTION as risk, RISK_ADVISORY_SYSTEM_PROMPT,
+    )
+    from flaskapp.travel_ai.agents.shared import SYSTEM_POLICY
     from flaskapp.travel_ai.guardrails.pii import DEFAULT_RULES
+    from flaskapp.travel_ai.guardrails.prompts import (
+        INPUT_CLASSIFIER_SYSTEM, OUTPUT_CLASSIFIER_SYSTEM,
+    )
     from flaskapp.travel_ai.safeguards import PROMPT_INJECTION, SENSITIVE_KEYS
-    return [
+    items = [
+        {"agent": "Shared agent system policy", "instruction": SYSTEM_POLICY,
+         "kind": "Prompt", "owner": "All agents"},
         {"agent": "Flight agent", "instruction": flight},
+        {"agent": "Flight grounded reasoning prompt", "instruction": FLIGHT_AGENT_SYSTEM_PROMPT,
+         "kind": "Execution prompt", "owner": "Flight agent"},
+        {"agent": "Flight fallback prompt", "instruction": flight_fallback,
+         "kind": "Execution prompt", "owner": "Flight agent"},
+        {"agent": "Flight tool-loop prompt", "instruction": FLIGHT_AGENT_TOOL_LOOP_PROMPT,
+         "kind": "Execution prompt", "owner": "Flight agent"},
         {"agent": "Hotel & transport agent", "instruction": hotel},
+        {"agent": "Hotel & transport grounded reasoning prompt",
+         "instruction": HOTEL_TRANSPORT_SYSTEM_PROMPT,
+         "kind": "Execution prompt", "owner": "Hotel & transport agent"},
+        {"agent": "Hotel & transport fallback prompt", "instruction": hotel_fallback,
+         "kind": "Execution prompt", "owner": "Hotel & transport agent"},
         {"agent": "Accessibility agent", "instruction": accessibility},
         {"agent": "Risk & advisory agent", "instruction": risk},
+        {"agent": "Risk & advisory grounded reasoning prompt",
+         "instruction": RISK_ADVISORY_SYSTEM_PROMPT,
+         "kind": "Execution prompt", "owner": "Risk & advisory agent"},
         {"agent": "Orchestrator agent", "instruction": orchestrator},
+        {"agent": "Orchestrator conversational intake prompt", "instruction": INTAKE_INSTRUCTION,
+         "kind": "Execution prompt", "owner": "Orchestrator agent"},
+        {"agent": "L2 input-classifier prompt", "instruction": INPUT_CLASSIFIER_SYSTEM,
+         "kind": "Guardrail prompt", "owner": "Application"},
+        {"agent": "L2 output-classifier prompt", "instruction": OUTPUT_CLASSIFIER_SYSTEM,
+         "kind": "Guardrail prompt", "owner": "Application"},
         {"agent": "Shared deterministic guardrails", "instruction":
          f"Reject oversized input, sensitive ranking fields ({', '.join(sorted(SENSITIVE_KEYS))}), "
          f"and prompt-injection patterns matching: {PROMPT_INJECTION.pattern}"},
@@ -315,7 +383,61 @@ def _prompt_catalog():
          f"recorded as a flag without denying the request. Fail mode: "
          f"{current_app.config.get('GUARDRAIL_FAIL_MODE', 'closed')}. Categories: "
          + ", ".join(item.value for item in Category if item is not Category.NONE)},
+        {"agent": "Flight agent guardrails", "instruction":
+         "Before the model: block prompt injection, high-risk stereotyping and toxicity. "
+         "After the model: screen bias and toxicity, reject flight IDs absent from retrieved "
+         "inventory, and retry or fall back when grounding fails. Tool search envelopes, "
+         "airport/date limits and loop budgets are enforced deterministically.",
+         "kind": "Guardrail", "owner": "Flight agent"},
+        {"agent": "Hotel & transport agent guardrails", "instruction":
+         "Before the model: block prompt injection, high-risk stereotyping and toxicity. "
+         "After the model: screen generated rationale and reject hotel IDs absent from the "
+         "deterministic proposal. Accessibility remains a hard constraint, and unavailable "
+         "inventory uses a non-specific fallback.",
+         "kind": "Guardrail", "owner": "Hotel & transport agent"},
+        {"agent": "Risk & advisory agent guardrails", "instruction":
+         "Screen input and output for injection, stereotyping and toxicity. Reject risk IDs "
+         "absent from retrieved reference data. Deterministically require escalation for "
+         "high-severity risks and prevent fabricated live visa, border or regulatory facts.",
+         "kind": "Guardrail", "owner": "Risk & advisory agent"},
+        {"agent": "Accessibility agent guardrails", "instruction":
+         "Screen traveller input, peer-agent candidates and retrieved excerpts before model "
+         "use. Screen output for injection, harmful generalization and toxicity. Enforce exact "
+         "evidence IDs and retrieved URLs, evidence status markers, bounded ratings, freshness, "
+         "supplier questions and VETO notices for unmet critical requirements.",
+         "kind": "Guardrail", "owner": "Accessibility agent"},
+        {"agent": "Orchestrator agent guardrails", "instruction":
+         "Remove peer options named by Accessibility VETO notices before synthesis. Screen the "
+         "complete traveller-facing plan with the L2 output classifier and a fresh per-request "
+         "canary leak detector. Retry once, then withhold unsafe output. Preserve risk "
+         "escalation, uncertainty, provenance and deterministic safety assessment. Per-request "
+         "canary values are never displayed.",
+         "kind": "Guardrail", "owner": "Orchestrator agent"},
     ]
+    owners = {
+        "Flight agent": "Flight agent",
+        "Hotel & transport agent": "Hotel & transport agent",
+        "Accessibility agent": "Accessibility agent",
+        "Risk & advisory agent": "Risk & advisory agent",
+        "Orchestrator agent": "Orchestrator agent",
+    }
+    kinds = {
+        "Flight agent": "Agent-card prompt",
+        "Hotel & transport agent": "Agent-card prompt",
+        "Accessibility agent": "Execution prompt",
+        "Risk & advisory agent": "Execution prompt",
+        "Orchestrator agent": "Execution prompt",
+        "PII redaction (L1)": "Guardrail",
+    }
+    for item in items:
+        item.setdefault(
+            "kind", kinds.get(
+                item["agent"],
+                "Guardrail" if "guardrail" in item["agent"].lower() else "Prompt",
+            ),
+        )
+        item.setdefault("owner", owners.get(item["agent"], "Application"))
+    return items
 
 
 @travel_api_bp.post("/admin/administrators")

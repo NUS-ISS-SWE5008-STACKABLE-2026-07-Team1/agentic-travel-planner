@@ -2,20 +2,12 @@
 
 Country granularity forced one gateway per country, so a Tokyo trip silently
 meant Narita and a Haneda fare could never be shown, however cheap. These tests
-pin the fix at both layers that had to change — route matching in `domain.py`
-and search fan-out in the Duffel provider.
+pin the fix in route matching in `domain.py`.
 """
 
 from __future__ import annotations
 
-import pytest
-
 from flaskapp.travel_ai.agents.flight_agent.domain import propose_flights, screen_flights
-from flaskapp.travel_ai.agents.flight_agent.providers.duffel import (
-    MAX_AIRPORTS_PER_CITY,
-    DuffelInventoryProvider,
-    build_payload,
-)
 from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightInventoryItem,
     FlightProposalRequest,
@@ -106,67 +98,3 @@ def test_screening_covers_every_airport_in_the_city():
     """The explainability trace must account for all of them, not just NRT."""
     screened = screen_flights(_request(["NRT", "HND"]), INVENTORY)
     assert {"TO-NRT", "TO-HND"} <= {row.flight_id for row in screened}
-
-
-# --- Duffel fan-out ---------------------------------------------------------
-
-
-class _StubResponse:
-    status_code = 200
-
-    def __init__(self, payload: dict) -> None:
-        self._payload = payload
-
-    def json(self) -> dict:
-        return self._payload
-
-
-class _RecordingSession:
-    """Captures the origin/destination of every search that is issued."""
-
-    def __init__(self) -> None:
-        self.searches: list[tuple[str, str]] = []
-
-    def post(self, url, params=None, json=None, headers=None, timeout=None):
-        first_slice = json["data"]["slices"][0]
-        self.searches.append((first_slice["origin"], first_slice["destination"]))
-        return _StubResponse({"data": {"offers": []}})
-
-
-def _provider(session) -> DuffelInventoryProvider:
-    return DuffelInventoryProvider(token="duffel_test_x", session=session)
-
-
-def test_every_airport_pair_is_searched():
-    session = _RecordingSession()
-    _provider(session).fetch(_request(["NRT", "HND"]))
-    assert session.searches == [("SIN", "NRT"), ("SIN", "HND")]
-
-
-def test_pairs_are_capped_and_the_cap_is_disclosed():
-    """London has four airports; unbounded fan-out would bill four searches."""
-    request = _request(["NRT", "HND"])
-    request.trip_context.origin_airports = ["LHR", "LGW", "STN", "LTN"]
-    session = _RecordingSession()
-    result = _provider(session).fetch(request)
-
-    assert len(session.searches) == MAX_AIRPORTS_PER_CITY * MAX_AIRPORTS_PER_CITY
-    assert any("only the 2 main airports" in note for note in result.notes)
-
-
-def test_a_repeated_per_pair_note_is_only_told_once():
-    session = _RecordingSession()
-    result = _provider(session).fetch(_request(["NRT", "HND"]))
-    no_offer_notes = [n for n in result.notes if "returned no offers" in n]
-    assert len(no_offer_notes) == len(set(no_offer_notes))
-
-
-@pytest.mark.parametrize("origin, dest", [("SIN", "HND"), ("LHR", "NRT")])
-def test_build_payload_searches_the_pair_it_is_given(origin, dest):
-    payload = build_payload(
-        _request(["NRT", "HND"]), supplier_timeout_ms=20000, origin=origin, dest=dest
-    )
-    outbound, inbound = payload["data"]["slices"]
-    assert (outbound["origin"], outbound["destination"]) == (origin, dest)
-    # The return leg must mirror the same pair, not fall back to the primary.
-    assert (inbound["origin"], inbound["destination"]) == (dest, origin)

@@ -400,11 +400,26 @@ def test_node_fetches_inventory_exactly_once(tracer):
 # Every unit test passed at the time. The signal, not the plumbing, was broken.
 
 EMPTY_LEG_DATE = "2026-09-12"   # SIN-NRT is stocked, but not on this date
+NAMED_EMPTY_DATE = "2026-09-13"  # +1: also unstocked, and not the traveller's own
+NEAREST_STOCKED = "2026-09-10"   # -2: inside the window
 
 
 def _empty_leg_context():
+    """A context whose traveller asked for a date the route does not fly.
+
+    The return is moved to the 19th so the trip is in order: the golden request
+    returns on 5 Sep, and an outbound on the 12th would leave the walk no date
+    it may use (an outbound may not depart after the return).
+
+    Tests that need an EMPTY result search `NAMED_EMPTY_DATE`. Searching the
+    traveller's own date, written in or left out, now walks to the nearest
+    flying date (see `test_flight_empty_leg_recovery.py`), so it no longer
+    returns empty here.
+    """
     request = _request()
-    context = request.trip_context.model_copy(update={"depart_date": EMPTY_LEG_DATE})
+    context = request.trip_context.model_copy(
+        update={"depart_date": EMPTY_LEG_DATE, "return_date": "2026-09-19"}
+    )
     return tools.ToolContext.for_request(
         request.model_copy(update={"trip_context": context}),
         SeedInventoryProvider(), LoopBudget().start(),
@@ -414,7 +429,9 @@ def _empty_leg_context():
 def test_exclusions_are_grouped_by_cause_not_by_row():
     """One bucket per cause. Twelve rows excluded for `wrong_date` is a signal;
     twelve distinct strings is noise."""
-    result = tools.search_flights(_empty_leg_context(), direction="OUTBOUND")
+    result = tools.search_flights(
+        _empty_leg_context(), direction="OUTBOUND", depart_date=NAMED_EMPTY_DATE
+    )
     histogram = result["exclusion_reason_histogram"]
 
     assert result["included_count"] == 0, "scenario is no longer an empty leg"
@@ -422,35 +439,29 @@ def test_exclusions_are_grouped_by_cause_not_by_row():
     assert len(histogram) < result["excluded_count"], "one key per row is not a histogram"
 
 
-def test_empty_leg_reports_dates_the_route_actually_flies():
-    """Derived from real rows, never guessed. This is what makes a second search
-    worth issuing rather than a shot in the dark."""
-    result = tools.search_flights(_empty_leg_context(), direction="OUTBOUND")
+def test_an_empty_result_does_not_read_answers_off_the_data():
+    """Replaces the old `dates_this_route_flies_nearby` hint. It was read off the
+    whole loaded dataset, which a real supplier cannot offer: there, every date
+    is a separate search. The walk does those searches instead."""
+    result = tools.search_flights(
+        _empty_leg_context(), direction="OUTBOUND", depart_date=NAMED_EMPTY_DATE
+    )
 
-    nearby = result["dates_this_route_flies_nearby"]
-    assert nearby, "an empty leg gave the caller nothing to act on"
-    assert "2026-09-10" in nearby
-    assert "suggestion" in result
+    assert result["included_count"] == 0
+    assert "dates_this_route_flies_nearby" not in result
+    assert "suggestion" not in result
 
 
-def test_suggested_dates_are_inside_the_search_envelope():
-    """Suggesting a date the envelope would then refuse would send the caller
-    into a guaranteed rejection."""
+def test_the_travellers_own_empty_date_walks_to_real_flights():
+    """Replaces the two `suggested_dates_*` tests: the date the walk lands on is
+    inside the window and really has flights."""
     ctx = _empty_leg_context()
-    result = tools.search_flights(ctx, direction="OUTBOUND")
+    result = tools.search_flights(ctx, direction="OUTBOUND", depart_date=EMPTY_LEG_DATE)
 
-    for day in result["dates_this_route_flies_nearby"]:
-        follow_up = tools.search_flights(ctx, direction="OUTBOUND", depart_date=day)
-        assert "error" not in follow_up, f"suggested {day} but the envelope refuses it"
-
-
-def test_suggested_dates_actually_have_flights():
-    """The suggestion must be true: searching one of them must return rows."""
-    ctx = _empty_leg_context()
-    suggested = tools.search_flights(ctx, direction="OUTBOUND")["dates_this_route_flies_nearby"]
-
-    found = tools.search_flights(ctx, direction="OUTBOUND", depart_date=suggested[0])
-    assert found["included_count"] > 0, f"{suggested[0]} was suggested but has no flights"
+    assert result["searched_date"] == NEAREST_STOCKED
+    assert result["included_count"] > 0
+    assert all(row["dep_ts"].startswith(NEAREST_STOCKED) for row in result["rows"])
+    assert result["dates_searched"] == [EMPTY_LEG_DATE, "2026-09-11", "2026-09-13", NEAREST_STOCKED]
 
 
 def test_a_populated_leg_does_not_carry_suggestions():
@@ -460,6 +471,7 @@ def test_a_populated_leg_does_not_carry_suggestions():
     assert result["included_count"] > 0
     assert "dates_this_route_flies_nearby" not in result
     assert "suggestion" not in result
+    assert "dates_searched" not in result
 
 
 # --- The two halves of the tool registry must agree -------------------------

@@ -6,15 +6,17 @@ metadata:
   name: web
   labels: {app: web}
 spec:
-  # ONE, and not a tuning choice. flaskapp/travel_ai/jobs.py keeps job state
-  # in module-level dicts, so a second replica answers GET .../status with 404
-  # for plans running in its sibling (ADR-0005). Raise this only after job
-  # state moves into the planning_jobs table.
+  # The starting count; deploy/k8s/hpa.yaml decides the rest. Job state is in
+  # the planning_jobs table (jobs.py), so any replica can answer a status poll
+  # for a plan running on another — the old reason for ONE (ADR-0005) is gone.
   replicas: 1
-  # Recreate for the same reason: a rolling update briefly runs old and new
-  # side by side, which is exactly the two-replica case above. A deploy
-  # therefore interrupts in-flight plans — true on Render today as well.
-  strategy: {type: Recreate}
+  # Rolling: the new pod is up before the old one is asked to stop, and the old
+  # one drains (below), so a deploy no longer interrupts plans in progress.
+  # Safe now that job state is in the database: old and new pods side by side
+  # both answer every status poll.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
   selector:
     matchLabels: {app: web}
   template:
@@ -28,9 +30,14 @@ spec:
       # (2026-09-17). A PodDisruptionBudget stops the same scale-down
       # evictions without either cost.
     spec:
-      # A plan takes 30-90s. Give a running one the chance to finish before
-      # the container is killed on deploy or node maintenance.
-      terminationGracePeriodSeconds: 150
+      # The drain, end to end, when a deploy or the autoscaler removes this pod:
+      #   1. preStop sleeps 15 s while the load balancer stops sending it new
+      #      requests (deregistration is not instant);
+      #   2. SIGTERM: gunicorn stops accepting and waits up to graceful_timeout
+      #      (300 s, gunicorn.conf.py) while running plans finish — a plan takes
+      #      ~3.5 min on GKE. Their status polls are answered by other pods.
+      # 15 + 300 < 330. A plan still cut off is reported as WorkerLost.
+      terminationGracePeriodSeconds: 330
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -40,17 +47,27 @@ spec:
           image: travel-planner
           ports:
             - {name: http, containerPort: 8000}
+            # Plans in flight, for the autoscaler (flaskapp/metrics.py). In no
+            # Service, so never reachable through the Ingress.
+            - {name: metrics, containerPort: 9090}
           envFrom:
             - configMapRef: {name: app-config}
             - secretRef: {name: app-secrets}
           env:
             - {name: A2A_INTERNAL_ENABLED, value: "true"}
-          # Measured locally: ~150 MiB after a plan. Autopilot bills requests,
-          # so these are sized to the measurement with headroom, not guessed.
-          # If Autopilot rewrites the limit to equal the request, that is its
-          # policy for this cluster version; watch for OOMKilled restarts.
+            - {name: METRICS_PORT, value: "9090"}
+          lifecycle:
+            preStop:
+              sleep: {seconds: 15}
+          # Autopilot bills requests, so these are sized to measurement on GKE,
+          # 2026-09-18 to 10-02 (one reading a minute): CPU median 7m, p99 45m,
+          # above 100m only in a pod's first minute (and once in a load test,
+          # a since-fixed 50 ms polling loop); memory median 130 MiB, peak
+          # 181 MiB. 384Mi keeps ~2x over that peak. If Autopilot rewrites the
+          # limit to equal the request, that is its policy for this cluster
+          # version; watch for OOMKilled restarts.
           resources:
-            requests: {cpu: 250m, memory: 512Mi}
+            requests: {cpu: 100m, memory: 384Mi}
             limits: {memory: 1Gi}
           securityContext:
             allowPrivilegeEscalation: false

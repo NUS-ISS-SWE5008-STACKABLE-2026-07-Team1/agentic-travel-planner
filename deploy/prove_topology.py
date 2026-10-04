@@ -330,9 +330,9 @@ def session_portability(replicas: int, email: str, password: str) -> None:
                            timeout=30)
         note(f"status of an unknown plan on pod two -> HTTP {missing.status_code} "
              "(expected: 404)")
-        note("that 404 is harmless for a made-up id. The defect is that a plan RUNNING")
-        note("on pod one answers exactly the same way here, because _jobs is a dict in")
-        note("pod one's memory. `deploy/load_test.py --plans 2` is what measures it.")
+        note("that 404 is right for a made-up id. A plan RUNNING on pod one now answers")
+        note("here too: job state is read from planning_jobs, not pod one's memory.")
+        note("`deploy/load_test.py --plans N` against 2+ pods is what measures it.")
     finally:
         for _, _, process in forwards:
             process.terminate()

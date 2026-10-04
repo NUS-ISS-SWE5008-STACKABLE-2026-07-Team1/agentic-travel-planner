@@ -111,6 +111,7 @@ def _reason_over_proposal(
     gaps: dict[str, list[str]],
     llm: ChatModel,
     tracer,
+    callbacks: list | None = None,
 ) -> FlightAgentResponse:
     """One grounded model pass, isolated so option B can call it a second time
     (post-acknowledgment) without duplicating the logic.
@@ -128,6 +129,7 @@ def _reason_over_proposal(
         ),
         proposal=proposal,
         tracer=tracer,
+        callbacks=callbacks,
     )
 
 
@@ -137,6 +139,7 @@ def run_flight_agent(
     llm: ChatModel,
     *,
     tracer=None,
+    callbacks: list | None = None,
 ) -> tuple[FlightProposal, FlightAgentResponse]:
     """The tool always runs; the brain reasons over its output, fail-closed.
 
@@ -179,7 +182,7 @@ def run_flight_agent(
             })
         return proposal, response
 
-    response = _reason_over_proposal(request, proposal, screening, gaps, llm, tracer)
+    response = _reason_over_proposal(request, proposal, screening, gaps, llm, tracer, callbacks)
 
     acknowledgment = response.proposed_acknowledgment
     if acknowledgment is not None and acknowledgment_is_valid(acknowledgment, gaps):
@@ -195,7 +198,9 @@ def run_flight_agent(
         proposal = propose_flights(updated_request, inventory)  # the one extra tool call
         screening = screen_flights(updated_request, inventory)
         gaps = flight_preference_gaps(updated_request, inventory)
-        response = _reason_over_proposal(updated_request, proposal, screening, gaps, llm, tracer)
+        response = _reason_over_proposal(
+            updated_request, proposal, screening, gaps, llm, tracer, callbacks
+        )
         response = response.model_copy(update={"acknowledgment_applied": acknowledgment})
     elif acknowledgment is not None and tracer is not None:
         tracer.record("agent_acknowledgment_rejected", "flight_agent", {

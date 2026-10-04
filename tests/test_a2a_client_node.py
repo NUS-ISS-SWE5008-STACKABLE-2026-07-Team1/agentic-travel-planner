@@ -202,37 +202,53 @@ def test_the_switch_only_affects_the_flight_agent(tracer):
         assert node.__name__ != "remote_node", name
 
 
-def test_polling_backs_off_instead_of_hammering_the_agent(monkeypatch, tmp_path, tracer):
-    """A specialist takes 30-80s; a flat 50ms poll spent ~1,200 requests waiting
-    for it. One real plan on GKE put ~5,100 JSON-RPC calls through the agents
-    pod and its health probe timed out mid-plan. The first poll stays fast, so a
-    stubbed task that is already done still returns immediately.
+class _RoundRobinTransport(httpx.AsyncBaseTransport):
+    """Two agents pods behind one Service: each request goes to the next pod.
+
+    Each `build_a2a_application` has its own InMemoryTaskStore, exactly like two
+    pods. Records the JSON-RPC method of every request it routes.
     """
-    import asyncio
 
-    from flaskapp.travel_ai import a2a_client
+    def __init__(self, *apps):
+        self._pods = [httpx.ASGITransport(app=app) for app in apps]
+        self._next = 0
+        self.methods: list[str] = []
 
-    slept: list[float] = []
-    real_sleep = asyncio.sleep
+    async def handle_async_request(self, request):
+        if request.method == "POST":
+            import json
+            self.methods.append(json.loads(request.content or b"{}").get("method", "?"))
+        pod = self._pods[self._next % len(self._pods)]
+        self._next += 1
+        return await pod.handle_async_request(request)
 
-    async def recording_sleep(seconds):
-        slept.append(seconds)
-        await real_sleep(0)  # yield, without the wall-clock wait
 
-    monkeypatch.setattr(a2a_client.asyncio, "sleep", recording_sleep)
+def _node_behind(transport, tracer):
+    return create_remote_specialist_node(
+        NAME, tracer, endpoint=ENDPOINT,
+        httpx_client_factory=lambda: httpx.AsyncClient(transport=transport, base_url=ENDPOINT),
+    )
 
-    node = _remote_node(_server(tmp_path), tracer)
-    node(_state(COVERED))
 
-    assert slept, "the stub completes fast, but the loop still polls at least once"
-    assert slept[0] == a2a_client._POLL_INTERVAL_SECONDS, "first poll stays fast"
-    assert slept == sorted(slept), "intervals only grow"
-    assert max(slept) <= a2a_client._POLL_CEILING_SECONDS
+def test_one_specialist_call_is_one_request_and_never_a_poll(tmp_path, tracer):
+    """The agents role keeps tasks in memory. A `GetTask` poll can be routed to a
+    sibling pod that never saw the task, so the client must not send one: a
+    single blocking `SendMessage` starts and finishes the task on one pod.
+    (It used to poll; one real plan on GKE once sent ~5,100 polls.)
+    """
+    transport = _RoundRobinTransport(_server(tmp_path))
+    _node_behind(transport, tracer)(_state(COVERED))
 
-    # The schedule this produces over a realistic 80-second wait.
-    interval, elapsed, polls = a2a_client._POLL_INTERVAL_SECONDS, 0.0, 0
-    while elapsed < 80:
-        elapsed += interval
-        polls += 1
-        interval = min(interval * a2a_client._POLL_BACKOFF, a2a_client._POLL_CEILING_SECONDS)
-    assert polls < 100, f"{polls} polls for an 80s wait is still hammering"
+    rpc = [m for m in transport.methods if m != "?"]
+    assert rpc == ["SendMessage"], rpc
+
+
+def test_a_plan_survives_two_agents_pods_with_separate_task_stores(tmp_path, tracer):
+    """The scaling property itself. With polling, the second request (GetTask)
+    landed on the pod without the task and the specialist call failed."""
+    transport = _RoundRobinTransport(_server(tmp_path / "pod-a"), _server(tmp_path / "pod-b"))
+    node = _node_behind(transport, tracer)
+
+    for _ in range(3):  # alternate pods across calls, not just within one
+        finding = node(_state(COVERED))["findings"][0]
+        assert finding.agent == NAME and finding.options
