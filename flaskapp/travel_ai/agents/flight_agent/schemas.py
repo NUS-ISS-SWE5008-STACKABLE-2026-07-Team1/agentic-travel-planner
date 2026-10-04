@@ -52,8 +52,7 @@ class FlightInventoryItem(BaseModel):
     On the two accessibility booleans being nullable: `None` means "this
     supplier does not publish it", NOT "not available". The distinction is
     load-bearing. Seed rows always state a real True/False because the dataset
-    was written to. A live GDS feed (Duffel, in `providers/duffel.py`) has no
-    such field at all, and defaulting an absent field to True would invent an
+    was written to. A live supplier feed typically has no such field at all, and defaulting an absent field to True would invent an
     accessibility guarantee for the traveller least able to absorb the cost of
     it being wrong, while defaulting to False would hide every live flight from
     the same traveller. `domain.py` therefore treats `None` as a third case:
@@ -79,9 +78,8 @@ class FlightInventoryItem(BaseModel):
     # None = the source does not publish this. See the class docstring.
     wheelchair_assist_available: bool | None
     step_free_boarding: bool | None
-    # Which provider produced this row. Drives the traveller-facing assumption
-    # text (illustrative dataset vs. live, expiring fare) — see agent.py.
-    source: Literal["seed", "duffel"] = "seed"
+    # Which provider produced this row. Seed is the only one today.
+    source: Literal["seed"] = "seed"
     # None = seat selection not modelled for this flight (older rows / ad-hoc
     # test flights). All seat filters and fees are skipped when this is None,
     # which is what keeps the whole seat feature backward-compatible.
@@ -349,7 +347,7 @@ class FlightCandidate(BaseModel):
     # FlightInventoryItem so the traveller-facing Option can say which it is.
     wheelchair_assist_available: bool | None
     step_free_boarding: bool | None
-    source: Literal["seed", "duffel"] = "seed"
+    source: Literal["seed"] = "seed"
     # Estimated total seat-selection fee for the whole party given their seat
     # preferences (0 if they're not selecting seats). Exposed so the Budget
     # Validator sees the TRUE trip cost — this is what lets seat preferences

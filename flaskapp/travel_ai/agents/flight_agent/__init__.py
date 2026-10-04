@@ -50,7 +50,7 @@ __all__ = [
     "propose_flights",
     "screen_flights",
     "flight_preference_gaps",
-    # Where inventory comes from — seed by default, Duffel when configured
+    # Where inventory comes from — the seed dataset
     "get_inventory_provider",
     "InventoryProvider",
     "InventoryResult",

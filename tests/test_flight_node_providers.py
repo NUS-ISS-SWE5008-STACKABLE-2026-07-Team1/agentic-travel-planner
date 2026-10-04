@@ -20,7 +20,6 @@ from flaskapp.travel_ai.agents.flight_agent.agent import (
     create_node,
 )
 from flaskapp.travel_ai.agents.flight_agent.providers.base import InventoryResult
-from flaskapp.travel_ai.agents.flight_agent.providers.duffel import INVENTORY_ASSUMPTION
 from flaskapp.travel_ai.agents.flight_agent.schemas import (
     FlightAgentResponse,
     FlightInventoryItem,
@@ -37,6 +36,10 @@ TRIP = dict(
     preferences=[],
     accessibility_needs=["Traveler 1: wheelchair assistance"],
 )
+# What a live provider would say about its own rows; deliberately not the seed
+# wording, so a test can tell which one reached the options.
+LIVE_ASSUMPTION = "Fare and schedule come from a live supplier search and expire quickly."
+
 # Singapore->Japan is stocked by the seed dataset, so this reaches the grounded
 # path under the seed provider — which is what the fallback-to-seed test needs.
 SEED_TRIP = {**TRIP, "origin": "Singapore", "destination": "Japan", "currency": "SGD"}
@@ -49,7 +52,6 @@ def _live_flight(flight_id: str, origin: str, dest: str, dep: str, arr: str) -> 
         duration_min=430, price=300.0, cabin_class="ECONOMY",
         seats_available=1, stops=0,
         wheelchair_assist_available=None, step_free_boarding=None,
-        source="duffel",
     )
 
 
@@ -60,10 +62,10 @@ LIVE_INVENTORY = [
 
 
 class FakeProvider:
-    """A provider whose result the test dictates."""
+    """A stand-in live provider whose result the test dictates."""
 
-    name = "duffel"
-    assumption = INVENTORY_ASSUMPTION
+    name = "fake_live"
+    assumption = LIVE_ASSUMPTION
 
     def __init__(self, result: InventoryResult, covers: bool = True):
         self._result = result
@@ -151,7 +153,7 @@ def test_options_carry_the_providers_own_assumption_text(tracer):
     """The static-dataset wording would be a false statement about a live fare."""
     provider = FakeProvider(InventoryResult(items=LIVE_INVENTORY))
     finding = create_node(_llm(), tracer, provider=provider)(_state(TRIP))["findings"][0]
-    assert all(INVENTORY_ASSUMPTION in o.assumptions for o in finding.options)
+    assert all(LIVE_ASSUMPTION in o.assumptions for o in finding.options)
 
 
 def test_unverified_accessibility_is_disclosed_on_every_option(tracer):
@@ -176,11 +178,11 @@ def test_a_route_the_provider_does_not_cover_is_never_fetched(tracer):
     assert provider.fetches == 0
 
 
-def test_a_missing_token_warns_the_traveller_it_fell_back_to_seed(tracer):
-    """Configuring duffel without a credential silently serving static data
-    would be the worst of both — the fallback has to be visible even on the
-    grounded path, where nothing else would hint the source had changed."""
-    config = {"FLIGHT_INVENTORY_SOURCE": "duffel"}
+def test_an_unknown_source_warns_the_traveller_it_fell_back_to_seed(tracer):
+    """A misconfigured source silently serving static data would hide the
+    change — the fallback has to be visible even on the grounded path, where
+    nothing else would hint the source had changed."""
+    config = {"FLIGHT_INVENTORY_SOURCE": "live"}
     finding = create_node(_llm(), tracer, config=config)(_state(SEED_TRIP))["findings"][0]
     assert finding.options, "the seed fallback should still produce grounded options"
-    assert any("DUFFEL_API_TOKEN" in w for w in finding.warnings)
+    assert any("Unknown FLIGHT_INVENTORY_SOURCE" in w for w in finding.warnings)

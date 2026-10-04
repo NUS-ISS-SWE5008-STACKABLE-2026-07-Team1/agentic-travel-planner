@@ -74,14 +74,14 @@ A2A request
 | `reasoning.py` | Single-shot path: tool runs, model explains, retry-then-fallback |
 | `tools.py` | `domain.py` exposed as three tools, plus the argument envelope |
 | `agentic.py` | The tool-calling subgraph. **The only module here allowed to import langchain** |
-| `providers/` | Where inventory comes from — `seed` (default) or `duffel` |
+| `providers/` | Where inventory comes from — `seed` (the only source) |
 | `seed_data.py` | Static inventory + `seed_data_extended.csv` |
 
 ### Things that look like details but are load-bearing
 
 - **`wheelchair_assist_available` and `step_free_boarding` are `bool | None`, and `None`
   means "this supplier does not publish it" — not "unavailable."** Seed rows state a real
-  true/false; Duffel has no such field. Never collapse `None` into either boolean.
+  true/false; a live supplier feed typically has no such field. Never collapse `None` into either boolean.
   `domain.py` treats it as a genuine third case and `agent.py` surfaces it as an explicit
   *unverified* limitation.
 - **Hard filters exclude; soft preferences only reorder.** `_screen_item` returns a list
@@ -150,10 +150,10 @@ Do not reword `ESTIMATE_WARNING` casually: it carries the substring
 
 ### Inventory
 
-Seed is the default and stays the default — the golden scenarios, the bias audit and
-~100 tests are pinned to its exact ranking output, so `FLIGHT_INVENTORY_SOURCE=duffel`
-is an explicit opt-in that a stray credential cannot trigger. A missing
-`DUFFEL_API_TOKEN` degrades to seed *with a visible note* rather than failing.
+Seed is the only source — the golden scenarios, the bias audit and ~100 tests are
+pinned to its exact ranking output. An unknown `FLIGHT_INVENTORY_SOURCE` degrades to
+seed *with a visible note* rather than failing. `InventoryProvider` stays a Protocol
+so a live supplier can be added later; re-size `FLIGHT_AGENT_MAX_PROVIDER_CALLS` first.
 
 Current seed dataset: 1568 rows across 30 airports, departures 2026-08-24 to 2027-01-06.
 Regenerate with `scripts/generate_flight_seed_csv.py` — it is deterministic, so a diff
@@ -222,7 +222,7 @@ remain in `audit_events`.
 
 - `docs/flight_agent/design.md` — the design argument, including Path 2 §3 and the loop §4b
 - `docs/flight_agent/mode-eval.md` — the measurement behind `auto`
-- `docs/flight_agent/inventory_sources.md` — seed vs. Duffel trade-offs
+- `docs/flight_agent/inventory_sources.md` — the seed source and unverified accessibility
 - `docs/flight_agent/report.md` — team-facing results
 - `docs/handoff/` — in-flight handoffs
 - `docs/security/` — security drafts and scan notes
