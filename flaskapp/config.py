@@ -132,19 +132,10 @@ class Config:
     # convenience only — with it off, identifiers a traveller types reach the
     # classifier, the extraction model, and the intake_messages table.
     PII_REDACTION_ENABLED = os.getenv("PII_REDACTION_ENABLED", "true").lower() == "true"
-    # Where Flight Agent's inventory comes from: "seed" (the project's static
-    # dataset, the default and what every golden scenario is pinned to) or
-    # "duffel" (live supplier search). Selecting duffel without a token falls
-    # back to seed with a visible warning rather than failing.
+    # Where Flight Agent's inventory comes from. "seed" (the project's static
+    # dataset, what every golden scenario is pinned to) is the only source; any
+    # other value falls back to seed with a visible warning rather than failing.
     FLIGHT_INVENTORY_SOURCE = os.getenv("FLIGHT_INVENTORY_SOURCE", "seed").strip().lower()
-    DUFFEL_API_TOKEN = os.getenv("DUFFEL_API_TOKEN")
-    DUFFEL_API_VERSION = os.getenv("DUFFEL_API_VERSION", "v2")
-    DUFFEL_TIMEOUT_SECONDS = float(os.getenv("DUFFEL_TIMEOUT_SECONDS", "30"))
-    # Duffel's own cap on how long it waits for airlines, in ms (2000-60000).
-    # Keep it below DUFFEL_TIMEOUT_SECONDS so Duffel returns partial results
-    # before our HTTP client gives up on it.
-    DUFFEL_SUPPLIER_TIMEOUT_MS = int(os.getenv("DUFFEL_SUPPLIER_TIMEOUT_MS", "20000"))
-    DUFFEL_MAX_OFFERS = int(os.getenv("DUFFEL_MAX_OFFERS", "50"))
 
     # --- Flight Agent execution mode and loop budgets ---
     #
@@ -166,11 +157,9 @@ class Config:
     # always follows. Three is enough for search, widen, conclude.
     FLIGHT_AGENT_MAX_LLM_TURNS = int(os.getenv("FLIGHT_AGENT_MAX_LLM_TURNS", "3"))
     FLIGHT_AGENT_MAX_TOOL_CALLS = int(os.getenv("FLIGHT_AGENT_MAX_TOOL_CALLS", "6"))
-    # Calls to `provider.fetch`, NOT supplier searches. `duffel.fetch` fans out
-    # over airport pairs and can issue up to MAX_AIRPORTS_PER_CITY ** 2 = 4 billed
-    # POSTs per call, so 2 here can mean 8 billed searches. Sized with that in
-    # mind rather than renamed, because `fetch` is the only unit the cache can
-    # observe. Free on seed, which returns its whole dataset in one call.
+    # Calls to `provider.fetch`, NOT supplier searches — `fetch` is the only
+    # unit the cache can observe. Free on seed, which returns its whole dataset
+    # in one call; a billed live provider would need this re-sized.
     FLIGHT_AGENT_MAX_PROVIDER_CALLS = int(os.getenv("FLIGHT_AGENT_MAX_PROVIDER_CALLS", "2"))
     # Wall clock for the whole loop. Deliberately far below
     # AI_REQUEST_TIMEOUT_SECONDS: that bounds one model call, this bounds a

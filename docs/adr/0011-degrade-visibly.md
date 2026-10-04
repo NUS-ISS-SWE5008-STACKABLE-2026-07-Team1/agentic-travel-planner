@@ -25,7 +25,7 @@ the output.** Never fail hard, never fail silently.
 | Model output malformed or ungrounded | Retry once, then deterministic grounded response | Rationale is plainer; options unchanged |
 | Rationale flagged biased or toxic | Same retry-then-fallback | Options unchanged |
 | No inventory covers the route | Prompt-only route guidance, **all options stripped** | `ESTIMATE_WARNING` + provenance disclosure |
-| `DUFFEL_API_TOKEN` missing | Seed inventory | Explicit note in the finding |
+| Unknown `FLIGHT_INVENTORY_SOURCE` | Seed inventory | Explicit note in the finding |
 | Loop budget exhausted | Best candidates found so far | Trace `agent_budget_exhausted` |
 | City not in the dataset | Country's primary city | `airports.py:94` note |
 | One specialist raises | Other three still synthesise | Finding carries the error |

@@ -108,8 +108,9 @@ If the team would rather revert to one hub, it's a contained change: delete
 
 - **Doesn't change any other agent's contract.** No schema, A2A or graph changes.
 - **Doesn't turn on live flight data.** Still `FLIGHT_INVENTORY_SOURCE=seed`.
-  Everything measured here is on seed, where re-searching is free; on Duffel each
-  search is billed and the budget bounds `fetch` calls, not supplier searches.
+  Everything measured here is on seed, where re-searching is free; on a live
+  supplier each search would be billed, and the budget bounds `fetch` calls, not
+  supplier searches.
 - **Doesn't fabricate anything, measured.** 120 options across 36 live runs, zero
   naming a flight no provider returned. Options are built by code from provider
   rows, so this is structural rather than filtered.

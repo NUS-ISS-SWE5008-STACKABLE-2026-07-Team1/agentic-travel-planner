@@ -20,10 +20,10 @@ ways of thinking live in `reasoners.py` behind one interface, so this module
 never branches on which one ran.
 
 Inventory comes from an `InventoryProvider` (see `providers/`), not from a
-module-level dataset. Seed is the default; `FLIGHT_INVENTORY_SOURCE=duffel`
-swaps in a live supplier search. The node's logic is identical either way — the
-only source-dependent things are the assumption text on each option and the
-fact that a live feed can leave accessibility unverified.
+module-level dataset. Seed is the only provider today. The node's logic does
+not depend on the source — the only source-dependent things are the assumption
+text on each option and the fact that a live feed could leave accessibility
+unverified.
 
 Fallback: when the route or dates fall outside the loaded inventory, there is
 nothing to ground an answer in. Rather than return an empty finding that reads
@@ -466,8 +466,8 @@ class _EvalRun:
             escalated_to_loop=self.escalated_to_loop,
             escalation_reason=self._escalation_reason(),
             # Real on both paths: the inventory fetch goes through `ctx.cache`,
-            # which spends a provider call, and on Duffel that is a billed
-            # search. `llm_turns` and `tool_calls` are genuinely 0 without the
+            # which spends a provider call (a billed search on any live
+            # supplier). `llm_turns` and `tool_calls` are genuinely 0 without the
             # loop — `run_flight_agent` calls the model without spending this
             # budget and does not report how many calls it made.
             llm_turns=counts.get("llm_turns", 0),
@@ -580,7 +580,7 @@ def create_node(llm, tracer, provider=None, config=None):
 
         # One context for the whole request. The loop, when it runs, uses this
         # same cache — building it a second one there would re-fetch inventory
-        # already paid for, which is free on seed and billed on Duffel.
+        # already paid for, which is free on seed and billed on a live supplier.
         ctx = ToolContext.for_request(
             adapted.request, provider, budget,
             max_date_shift_days=max_date_shift_days,

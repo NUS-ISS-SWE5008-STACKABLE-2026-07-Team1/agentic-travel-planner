@@ -80,7 +80,7 @@ Whenever `provider.covers()` is false or the fetch returns nothing:
 
 - an airport pair the inventory doesn't stock,
 - an unroutable country or city,
-- a live Duffel search that failed, timed out, or came back empty.
+- (with a live supplier, if one were added) a search that failed, timed out, or came back empty.
 
 **Correction (2026-08-23): dates do NOT send a request down Path 2 on the seed
 provider.** `SeedInventoryProvider.covers()` delegates to `seed_data.covers_route()`,
@@ -246,8 +246,8 @@ should not become part of the workflow the others run through.
 
 Three tools, wrapping `domain.py`: `search_flights`, `rank_flights`,
 `relax_constraint`. `check_cost` and `check_accessibility` were considered and
-dropped — Duffel publishes neither seat maps nor accessibility, and seed already
-carries accessibility on every row, so both would have been tools with no data
+dropped — live supplier feeds typically publish neither seat maps nor
+accessibility, and seed already carries accessibility on every row, so both would have been tools with no data
 behind them.
 
 ### What holds the loop, and none of it is the prompt
@@ -286,7 +286,7 @@ still names the date they asked for, and every moved leg is disclosed by
 `date_shift_notes()`. Showing someone a different date without saying so would be
 worse than showing them nothing.
 
-On Duffel the loop *would* reclaim real Path 2, because there `covers()` is
+On a live supplier the loop *would* reclaim real Path 2, because there `covers()` would be
 routability-only and Path 2 means "the search came back empty" — which a retry can
 genuinely fix. That is why `max_provider_calls` exists even though seed makes
 searching free.
@@ -365,10 +365,10 @@ so needs its own change with the expectations regenerated under review.
 
 ### Still worth knowing
 
-- **`max_provider_calls` bounds `fetch` calls, not supplier searches.**
-  `duffel.fetch` fans out over airport pairs and can issue four billed POSTs per
-  call, so 2 can mean 8 billed searches. Re-read it before enabling Duffel.
-- The measurement is on **seed**, where searching is free. On Duffel the loop's
+- **`max_provider_calls` bounds `fetch` calls, not supplier searches.** A live
+  `fetch` that fanned out over airport pairs could be several billed searches.
+  Re-read it before adding a live supplier.
+- The measurement is on **seed**, where searching is free. On a live supplier the loop's
   latency and cost profile will differ, and `auto` limits exposure by opening the
   loop only when a leg is empty.
 
