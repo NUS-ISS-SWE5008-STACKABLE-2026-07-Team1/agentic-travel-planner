@@ -45,13 +45,20 @@ MAX_ATTEMPTS = 2
 
 
 class StructuredLLM:
-    """The narrow shape reasoning.py needs from a LangChain chat model."""
+    """The narrow shape reasoning.py needs from a LangChain chat model.
 
-    def __init__(self, llm):
+    `callbacks` go on every call, retries included, so the node's token counter
+    sees each model call it pays for.
+    """
+
+    def __init__(self, llm, callbacks: list | None = None):
         self._llm = llm
+        self._callbacks = list(callbacks or [])
 
     def invoke(self, messages: list[Any]) -> HotelTransportResponse:
-        return self._llm.with_structured_output(HotelTransportResponse, method="json_schema").invoke(messages)
+        return self._llm.with_structured_output(HotelTransportResponse, method="json_schema").invoke(
+            messages, config={"callbacks": self._callbacks}
+        )
 
 
 def _compact(value: object) -> str:
