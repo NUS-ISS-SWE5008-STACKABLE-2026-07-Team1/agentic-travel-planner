@@ -1,7 +1,7 @@
 """Unverified accessibility is a third state, not a synonym for unavailable.
 
-Seed rows always state a real True/False. A live supplier feed (Duffel) has no
-such field at all, so `None` arrives the moment inventory goes live. These
+Seed rows always state a real True/False. A live supplier feed typically has no
+such field at all, so `None` would arrive the moment inventory went live. These
 tests pin the three behaviours that follow from treating it as its own case:
 
 - it does not silently exclude the traveller from every live flight,
@@ -46,7 +46,6 @@ def _flight(flight_id: str, *, assist, price=300.0, direction="OUT") -> FlightIn
         stops=0,
         wheelchair_assist_available=assist,
         step_free_boarding=None,
-        source="duffel",
     )
 
 
@@ -88,7 +87,6 @@ def test_unknown_carries_through_to_the_candidate_rather_than_being_normalised()
     proposal = propose_flights(_request(), [_flight("UNKNOWN1", assist=None), RETURN_LEG])
     outbound = next(c for c in proposal.candidates if c.direction == "OUTBOUND")
     assert outbound.wheelchair_assist_available is None
-    assert outbound.source == "duffel"
 
 
 def test_verified_assistance_outranks_unverified_even_when_dearer():

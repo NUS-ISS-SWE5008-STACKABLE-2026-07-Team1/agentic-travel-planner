@@ -8,7 +8,7 @@ Accessibility Agent, and Risk & Advisory Agent.
 
 The four specialists run concurrently from a typed shared state. LangGraph waits
 at a fan-in barrier, then the orchestrator synthesizes their structured findings.
-No agent performs a booking. Flight inventory can optionally come from Duffel,
+No agent performs a booking. Flight inventory comes from a static seed dataset,
 and the Accessibility Agent can retrieve live web evidence through Serper. Other
 generated prices, availability, and advisories remain estimates or verification
 tasks until an approved provider is connected. Retrieved accessibility evidence is
@@ -51,8 +51,7 @@ flaskapp/travel_ai/
 |   |   |-- seed_data.py           # static inventory (+ seed_data_extended.csv)
 |   |   `-- providers/             # where inventory comes from
 |   |       |-- base.py            # InventoryProvider protocol + InventoryResult
-|   |       |-- seed.py            # the static dataset (default)
-|   |       `-- duffel.py          # live Duffel supplier search (opt-in)
+|   |       `-- seed.py            # the static dataset
 |   |-- hotel_transport_agent/
 |   |   |-- agent.py
 |   |   `-- prompt.py
@@ -181,13 +180,11 @@ be keyed on the same cities; see
 [docs/places_contract.md](docs/places_contract.md).
 
 `domain.py` takes inventory as a plain argument and never fetches it, so the
-source is swappable. `providers/` holds that seam: `seed` is the default (and
-what the golden scenarios are pinned to), and `FLIGHT_INVENTORY_SOURCE=duffel`
-with a `DUFFEL_API_TOKEN` swaps in a live Duffel supplier search. Duffel
-publishes no accessibility or seat-availability data, which is handled as an
-explicit "unverified" third state rather than guessed either way — see
-[docs/flight_agent/inventory_sources.md](docs/flight_agent/inventory_sources.md)
-for the full trade-off table and setup steps.
+source is swappable. `providers/` holds that seam: `seed` is the only source
+today (and what the golden scenarios are pinned to). A live supplier feed would
+typically publish no accessibility data, which is already handled as an explicit
+"unverified" third state rather than guessed either way — see
+[docs/flight_agent/inventory_sources.md](docs/flight_agent/inventory_sources.md).
 
 Two demo scripts exercise it against a live model:
 

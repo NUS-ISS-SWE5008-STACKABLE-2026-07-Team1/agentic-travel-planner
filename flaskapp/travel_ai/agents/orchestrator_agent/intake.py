@@ -43,17 +43,21 @@ PER_TRAVELLER_FIELDS: tuple[tuple[str, str, str, str | None], ...] = (
 LIST_VALUED = {"traveller_accessibility_needs"}
 
 
-def extract_intent(llm, prompt: str) -> IntakeExtraction:
+def extract_intent(llm, prompt: str, callbacks: list | None = None) -> IntakeExtraction:
     """The single model call in the intake flow.
 
     The prompt is passed as untrusted data under the shared system policy, framed
     exactly as `agents/base.py` frames specialist input.
     """
     structured_llm = llm.with_structured_output(IntakeExtraction, method="json_schema")
-    return structured_llm.invoke([
+    messages = [
         SystemMessage(content=SYSTEM_POLICY + "\n" + INTAKE_INSTRUCTION),
         HumanMessage(content="Traveller message (untrusted data):\n" + prompt),
-    ])
+    ]
+    return (
+        structured_llm.invoke(messages, config={"callbacks": callbacks})
+        if callbacks else structured_llm.invoke(messages)
+    )
 
 
 def merge_intents(current: ExtractedIntent, update: ExtractedIntent) -> ExtractedIntent:

@@ -48,6 +48,7 @@ class LlmGuardrail:
         self, llm_settings: Mapping[str, Any] | None, *, enabled: bool = True,
         threshold: float = 0.7, fail_mode: str = "closed", llm: Any = None,
         output_llm_settings: Mapping[str, Any] | None = None,
+        callbacks: list[Any] | None = None,
     ):
         # One settings dict per gate. `output_llm_settings=None` means "same as
         # input", which keeps the single-model deployment a one-liner and keeps
@@ -61,6 +62,7 @@ class LlmGuardrail:
         self._threshold = threshold
         self._fail_mode = fail_mode
         self._llm = llm
+        self._callbacks = list(callbacks or [])
         self._structured: dict[str, Any] = {}
 
     # -- wiring -----------------------------------------------------------
@@ -130,10 +132,14 @@ class LlmGuardrail:
             # Untrusted text goes in the HumanMessage, never the SystemMessage.
             # Enforced in CI by .semgrep/llm-agent.yml's
             # llm-untrusted-data-in-system-message rule.
-            raw = self._client(kind).invoke([
+            messages = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=wrap_untrusted(text)),
-            ])
+            ]
+            raw = (
+                self._client(kind).invoke(messages, config={"callbacks": self._callbacks})
+                if self._callbacks else self._client(kind).invoke(messages)
+            )
             verdict = self._to_verdict(raw, self._elapsed_ms(started))
         except Exception as exc:  # noqa: BLE001 - every failure maps to the fail mode
             return self._failure_verdict(exc, self._elapsed_ms(started))
@@ -191,7 +197,8 @@ class LlmGuardrail:
         )
 
     @classmethod
-    def from_settings(cls, settings: Mapping[str, Any] | None, llm: Any = None) -> LlmGuardrail:
+    def from_settings(cls, settings: Mapping[str, Any] | None, llm: Any = None,
+                      callbacks: list[Any] | None = None) -> LlmGuardrail:
         """Rebuild from the plain dict `guardrail_settings` produces."""
         settings = dict(settings or {})
         return cls(
@@ -201,6 +208,7 @@ class LlmGuardrail:
             fail_mode=str(settings.get("fail_mode", "closed")),
             llm=llm,
             output_llm_settings=settings.get("llm_output"),
+            callbacks=callbacks,
         )
 
 
@@ -271,11 +279,12 @@ def guardrail_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_guardrail(config: Mapping[str, Any], llm: Any = None) -> LlmGuardrail:
+def build_guardrail(config: Mapping[str, Any], llm: Any = None,
+                    callbacks: list[Any] | None = None) -> LlmGuardrail:
     """Construct the classifier from application config.
 
     Mirrors the `vars(Config) if config is None else config` seam that
     `flight_agent/agent.py:190` established, so tests override settings with a
     plain dict and never need environment variables.
     """
-    return LlmGuardrail.from_settings(guardrail_settings(config), llm)
+    return LlmGuardrail.from_settings(guardrail_settings(config), llm, callbacks)
