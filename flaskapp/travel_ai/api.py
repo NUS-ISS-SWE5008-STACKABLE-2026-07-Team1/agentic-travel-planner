@@ -24,7 +24,7 @@ from flaskapp.travel_ai.usage import TokenUsageCallback
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.agents.orchestrator_agent.intake import (
     clarification_question, compute_gaps, extract_intent, merge_answers,
-    merge_intents, to_request_payload,
+    drop_impossible_dates, merge_intents, resolve_place_countries, to_request_payload,
 )
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
     ExtractedIntent, IntentResponse,
@@ -248,6 +248,15 @@ def resolve_travel_intent():
 
 def _intent_response(extracted, question: str, request_id: str | None = None):
     """Shared reply shape for both intake endpoints."""
+    # Derive here rather than before saving, so the stored intent stays the
+    # record of what the traveller actually said. This is the one place that
+    # both asks the questions and builds the final payload, so a country
+    # derived here reaches the card, the gap list and `TravelRequest` alike.
+    extracted = resolve_place_countries(extracted)
+    # A date the model invented is refused here for the same reason: this is
+    # the one place that both asks the questions and builds the payload, so a
+    # dropped date becomes a question instead of a trip in the past.
+    extracted = drop_impossible_dates(extracted)
     missing = compute_gaps(extracted)
     complete = not missing
     return IntentResponse(
