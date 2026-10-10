@@ -9,12 +9,15 @@ model.
 
 from __future__ import annotations
 
+from datetime import date
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_prompt import INTAKE_INSTRUCTION
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
     ExtractedIntent, IntakeExtraction, MissingField,
 )
+from flaskapp.places import city_by_name
 from flaskapp.travel_ai.agents.shared import SYSTEM_POLICY
 
 DEFAULT_CURRENCY = "SGD"
@@ -43,6 +46,43 @@ PER_TRAVELLER_FIELDS: tuple[tuple[str, str, str, str | None], ...] = (
 LIST_VALUED = {"traveller_accessibility_needs"}
 
 
+def intake_instruction(today: date | None = None) -> str:
+    """The intake instruction with today's date filled in.
+
+    The model is not told what day it is unless we tell it, so every relative
+    date — "tomorrow", "next Friday" — was a guess. Asked on 2026-10-09 for
+    "tomorrow", gpt-4.1-mini answered 2024-06-13: near its training cutoff, and
+    over two years in the past.
+    """
+    return INTAKE_INSTRUCTION.format(today=(today or date.today()).isoformat())
+
+
+def drop_impossible_dates(
+    extracted: ExtractedIntent, today: date | None = None
+) -> ExtractedIntent:
+    """Refuse a date already in the past, turning it back into a question.
+
+    Returns a COPY, like `resolve_place_countries`, so the stored extraction
+    stays whatever the model actually produced.
+
+    The anchor in `intake_instruction` makes a correct answer likely; this makes
+    a wrong one impossible to ship. Nothing downstream would catch it:
+    `TravelRequest` only checks that the return is not before the departure, so
+    a 2024 trip validates, matches no inventory, and reaches the traveller as a
+    vague plan that never mentions the date.
+
+    Today itself is allowed — someone booking a flight for this evening is not
+    making a mistake.
+    """
+    reference = today or date.today()
+    dropped = {
+        field: None
+        for field in ("departure_date", "return_date")
+        if (value := getattr(extracted, field)) is not None and value < reference
+    }
+    return extracted.model_copy(update=dropped) if dropped else extracted
+
+
 def extract_intent(llm, prompt: str, callbacks: list | None = None) -> IntakeExtraction:
     """The single model call in the intake flow.
 
@@ -51,7 +91,7 @@ def extract_intent(llm, prompt: str, callbacks: list | None = None) -> IntakeExt
     """
     structured_llm = llm.with_structured_output(IntakeExtraction, method="json_schema")
     messages = [
-        SystemMessage(content=SYSTEM_POLICY + "\n" + INTAKE_INSTRUCTION),
+        SystemMessage(content=SYSTEM_POLICY + "\n" + intake_instruction()),
         HumanMessage(content="Traveller message (untrusted data):\n" + prompt),
     ]
     return (
@@ -102,6 +142,44 @@ def clarification_question(missing: list[MissingField]) -> str:
 # stay: nobody flies, and `TravelRequest` does not require an origin for that
 # scope, so asking would collect a field nothing downstream reads.
 JOURNEY_ONLY_FIELDS = frozenset({"origin"})
+
+
+# Which city field answers which country field.
+#
+# Destination only, because that is the only city the conversational intake
+# collects: `ExtractedIntent` has no `origin_city`. The structured form does
+# collect a departure city and `TravelRequest` carries one, so adding the
+# origin direction here is a one-line change once intake asks for it — which is
+# why this is a table rather than a single `if`.
+_CITY_TO_COUNTRY: tuple[tuple[str, str], ...] = (
+    ("destination_city", "destination"),
+)
+
+
+def resolve_place_countries(extracted: ExtractedIntent) -> ExtractedIntent:
+    """Fill a missing country from the city the traveller already named.
+
+    Returns a COPY. The stored intent is the record of what the traveller
+    actually said, and a derived value written back into it would be
+    indistinguishable from one they gave.
+
+    Only fills what is absent. A country the traveller stated is never
+    overwritten, even when the city contradicts it: rewriting "Tokyo, China" to
+    Japan hides their mistake, where leaving it lets the flight adapter report
+    no route — an answer the orchestrator can negotiate around, which a silent
+    correction is not.
+
+    A city that resolves to nothing — unknown, or ambiguous across countries —
+    leaves the country missing, so intake asks for it exactly as before.
+    """
+    derived: dict[str, str] = {}
+    for city_field, country_field in _CITY_TO_COUNTRY:
+        if getattr(extracted, country_field) is not None:
+            continue
+        city = city_by_name(getattr(extracted, city_field))
+        if city is not None:
+            derived[country_field] = city.country
+    return extracted.model_copy(update=derived) if derived else extracted
 
 
 def compute_gaps(extracted: ExtractedIntent) -> list[MissingField]:

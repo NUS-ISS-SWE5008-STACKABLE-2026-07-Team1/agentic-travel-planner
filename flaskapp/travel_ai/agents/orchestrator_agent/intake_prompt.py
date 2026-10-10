@@ -34,6 +34,11 @@ empty and do not ask about accessibility in `question`.
 Use ISO dates (YYYY-MM-DD) and a three-letter currency code when, and only when,
 the traveller gave you enough to write one without guessing.
 
+Today's date is {today}. Resolve relative dates against it: "tomorrow" is the
+day after {today}, and "next Friday", "this weekend" and "in three weeks" are
+all measured from it. Never answer a relative date from memory — without that
+anchor you cannot know what day it is, and a guess lands years off.
+
 The required brief contains origin, destination country and city, exact departure
 and return dates, traveller count, total budget, and each traveller's age and
 gender. Accessibility

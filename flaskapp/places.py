@@ -530,6 +530,28 @@ def city_by_slug(slug: str | None) -> City | None:
     return CITIES.get(slug.strip().lower())
 
 
+def city_by_name(name: str | None) -> City | None:
+    """Resolve a city from its name alone, and with it the country it is in.
+
+    The reverse of `find_city`, which needs the country to search within. Intake
+    needs this direction because a traveller writes "I want to go to Tokyo" and
+    has thereby named the country too — asking them for it is asking a question
+    the dataset can already answer.
+
+    Returns None when the name matches MORE than one city, not the first hit.
+    Every name in today's dataset is unique, so this guard costs nothing now;
+    it exists because the dataset grows and city names genuinely collide
+    (Springfield, San Jose, Tripoli). Resolving an ambiguous name by position
+    would work today and silently pick the wrong country later, where returning
+    None simply means intake asks for the country as it always did.
+    """
+    if not name:
+        return None
+    target = name.strip().casefold()
+    matches = [city for city in CITIES.values() if city.name.strip().casefold() == target]
+    return matches[0] if len(matches) == 1 else None
+
+
 def find_city(country: str | None, name: str | None) -> City | None:
     """Resolve a display name within a country, case-insensitively.
 
