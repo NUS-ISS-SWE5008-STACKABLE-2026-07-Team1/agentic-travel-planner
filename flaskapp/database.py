@@ -490,7 +490,31 @@ CREATE INDEX IF NOT EXISTS idx_flight_eval_scenario ON flight_agent_eval_runs(sc
 POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 
 
-_JSON_EXTRACT = re.compile(r"json_extract\(\s*(.+?)\s*,\s*'\$\.(\w+)'\s*\)", re.IGNORECASE)
+# Two plain searches instead of one `json_extract\(\s*(.+?)\s*,...` pattern,
+# whose lazy capture between optional spaces backtracks polynomially. The
+# capture still ends at the first `, '$.field')` after the opening bracket, so
+# an argument containing commas, such as COALESCE(a, b), keeps working.
+_JSON_EXTRACT_OPEN = re.compile(r"json_extract\(", re.IGNORECASE)
+_JSON_EXTRACT_FIELD = re.compile(r",\s*'\$\.(\w+)'\s*\)")
+
+
+def _rewrite_json_extract(sql: str) -> str:
+    parts, position = [], 0
+    while (opening := _JSON_EXTRACT_OPEN.search(sql, position)) is not None:
+        field = _JSON_EXTRACT_FIELD.search(sql, opening.end())
+        if field is None:
+            break
+        expression = sql[opening.end():field.start()].strip()
+        if not expression or "\n" in expression:
+            # Left as written, as the single pattern did: its `.` stops at a newline.
+            parts.append(sql[position:opening.end()])
+            position = opening.end()
+            continue
+        parts.append(sql[position:opening.start()])
+        parts.append(f"({expression})::json->>'{field.group(1)}'")
+        position = field.end()
+    parts.append(sql[position:])
+    return "".join(parts)
 
 
 def to_postgres_sql(sql: str) -> str:
@@ -516,7 +540,7 @@ def to_postgres_sql(sql: str) -> str:
     downstream can manufacture or consume a `%s`.
     """
     sql = sql.replace("CURRENT_TIMESTAMP", _NOW)
-    sql = _JSON_EXTRACT.sub(r"(\1)::json->>'\2'", sql)
+    sql = _rewrite_json_extract(sql)
     return sql.replace("?", "%s")
 
 

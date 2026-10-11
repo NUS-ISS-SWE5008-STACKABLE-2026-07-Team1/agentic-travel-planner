@@ -137,6 +137,7 @@ class Handler(BaseHTTPRequestHandler):
         encoded = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
@@ -167,7 +168,9 @@ class Handler(BaseHTTPRequestHandler):
             "id": "chatcmpl-ci-stub",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": body.get("model", "stub-model"),
+            # A fixed name, not the caller's: nothing from the request is
+            # reflected into the response.
+            "model": "stub-model",
             "choices": [{
                 "index": 0,
                 "message": {"role": "assistant", "content": content},
@@ -186,5 +189,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"CI stub provider listening on http://127.0.0.1:{PORT}/v1", flush=True)
+    print(f"CI stub provider listening on 127.0.0.1:{PORT}, path /v1", flush=True)
     HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

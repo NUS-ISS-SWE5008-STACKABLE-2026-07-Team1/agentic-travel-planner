@@ -979,7 +979,7 @@ if (agentChat) {
 
   window.addEventListener("pagehide", endRequestSession);
 
-  poll();
+  poll().catch((error) => { statusLabel.textContent = error.message; });
 }
 
 const adminMonitor = document.querySelector("#admin-monitor");
@@ -1677,5 +1677,8 @@ if (adminMonitor) {
     }
     window.setTimeout(refreshAdmin, 2000);
   };
-  refreshAdmin();
+  refreshAdmin().catch((error) => {
+    liveStatus.className = "badge text-bg-danger";
+    liveStatus.textContent = error.message;
+  });
 }

@@ -1,6 +1,7 @@
 """Intake endpoints. The extraction model is stubbed; no network call is made."""
 
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -153,8 +154,11 @@ def test_resolve_completes_and_returns_a_valid_request():
         "extracted": {"destination": "Japan", "destination_city": "Tokyo",
                       "plan_scope": "both", "travellers": 1},
         "answers": {
-            "origin": "Singapore", "departure_date": "2026-10-10",
-            "return_date": "2026-10-24", "budget": "6000",
+            # Relative to today: a fixed date turns into a past date one day
+            # and the request stops validating (it did on 2026-10-11).
+            "origin": "Singapore",
+            "departure_date": (date.today() + timedelta(days=30)).isoformat(),
+            "return_date": (date.today() + timedelta(days=44)).isoformat(), "budget": "6000",
             "traveller_ages.0": "34", "traveller_genders.0": "male",
             "traveller_accessibility_needs.0": "",
         },

@@ -95,7 +95,9 @@ grant usage, create on schema {SCHEMA} to {ROLE};""")
     data = {
         "OPENAI_API_KEY": openai_key,
         # No password in the DSN: libpq reads PGPASSWORD, as on Render.
-        "DATABASE_URL": f"postgresql://{ROLE}.{PROJECT_REF}@{POOLER_HOST}:5432/postgres",
+        # NOSONAR on the next line: the database IS password-protected; the
+        # password travels as PGPASSWORD so a logged DATABASE_URL never shows it.
+        "DATABASE_URL": f"postgresql://{ROLE}.{PROJECT_REF}@{POOLER_HOST}:5432/postgres",  # NOSONAR
         "PGPASSWORD": db_password,
         "SECRET_KEY": secrets.token_urlsafe(48),
         "ADMIN_EMAILS": admin_emails,

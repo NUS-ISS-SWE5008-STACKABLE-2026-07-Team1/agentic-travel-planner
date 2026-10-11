@@ -97,7 +97,8 @@
           <div class="card border-0 shadow-sm travel-assistant-card">
             <div class="card-body p-4 travel-assistant-body">
               <h2 id="result-heading" class="h5 mb-1">Travel assistant</h2>
-              <div id="chat-result" class="mt-3" aria-live="polite" tabindex="0" aria-label="Travel recommendation">
+              {# tabindex is deliberate: this div scrolls (app.css), and keyboard users must be able to focus it to scroll it (WCAG 2.1.1). #}
+              <!-- NOSONAR --><div id="chat-result" class="mt-3" role="region" aria-live="polite" tabindex="0" aria-label="Travel recommendation">
                 <div id="intake-conversation-history">
                   {% for message in conversation %}
                   <div class="intake-bubble {{ 'intake-bubble-user' if message.role == 'user' else 'intake-bubble-assistant' }}">{{ message.content }}</div>

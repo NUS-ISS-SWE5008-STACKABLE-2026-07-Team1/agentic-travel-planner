@@ -449,6 +449,17 @@ def _prompt_catalog():
     return items
 
 
+def _looks_like_email(value: str) -> bool:
+    r"""One @, no whitespace, a dot inside the domain.
+
+    What `[^@\s]+@[^@\s]+\.[^@\s]+` accepted, without that pattern's
+    backtracking on a long run of dots in the domain.
+    """
+    local, at, domain = value.partition("@")
+    return (bool(at and local) and "@" not in domain
+            and not any(ch.isspace() for ch in value) and "." in domain[1:-1])
+
+
 @travel_api_bp.post("/admin/administrators")
 def create_administrator():
     if not is_admin_email(current_app.config, session.get("user_email")):
@@ -457,7 +468,7 @@ def create_administrator():
     name = str(payload.get("name", "")).strip()
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
-    if not name or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+    if not name or not _looks_like_email(email):
         return jsonify(error="A name and valid email address are required"), 422
     if len(password) < 12 or not re.search(r"[A-Z]", password) or not re.search(r"[a-z]", password) or not re.search(r"\d", password):
         return jsonify(error="Password must be at least 12 characters with upper-case, lower-case, and numeric characters"), 422

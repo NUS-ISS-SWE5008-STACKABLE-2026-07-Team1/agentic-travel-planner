@@ -112,11 +112,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -f requirements.lock ]; then
-            python -m pip install -r requirements.lock
-          else
-            python -m pip install -r requirements.txt
-          fi
+          python -m pip install --require-hashes --only-binary :all: -r requirements.lock
 
       - name: Prepare CI instance directory
         run: mkdir -p ci-instance/traces
