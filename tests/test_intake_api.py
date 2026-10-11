@@ -3,6 +3,13 @@
 import json
 from datetime import date, timedelta
 
+# Computed, never hardcoded. Intake refuses a departure date that has already
+# passed (`drop_impossible_dates`), so a literal date in a fixture works until
+# the day it does not — this file previously pinned 2026-10-10 and began
+# failing on 2026-10-11.
+DEPARTURE = (date.today() + timedelta(days=30)).isoformat()
+RETURN = (date.today() + timedelta(days=44)).isoformat()
+
 import pytest
 
 from flaskapp import create_app
@@ -150,15 +157,12 @@ def test_resolve_rejects_sensitive_answer_keys():
 
 
 def test_resolve_completes_and_returns_a_valid_request():
-    # Relative to today: a fixed date passes until that day, then the past-date
-    # check rejects it and this test fails with no code change.
-    departure = date.today() + timedelta(days=30)
     body = signed_in().post("/api/v1/travel-intents/resolve", json={
         "extracted": {"destination": "Japan", "destination_city": "Tokyo",
                       "plan_scope": "both", "travellers": 1},
         "answers": {
-            "origin": "Singapore", "departure_date": departure.isoformat(),
-            "return_date": (departure + timedelta(days=14)).isoformat(), "budget": "6000",
+            "origin": "Singapore", "departure_date": DEPARTURE,
+            "return_date": RETURN, "budget": "6000",
             "traveller_ages.0": "34", "traveller_genders.0": "male",
             "traveller_accessibility_needs.0": "",
         },
