@@ -25,9 +25,17 @@ DEFAULT_CURRENCY = "SGD"
 # The required set of TravelRequest, as questions. Order is the order asked.
 SCALAR_FIELDS: tuple[tuple[str, str, str, str | None], ...] = (
     # No trailing "?" — `clarification_question` lowercases these labels into a
-    # list ("could you share what to plan, flying from, ..."), so a label that
-    # ends a sentence terminates that one mid-way.
-    ("plan_scope", "What to plan", "scope", None),
+    # list ("could you share flying from, destination country, ..."), so a label
+    # that ends a sentence terminates that one mid-way.
+    #
+    # `plan_scope` is deliberately NOT here. A traveller who says nothing about
+    # scope wants the whole trip planned, and every layer below already treats
+    # a null that way: `to_request_payload` sends `plan_scope or "both"`,
+    # `TravelRequest` defaults to it, and `dispatch._BY_SCOPE.get` falls back to
+    # it. Asking cost a turn on the common case to confirm what the defaults
+    # would have produced anyway. An explicit "just book me a hotel" is still
+    # recorded by the extraction prompt, and the structured form still offers
+    # all three as option buttons -- the choice is kept, the question is not.
     ("origin", "Flying from", "country", None),
     ("destination", "Destination country", "country", None),
     ("destination_city", "Destination city", "text", "The city you will be staying in"),

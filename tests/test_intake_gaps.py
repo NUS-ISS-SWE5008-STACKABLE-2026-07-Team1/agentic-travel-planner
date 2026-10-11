@@ -25,9 +25,13 @@ def keys(missing):
 
 
 def test_empty_intent_asks_for_every_scalar_field():
+    """`plan_scope` is absent on purpose: an unstated scope defaults to `both`
+    rather than costing a turn. See
+    `test_intake_scope.py::test_scope_is_never_asked_in_conversation_it_defaults_to_both`.
+    """
     missing = compute_gaps(ExtractedIntent())
     assert keys(missing) == [
-        "plan_scope", "origin", "destination", "destination_city",
+        "origin", "destination", "destination_city",
         "departure_date", "return_date", "travellers", "budget",
     ]
 
