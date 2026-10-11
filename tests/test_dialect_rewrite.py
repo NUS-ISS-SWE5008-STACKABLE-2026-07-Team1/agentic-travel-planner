@@ -189,3 +189,20 @@ def test_sqlite_executescript_is_never_rewritten():
     script = "CREATE TABLE t (created_at TEXT DEFAULT CURRENT_TIMESTAMP);"
     _Connection(RawSqlite(), "sqlite").executescript(script)
     assert recorded == [script]
+
+
+def test_json_extract_with_no_field_anchor_is_left_alone():
+    sql = "SELECT json_extract(j.request_json) FROM t"
+    assert to_postgres_sql(sql) == sql
+
+
+def test_json_extract_with_an_empty_or_multiline_argument_is_left_alone():
+    """As the single regex did: its capture could be neither empty nor span a line."""
+    assert to_postgres_sql("SELECT json_extract( , '$.a')") == "SELECT json_extract( , '$.a')"
+    sql = "SELECT json_extract(a\nb, '$.a')"
+    assert to_postgres_sql(sql) == sql
+
+
+def test_a_skipped_json_extract_does_not_stop_the_next_one():
+    rewritten = to_postgres_sql("SELECT json_extract( , '$.a'), json_extract(x, '$.b')")
+    assert rewritten.endswith("(x)::json->>'b'")
