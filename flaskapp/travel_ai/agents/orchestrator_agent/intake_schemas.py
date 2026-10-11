@@ -69,6 +69,12 @@ class MissingField(BaseModel):
     input: InputKind
     traveller_index: int | None = None
     hint: str | None = None
+    # True when `hint` corrects something the traveller already answered, as
+    # opposed to explaining a field they have not reached. The card styles the
+    # two differently: a correction rendered in the same muted grey as
+    # "Leave blank if none" reads as guidance and gets skipped. Defaulted so
+    # every stored card and existing caller stays valid.
+    problem: bool = False
 
     @property
     def key(self) -> str:

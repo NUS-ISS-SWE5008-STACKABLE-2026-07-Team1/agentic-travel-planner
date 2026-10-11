@@ -1,6 +1,14 @@
 """Intake endpoints. The extraction model is stubbed; no network call is made."""
 
 import json
+from datetime import date, timedelta
+
+# Computed, never hardcoded. Intake refuses a departure date that has already
+# passed (`drop_impossible_dates`), so a literal date in a fixture works until
+# the day it does not — this file previously pinned 2026-10-10 and began
+# failing on 2026-10-11.
+DEPARTURE = (date.today() + timedelta(days=30)).isoformat()
+RETURN = (date.today() + timedelta(days=44)).isoformat()
 
 import pytest
 
@@ -153,8 +161,8 @@ def test_resolve_completes_and_returns_a_valid_request():
         "extracted": {"destination": "Japan", "destination_city": "Tokyo",
                       "plan_scope": "both", "travellers": 1},
         "answers": {
-            "origin": "Singapore", "departure_date": "2026-10-10",
-            "return_date": "2026-10-24", "budget": "6000",
+            "origin": "Singapore", "departure_date": DEPARTURE,
+            "return_date": RETURN, "budget": "6000",
             "traveller_ages.0": "34", "traveller_genders.0": "male",
             "traveller_accessibility_needs.0": "",
         },

@@ -27,16 +27,49 @@ def keys(missing):
     return [field.key for field in missing]
 
 
-def test_scope_is_asked_when_the_traveller_did_not_state_it():
-    assert "plan_scope" in keys(compute_gaps(ExtractedIntent()))
+def test_scope_is_never_asked_in_conversation_it_defaults_to_both():
+    """A traveller who says nothing about scope wants the whole trip planned.
+
+    Reversal of the original decision to ask. Every layer below already
+    defaulted to `both` -- `to_request_payload` sends `plan_scope or "both"`,
+    `TravelRequest` defaults to it, `dispatch._BY_SCOPE.get` falls back to it --
+    so the question was the only thing standing between silence and a full
+    plan, and it cost a turn on the common case.
+
+    An explicit request still wins: "just book me a hotel" is recorded as
+    `hotel` by the extraction prompt, and the structured form still offers all
+    three as option buttons.
+    """
+    assert "plan_scope" not in keys(compute_gaps(ExtractedIntent()))
 
 
-def test_scope_is_not_asked_once_it_is_known():
-    intent = ExtractedIntent.model_validate(COMPLETE)
-    assert "plan_scope" not in keys(compute_gaps(intent))
+def test_an_unstated_scope_reaches_the_request_as_both():
+    """The default has to arrive in the payload, not just be absent from the
+    questions: a null scope reaching `TravelRequest` would be a validation
+    error, not a full plan."""
+    from flaskapp.travel_ai.agents.orchestrator_agent.intake import to_request_payload
+
+    intent = ExtractedIntent.model_validate({**COMPLETE, "plan_scope": None})
+    assert to_request_payload(intent)["plan_scope"] == "both"
 
 
-def test_the_scope_question_renders_as_a_select():
+def test_a_stated_scope_is_still_honoured():
+    intent = ExtractedIntent.model_validate({**COMPLETE, "plan_scope": "hotel"})
+    from flaskapp.travel_ai.agents.orchestrator_agent.intake import to_request_payload
+    assert to_request_payload(intent)["plan_scope"] == "hotel"
+
+
+def test_the_form_still_lets_the_traveller_choose():
+    """Removing the conversational question must not remove the choice. The
+    structured form keeps all three, so a hotel-only traveller has a way to say
+    so without relying on the extraction model reading their phrasing."""
+    from pathlib import Path
+
+    html = Path("flaskapp/templates/main.html").read_text(encoding="utf-8")
+    assert 'name="plan_scope"' in html
+
+
+def _retired_scope_select_test():
     field = next(f for f in compute_gaps(ExtractedIntent()) if f.key == "plan_scope")
     assert field.input == "scope"
 
