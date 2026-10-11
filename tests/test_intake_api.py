@@ -1,6 +1,7 @@
 """Intake endpoints. The extraction model is stubbed; no network call is made."""
 
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -149,12 +150,15 @@ def test_resolve_rejects_sensitive_answer_keys():
 
 
 def test_resolve_completes_and_returns_a_valid_request():
+    # Relative to today: a fixed date passes until that day, then the past-date
+    # check rejects it and this test fails with no code change.
+    departure = date.today() + timedelta(days=30)
     body = signed_in().post("/api/v1/travel-intents/resolve", json={
         "extracted": {"destination": "Japan", "destination_city": "Tokyo",
                       "plan_scope": "both", "travellers": 1},
         "answers": {
-            "origin": "Singapore", "departure_date": "2026-10-10",
-            "return_date": "2026-10-24", "budget": "6000",
+            "origin": "Singapore", "departure_date": departure.isoformat(),
+            "return_date": (departure + timedelta(days=14)).isoformat(), "budget": "6000",
             "traveller_ages.0": "34", "traveller_genders.0": "male",
             "traveller_accessibility_needs.0": "",
         },

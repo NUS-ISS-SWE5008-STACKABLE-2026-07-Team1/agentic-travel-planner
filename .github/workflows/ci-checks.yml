@@ -209,14 +209,16 @@ jobs:
       # here, so the dialect that ships is never untested. psycopg is already
       # in requirements.txt.
       #
-      # --cov writes coverage.xml for the SonarCloud step below. Coverage is
+      # --cov writes coverage.xml for the SonarCloud step below; what is
+      # measured, and the repo-relative paths SonarCloud needs, are in
+      # .coveragerc. Coverage is
       # measured, never enforced here: no --cov-fail-under, so it cannot block.
       - name: Run pytest
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/travel_planner_test
         run: >-
           python -m pytest -q -m "not live" --junitxml=pytest-report.xml
-          --cov=flaskapp --cov=scripts --cov-report=xml
+          --cov --cov-report=xml
 
       # Guards the port itself. Drop the service or the env var and the
       # Postgres tests go back to skipping in silence; this turns that into a
