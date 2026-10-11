@@ -4,7 +4,8 @@ from flaskapp.travel_ai.guardrails.canary import embed_canary, generate_canary, 
 
 
 def test_generate_canary_is_unique_each_call():
-    assert generate_canary() != generate_canary()
+    first, second = generate_canary(), generate_canary()
+    assert first != second
 
 
 def test_embed_canary_includes_the_token():

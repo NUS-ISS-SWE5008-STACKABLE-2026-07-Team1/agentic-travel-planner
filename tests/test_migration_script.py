@@ -326,3 +326,54 @@ def test_reset_sequences_reports_every_table_whose_sequence_could_not_be_resolve
     assert len(failures) == 2
     assert any("agent_findings" in failure for failure in failures)
     assert any("plan_feedback" in failure for failure in failures)
+
+
+# --- main(): the destination DSN comes from the environment, never argv ------
+
+import scripts.migrate_sqlite_to_postgres as migrate  # noqa: E402
+
+SECRET_DSN = "postgresql://app:not-a-real-password@db.example:5432/postgres"
+
+
+def test_main_refuses_a_missing_destination_and_names_only_the_variable(monkeypatch, capsys):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert migrate.main([]) == 2
+    assert "$DATABASE_URL is not set to a Postgres DSN" in capsys.readouterr().out
+
+
+def test_main_never_prints_the_destination(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("MIGRATE_TO", SECRET_DSN)
+    assert migrate.main(["--destination-env", "MIGRATE_TO", "--source", str(tmp_path / "none.sqlite3")]) == 2
+    out = capsys.readouterr().out
+    assert "No SQLite database" in out
+    assert "not-a-real-password" not in out
+
+
+def test_main_dry_run_reads_the_dsn_from_the_environment(monkeypatch, capsys, tmp_path):
+    source_path = tmp_path / "a.sqlite3"
+    _fresh_sqlite(source_path).close()
+    opened = []
+
+    def fake_connect(dsn):
+        opened.append(dsn)
+        return _fresh_sqlite(tmp_path / "b.sqlite3")
+
+    monkeypatch.setattr(migrate, "connect", fake_connect)
+    monkeypatch.setenv("DATABASE_URL", SECRET_DSN)
+    assert migrate.main(["--source", str(source_path), "--dry-run"]) == 0
+    assert opened == [SECRET_DSN]
+    assert "not-a-real-password" not in capsys.readouterr().out
+
+
+def test_main_refuses_a_destination_that_already_has_rows(monkeypatch, tmp_path):
+    source_path = tmp_path / "a.sqlite3"
+    _fresh_sqlite(source_path).close()
+    destination = _fresh_sqlite(tmp_path / "b.sqlite3")
+    destination.execute("INSERT INTO users (id, email, password_hash) VALUES (1, 'a@b.c', 'h')")
+    destination.commit()
+    initialized = []
+    monkeypatch.setattr(migrate, "initialize", initialized.append)
+    monkeypatch.setattr(migrate, "connect", lambda dsn: destination)
+    monkeypatch.setenv("DATABASE_URL", SECRET_DSN)
+    assert migrate.main(["--source", str(source_path)]) == 2
+    assert initialized == [SECRET_DSN]

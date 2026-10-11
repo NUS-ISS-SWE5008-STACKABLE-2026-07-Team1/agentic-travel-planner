@@ -323,7 +323,7 @@ if (intentForm) {
     if (initialPrompt) {
       sessionStorage.removeItem("atlas-intake-prompt");
       promptInput.value = initialPrompt;
-      submitPrompt(initialPrompt);
+      submitPrompt(initialPrompt).catch((error) => showError(error.message));
     } else {
       bubble("intake-bubble-assistant", "Tell me what you have in mind. I’ll make sure the trip brief is complete before involving the specialist agents.");
       promptInput.focus();
@@ -333,6 +333,7 @@ if (intentForm) {
   // cleanup request with `keepalive`, so navigation must not wait for that
   // request to finish (or a slow response can leave the user stuck here).
   window.addEventListener("pagehide", () => {
-    if (!sessionHandoff) endSession();
+    // Best effort: the page is going away, so a failure has nowhere to show.
+    if (!sessionHandoff) endSession().catch(() => {});
   });
 }

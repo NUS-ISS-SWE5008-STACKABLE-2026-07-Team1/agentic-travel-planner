@@ -20,10 +20,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Dependencies first, so editing application code does not reinstall them.
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# The hash-locked file, not requirements.txt: the ranges in requirements.txt
+# would let the image pick up versions CI never tested and pip-audit never
+# scanned. --require-hashes refuses any file whose hash differs from the lock;
+# --only-binary refuses source distributions, whose setup scripts run code at
+# install time. Every locked package ships a wheel for this platform.
+COPY requirements.lock .
+RUN pip install --require-hashes --only-binary :all: -r requirements.lock
 
-COPY . .
+# Only what runs. Copying the whole context would also take anything a
+# .dockerignore line missed; naming the paths makes the image's contents a
+# reviewed list. scripts/ is needed by the agents role (scripts.a2a_server)
+# and by the local compose stub (scripts.ci_stub_provider).
+COPY app.py asgi.py gunicorn.conf.py ./
+COPY flaskapp/ flaskapp/
+COPY scripts/ scripts/
 
 # A fixed non-root uid, so Kubernetes can enforce runAsNonRoot. instance/ is
 # where TRACE_DIR and the SQLite fallback live, and it is excluded from the
