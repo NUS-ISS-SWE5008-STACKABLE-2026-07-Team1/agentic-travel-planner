@@ -83,11 +83,16 @@ def past_dates(extracted: ExtractedIntent, today: date | None = None) -> dict[st
 
 
 def past_date_hint(gone: date, today: date | None = None) -> str:
-    """Why this date is being asked for again. Names both dates, because
-    "already passed" is only convincing next to today's date."""
+    """Why this date is being asked for again.
+
+    Leads with the instruction rather than the diagnosis: the traveller needs
+    to know what to do, and the stale date is the justification for being asked
+    at all. Both dates appear, because "already passed" is only convincing next
+    to today's.
+    """
     return (
-        f"{gone.isoformat()} has already passed — today is "
-        f"{(today or date.today()).isoformat()}. Please give a future date."
+        f"Enter a future date — {gone.isoformat()} has already passed "
+        f"(today is {(today or date.today()).isoformat()})."
     )
 
 
@@ -228,6 +233,7 @@ def compute_gaps(
         MissingField(
             name=name, label=label, input=kind,
             hint=past_date_hint(past[name], today) if name in past else hint,
+            problem=name in past,
         )
         for name, label, kind, hint in SCALAR_FIELDS
         if getattr(extracted, name) is None
