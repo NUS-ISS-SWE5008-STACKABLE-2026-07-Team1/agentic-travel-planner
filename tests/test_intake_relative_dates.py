@@ -97,3 +97,63 @@ def test_a_refused_date_becomes_a_question_again():
     asked = {f.name for f in compute_gaps(intent)}
     assert "departure_date" in asked
     assert "return_date" in asked
+
+
+# --- saying WHY the date was refused ----------------------------------------
+#
+# Refusing silently was the whole complaint. A traveller who writes "departing
+# 2026-08-28" on 2026-10-11 gave a real date, clearly; being asked for it again
+# with no explanation reads as the system having ignored them, not as their
+# date having passed.
+
+def test_past_dates_are_reported_not_just_dropped():
+    from flaskapp.travel_ai.agents.orchestrator_agent.intake import past_dates
+
+    intent = ExtractedIntent(departure_date=date(2026, 8, 28),
+                             return_date=date(2026, 9, 2))
+    assert past_dates(intent, today=TODAY) == {
+        "departure_date": date(2026, 8, 28),
+        "return_date": date(2026, 9, 2),
+    }
+
+
+def test_a_future_date_is_not_reported_as_past():
+    from flaskapp.travel_ai.agents.orchestrator_agent.intake import past_dates
+
+    intent = ExtractedIntent(departure_date=TODAY + timedelta(days=5))
+    assert past_dates(intent, today=TODAY) == {}
+
+
+def test_the_question_explains_that_the_date_has_passed():
+    intent = ExtractedIntent(departure_date=date(2026, 8, 28),
+                             return_date=date(2026, 9, 2))
+    from flaskapp.travel_ai.agents.orchestrator_agent.intake import past_dates
+
+    gone = past_dates(intent, today=TODAY)
+    gaps = compute_gaps(drop_impossible_dates(intent, today=TODAY), past=gone)
+    hints = {f.name: f.hint for f in gaps}
+
+    assert "2026-08-28" in hints["departure_date"]
+    assert "2026-10-11" in hints["departure_date"], "says what today is, so the gap is obvious"
+    assert "2026-09-02" in hints["return_date"]
+
+
+def test_an_ordinary_gap_keeps_its_own_hint():
+    """The past-date hint replaces nothing else: a budget field still explains
+    itself."""
+    gaps = compute_gaps(ExtractedIntent(), past=None)
+    hints = {f.name: f.hint for f in gaps}
+    assert hints["budget"] and "Total for the trip" in hints["budget"]
+    assert hints["departure_date"] is None, "not past, just unstated"
+
+
+def test_the_past_hint_is_only_attached_to_the_field_it_belongs_to():
+    intent = ExtractedIntent(departure_date=date(2026, 8, 28),
+                             return_date=TODAY + timedelta(days=20))
+    from flaskapp.travel_ai.agents.orchestrator_agent.intake import past_dates
+
+    gone = past_dates(intent, today=TODAY)
+    gaps = compute_gaps(drop_impossible_dates(intent, today=TODAY), past=gone)
+    hints = {f.name: f.hint for f in gaps}
+    assert "2026-08-28" in hints["departure_date"]
+    assert "return_date" not in hints, "a valid return date is not a gap at all"

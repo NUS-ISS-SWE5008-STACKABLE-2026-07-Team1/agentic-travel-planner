@@ -57,6 +57,32 @@ def intake_instruction(today: date | None = None) -> str:
     return INTAKE_INSTRUCTION.format(today=(today or date.today()).isoformat())
 
 
+def past_dates(extracted: ExtractedIntent, today: date | None = None) -> dict[str, date]:
+    """Which stated dates have already gone, and what they were.
+
+    Separate from `drop_impossible_dates` because the caller needs both halves:
+    the date has to come OUT of the brief, and the traveller has to be told why.
+    Dropping it silently was the original complaint — someone who writes
+    "departing 2026-08-28" on 2026-10-11 gave a real date, and being asked for
+    it again with no explanation reads as the system having ignored them.
+    """
+    reference = today or date.today()
+    return {
+        field: value
+        for field in ("departure_date", "return_date")
+        if (value := getattr(extracted, field)) is not None and value < reference
+    }
+
+
+def past_date_hint(gone: date, today: date | None = None) -> str:
+    """Why this date is being asked for again. Names both dates, because
+    "already passed" is only convincing next to today's date."""
+    return (
+        f"{gone.isoformat()} has already passed — today is "
+        f"{(today or date.today()).isoformat()}. Please give a future date."
+    )
+
+
 def drop_impossible_dates(
     extracted: ExtractedIntent, today: date | None = None
 ) -> ExtractedIntent:
@@ -74,13 +100,8 @@ def drop_impossible_dates(
     Today itself is allowed — someone booking a flight for this evening is not
     making a mistake.
     """
-    reference = today or date.today()
-    dropped = {
-        field: None
-        for field in ("departure_date", "return_date")
-        if (value := getattr(extracted, field)) is not None and value < reference
-    }
-    return extracted.model_copy(update=dropped) if dropped else extracted
+    gone = past_dates(extracted, today)
+    return extracted.model_copy(update=dict.fromkeys(gone, None)) if gone else extracted
 
 
 def extract_intent(llm, prompt: str, callbacks: list | None = None) -> IntakeExtraction:
@@ -182,11 +203,24 @@ def resolve_place_countries(extracted: ExtractedIntent) -> ExtractedIntent:
     return extracted.model_copy(update=derived) if derived else extracted
 
 
-def compute_gaps(extracted: ExtractedIntent) -> list[MissingField]:
-    """Everything still needed before `TravelRequest` would accept this."""
+def compute_gaps(
+    extracted: ExtractedIntent,
+    past: dict[str, date] | None = None,
+    today: date | None = None,
+) -> list[MissingField]:
+    """Everything still needed before `TravelRequest` would accept this.
+
+    `past` comes from `past_dates`, taken BEFORE the guard dropped them: a
+    field that is missing because its date has gone gets a hint saying so,
+    instead of being asked again as though it had never been answered.
+    """
+    past = past or {}
     hotel_only = extracted.plan_scope == "hotel"
     missing = [
-        MissingField(name=name, label=label, input=kind, hint=hint)
+        MissingField(
+            name=name, label=label, input=kind,
+            hint=past_date_hint(past[name], today) if name in past else hint,
+        )
         for name, label, kind, hint in SCALAR_FIELDS
         if getattr(extracted, name) is None
         and not (hotel_only and name in JOURNEY_ONLY_FIELDS)

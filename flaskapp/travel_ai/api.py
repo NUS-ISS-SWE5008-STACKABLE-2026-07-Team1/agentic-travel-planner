@@ -24,7 +24,8 @@ from flaskapp.travel_ai.usage import TokenUsageCallback
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.agents.orchestrator_agent.intake import (
     clarification_question, compute_gaps, extract_intent, merge_answers,
-    drop_impossible_dates, merge_intents, resolve_place_countries, to_request_payload,
+    drop_impossible_dates, merge_intents, past_dates, resolve_place_countries,
+    to_request_payload,
 )
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
     ExtractedIntent, IntentResponse,
@@ -256,8 +257,11 @@ def _intent_response(extracted, question: str, request_id: str | None = None):
     # A date the model invented is refused here for the same reason: this is
     # the one place that both asks the questions and builds the payload, so a
     # dropped date becomes a question instead of a trip in the past.
+    # Taken before the guard drops them, so the gap can say which date had
+    # passed rather than asking again as though it were never answered.
+    gone = past_dates(extracted)
     extracted = drop_impossible_dates(extracted)
-    missing = compute_gaps(extracted)
+    missing = compute_gaps(extracted, past=gone)
     complete = not missing
     return IntentResponse(
         complete=complete,
