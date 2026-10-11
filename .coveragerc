@@ -1,0 +1,10 @@
+[run]
+# Every path in coverage.xml must start with flaskapp/ or scripts/, relative
+# to the repo root. Measuring each folder as its own --cov source made paths
+# relative to that folder, and SonarCloud then skipped files present in both
+# (e.g. __init__.py). `include` limits measurement to the two code folders;
+# it is ignored if `source` is set, so `source` is deliberately absent.
+include =
+    flaskapp/*
+    scripts/*
+relative_files = True
