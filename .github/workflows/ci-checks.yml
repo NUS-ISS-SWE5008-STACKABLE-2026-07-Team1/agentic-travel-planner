@@ -141,7 +141,9 @@ jobs:
   tests:
     name: Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 15, not 10: coverage tracing slows pytest down, and the SonarCloud
+    # upload adds a minute or two.
+    timeout-minutes: 15
 
     # ---- The deployed dialect --------------------------------------------
     # Ported from the retired security.yml, where Subbu added it alongside the
@@ -171,7 +173,10 @@ jobs:
           --health-retries 5
 
     steps:
+      # Full history, so SonarCloud can tell new code from old (blame data).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -198,10 +203,17 @@ jobs:
       # Unset locally, so a developer's run stays offline and SQLite-only; set
       # here, so the dialect that ships is never untested. psycopg is already
       # in requirements.txt.
+      #
+      # --cov writes coverage.xml for the SonarCloud step below; what is
+      # measured, and the repo-relative paths SonarCloud needs, are in
+      # .coveragerc. Coverage is
+      # measured, never enforced here: no --cov-fail-under, so it cannot block.
       - name: Run pytest
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/travel_planner_test
-        run: python -m pytest -q -m "not live" --junitxml=pytest-report.xml
+        run: >-
+          python -m pytest -q -m "not live" --junitxml=pytest-report.xml
+          --cov --cov-report=xml
 
       # Guards the port itself. Drop the service or the env var and the
       # Postgres tests go back to skipping in silence; this turns that into a
@@ -245,6 +257,21 @@ jobs:
           TEST_RESULTS_DATABASE_URL: ${{ secrets.TEST_RESULTS_DATABASE_URL }}
           TEST_RESULTS_DATABASE_SCHEMA: Travelplanner_schema
         run: python scripts/log_test_results.py pytest-report.xml --job tests
+
+      # ADVISORY. Uploads the code and coverage.xml to SonarCloud
+      # (sonar-project.properties). continue-on-error because this job is a
+      # required check: a SonarCloud outage, a failed quality gate or a missing
+      # token must never block a merge. Skipped on fork PRs, which get no
+      # secrets. Needs Automatic Analysis switched OFF in SonarCloud.
+      - name: SonarCloud scan
+        if: >-
+          always() && hashFiles('coverage.xml') != '' &&
+          (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
+        continue-on-error: true
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   e2e:
     name: E2E (Playwright)

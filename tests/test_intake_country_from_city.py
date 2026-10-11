@@ -148,8 +148,11 @@ def test_the_endpoint_resolves_before_asking_or_building():
     source = Path("flaskapp/travel_ai/api.py").read_text(encoding="utf-8")
     body = source[source.index("def _intent_response("):]
     body = body[:body.index("\n\n\n")] if "\n\n\n" in body else body
-    resolve_at = body.index("resolve_place_countries(extracted)")
-    gaps_at = body.index("compute_gaps(extracted)")
-    payload_at = body.index("to_request_payload(extracted)")
+    # Matched on the call, not the full argument list: both now take extra
+    # arguments, and a test that breaks when one gains a keyword is testing
+    # the spelling rather than the order.
+    resolve_at = body.index("resolve_place_countries(extracted")
+    gaps_at = body.index("compute_gaps(extracted")
+    payload_at = body.index("to_request_payload(extracted")
     assert resolve_at < gaps_at, "resolution must precede the gap list"
     assert resolve_at < payload_at, "resolution must precede the payload"
