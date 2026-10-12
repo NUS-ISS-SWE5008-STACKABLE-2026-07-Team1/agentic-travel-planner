@@ -24,8 +24,8 @@ surfaces before anything is copied.
     DATABASE_URL=... python scripts/migrate_sqlite_to_postgres.py \
         --source instance/travel_planner.sqlite3
 
-The destination is read from an environment variable (DATABASE_URL, or the
-one --destination-env names), never from the command line: a DSN carries the
+The destination is read from the DATABASE_URL environment variable, never
+from the command line: a DSN carries the
 password, and an argument would leave it in shell history and in the process
 list for anyone on the machine to read.
 """
@@ -300,11 +300,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default="instance/travel_planner.sqlite3")
     parser.add_argument(
-        "--destination-env", default="DATABASE_URL",
-        help="Name of the environment variable holding the destination "
-             "Postgres DSN (default: DATABASE_URL).",
-    )
-    parser.add_argument(
         "--dry-run", action="store_true",
         help="Connect to source and destination and report source counts "
              "plus any source-only-column schema drift, without writing "
@@ -318,10 +313,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     arguments = parser.parse_args(argv)
 
-    destination_url = os.environ.get(arguments.destination_env, "")
+    destination_url = os.environ.get("DATABASE_URL", "")
     if not is_postgres(destination_url):
         # Name the variable, never print its value: it holds the password.
-        print(f"${arguments.destination_env} is not set to a Postgres DSN")
+        print("$DATABASE_URL is not set to a Postgres DSN")
         return 2
     if not Path(arguments.source).is_file():
         print(f"No SQLite database at {arguments.source}")

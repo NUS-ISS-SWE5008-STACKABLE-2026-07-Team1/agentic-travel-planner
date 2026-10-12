@@ -18,7 +18,11 @@ changes.
 Usage (server must already be running on :5000):
     python app.py                       # in another terminal
     python scripts/e2e_test.py
-    python scripts/e2e_test.py --base-url http://127.0.0.1:5000
+    E2E_BASE_URL=https://staging.example python scripts/e2e_test.py
+
+The target comes from E2E_BASE_URL (default http://127.0.0.1:5000), like the
+login it uses, not from an argument, and must be https:// or a loopback
+http:// address: the script sends the demo password to whatever it targets.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import sys
 import time
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 
@@ -39,6 +44,7 @@ from flaskapp.travel_ai.agents.flight_agent.seed_data import SEED_FLIGHT_INVENTO
 
 DEMO_EMAIL = os.getenv("E2E_LOGIN_EMAIL", "").strip()
 DEMO_PASSWORD = os.getenv("E2E_LOGIN_PASSWORD", "")
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 POLL_TIMEOUT_SECONDS = 300
 POLL_INTERVAL_SECONDS = 3
 
@@ -271,10 +277,26 @@ def scenario_audit_trail(session, base_url, grounded_body: dict | None) -> None:
     check("hash chain verifies (trace not tampered with)", verify_hash_chain(path))
 
 
+def base_url_from(value: str) -> str:
+    """scheme://host[:port] for an https or loopback-http target, else SystemExit.
+
+    Rebuilt from its parts, so a path, query or user:password@ in the
+    variable cannot ride along into every request.
+    """
+    parts = urlsplit(value.strip())
+    host = parts.hostname or ""
+    secure = parts.scheme == "https" and host
+    local = parts.scheme == "http" and host in LOOPBACK_HOSTS
+    if not (secure or local):
+        raise SystemExit("E2E_BASE_URL must be https://... or http:// on 127.0.0.1/localhost")
+    netloc = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{netloc}" + (f":{parts.port}" if parts.port else "")
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default="http://127.0.0.1:5000")
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.parse_args()
+    base_url = base_url_from(os.getenv("E2E_BASE_URL", "http://127.0.0.1:5000"))
 
     if not DEMO_EMAIL or not DEMO_PASSWORD:
         parser.error("E2E_LOGIN_EMAIL and E2E_LOGIN_PASSWORD must be set")
@@ -283,21 +305,21 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     print("END-TO-END SYSTEM TEST — real server, real model, real database")
-    print(f"target: {args.base_url}")
+    print(f"target: {base_url}")
 
     try:
-        session = login(args.base_url)
+        session = login(base_url)
     except requests.exceptions.ConnectionError:
-        print(f"\nCannot reach {args.base_url}. Start the server first: python app.py")
+        print(f"\nCannot reach {base_url}. Start the server first: python app.py")
         return 2
     print(f"authenticated as {DEMO_EMAIL}")
 
-    grounded = scenario_grounded(session, args.base_url)
-    scenario_fallback(session, args.base_url)
-    scenario_bias(session, args.base_url)
-    scenario_injection(session, args.base_url)
-    scenario_validation(session, args.base_url)
-    scenario_audit_trail(session, args.base_url, grounded)
+    grounded = scenario_grounded(session, base_url)
+    scenario_fallback(session, base_url)
+    scenario_bias(session, base_url)
+    scenario_injection(session, base_url)
+    scenario_validation(session, base_url)
+    scenario_audit_trail(session, base_url, grounded)
 
     banner("SUMMARY")
     failed = [name for name, passed, _ in results if not passed]

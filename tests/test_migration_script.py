@@ -342,8 +342,8 @@ def test_main_refuses_a_missing_destination_and_names_only_the_variable(monkeypa
 
 
 def test_main_never_prints_the_destination(monkeypatch, capsys, tmp_path):
-    monkeypatch.setenv("MIGRATE_TO", SECRET_DSN)
-    assert migrate.main(["--destination-env", "MIGRATE_TO", "--source", str(tmp_path / "none.sqlite3")]) == 2
+    monkeypatch.setenv("DATABASE_URL", SECRET_DSN)
+    assert migrate.main(["--source", str(tmp_path / "none.sqlite3")]) == 2
     out = capsys.readouterr().out
     assert "No SQLite database" in out
     assert "not-a-real-password" not in out
