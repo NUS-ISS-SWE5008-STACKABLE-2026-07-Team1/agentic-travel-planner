@@ -91,8 +91,8 @@ jobs:
       # under a protected-attribute change), which is what keeps this useful
       # rather than merely noisy — but "useful" still is not "gate-worthy".
       #
-      # Verified against scripts/e2e_test.py: its only argument is --base-url,
-      # already defaulting to http://127.0.0.1:5000, so no flags are needed.
+      # scripts/e2e_test.py takes its target from E2E_BASE_URL, defaulting to
+      # http://127.0.0.1:5000, so no flags or variables are needed here.
       # It runs 6 scenarios (grounded, fallback, bias, injection, validation,
       # audit trail) and exits 1 if any check fails — which continue-on-error
       # deliberately swallows.
