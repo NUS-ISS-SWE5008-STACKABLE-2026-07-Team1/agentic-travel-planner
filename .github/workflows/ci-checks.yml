@@ -141,8 +141,7 @@ jobs:
   tests:
     name: Tests
     runs-on: ubuntu-latest
-    # 15, not 10: coverage tracing slows pytest down, and the SonarCloud
-    # upload adds a minute or two.
+    # 15, not 10: coverage tracing slows pytest down.
     timeout-minutes: 15
 
     # ---- The deployed dialect --------------------------------------------
@@ -258,20 +257,14 @@ jobs:
           TEST_RESULTS_DATABASE_SCHEMA: Travelplanner_schema
         run: python scripts/log_test_results.py pytest-report.xml --job tests
 
-      # ADVISORY. Uploads the code and coverage.xml to SonarCloud
-      # (sonar-project.properties). continue-on-error because this job is a
-      # required check: a SonarCloud outage, a failed quality gate or a missing
-      # token must never block a merge. Skipped on fork PRs, which get no
-      # secrets. Needs Automatic Analysis switched OFF in SonarCloud.
-      - name: SonarCloud scan
-        if: >-
-          always() && hashFiles('coverage.xml') != '' &&
-          (github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name == github.repository)
-        continue-on-error: true
-        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      # For the `sonar` job below, which needs both coverage reports.
+      - name: Upload Python coverage
+        if: always() && hashFiles('coverage.xml') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-python
+          path: coverage.xml
+          retention-days: 1
 
   e2e:
     name: E2E (Playwright)
@@ -337,7 +330,11 @@ jobs:
       # because a failure used to leave only an assertion message: on
       # 2026-09-15 "Planning stopped." had to be reproduced on a laptop to see
       # what the page actually did.
+      # E2E_JS_COVERAGE: also record which browser JS ran, as LCOV for
+      # SonarCloud (tests/e2e/js_coverage.py). Without it the JS counts as 0%.
       - name: Run Playwright E2E tests
+        env:
+          E2E_JS_COVERAGE: coverage-js.lcov
         run: >-
           python -m pytest tests/e2e -m e2e --browser chromium -q
           --junitxml=e2e-report.xml
@@ -377,6 +374,49 @@ jobs:
           TEST_RESULTS_DATABASE_URL: ${{ secrets.TEST_RESULTS_DATABASE_URL }}
           TEST_RESULTS_DATABASE_SCHEMA: Travelplanner_schema
         run: python scripts/log_test_results.py e2e-report.xml --job e2e
+
+      - name: Upload JS coverage
+        if: always() && hashFiles('coverage-js.lcov') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-js
+          path: coverage-js.lcov
+          retention-days: 1
+
+  # ADVISORY. Uploads the code plus both coverage reports to SonarCloud
+  # (sonar-project.properties): Python from `tests`, browser JS from `e2e`.
+  # Its own job because the two reports come from two parallel jobs. Not a
+  # required check, and continue-on-error, so a SonarCloud outage, a failed
+  # quality gate or a missing token never blocks a merge. Runs even if a test
+  # job failed, with whatever coverage exists. Skipped on fork PRs, which get
+  # no secrets. Needs Automatic Analysis switched OFF in SonarCloud.
+  sonar:
+    name: SonarCloud
+    needs: [tests, e2e]
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Full history, so SonarCloud can tell new code from old (blame data).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      - name: SonarCloud scan
+        continue-on-error: true
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   sast:
     name: SAST
