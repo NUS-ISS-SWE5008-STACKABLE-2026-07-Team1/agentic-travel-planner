@@ -322,7 +322,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No SQLite database at {arguments.source}")
         return 2
 
-    source = sqlite3.connect(arguments.source)
+    # NOSONAR on the next line: "connection string injection" is a false
+    # positive. sqlite3.connect() without uri=True treats --source purely as a
+    # file name (checked to exist above), so it cannot carry connection options.
+    source = sqlite3.connect(arguments.source)  # NOSONAR
     source.row_factory = sqlite3.Row
 
     if arguments.dry_run:
