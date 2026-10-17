@@ -28,6 +28,14 @@ Record ages and genders for specific travellers in the order they are mentioned,
 using null for any position you were not told about. An unstated gender is null, never
 "prefer_not_to_say" - that value means the traveller chose it.
 
+You are shown one message, never the travellers recorded earlier, so a position
+you say nothing about keeps whatever was already recorded for it. When this
+message ADDS someone to an existing group ("add a third traveller", "my mother
+is joining us"), that person goes in the LAST position, with null for every
+position before them, so the earlier travellers keep their own details:
+"add a third traveller, a 5-year-old boy" is travellers=3,
+traveller_ages=[null, null, 5], traveller_genders=[null, null, "male"].
+
 Accessibility needs are optional. Capture them accurately when the traveller
 mentions them, but if they say nothing about accessibility, leave the fields
 empty and do not ask about accessibility in `question`.

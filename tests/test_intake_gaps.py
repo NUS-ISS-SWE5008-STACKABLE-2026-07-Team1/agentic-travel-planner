@@ -172,3 +172,46 @@ def test_clarification_question_names_the_deterministic_gaps():
     question = clarification_question(compute_gaps(ExtractedIntent(destination="Tokyo")))
     assert "flying from" in question.lower()
     assert "departure date" in question.lower()
+
+
+def test_adding_a_traveller_keeps_the_earlier_travellers_details():
+    """The "it forgot the conversation" report, as a test.
+
+    `extract_intent` shows the model one message, so a turn that adds a third
+    traveller comes back as `[None, None, 5]` — the child it was told about,
+    and placeholders for two adults it never saw. Replacing the stored list
+    with that erased answers the traveller had already given, and the card
+    asked for traveller 1's and traveller 2's age and gender all over again.
+    """
+    current = ExtractedIntent(
+        origin="Singapore", destination="Japan", destination_city="Tokyo",
+        departure_date="2026-10-20", return_date="2026-10-23", budget=5000,
+        travellers=2, traveller_ages=[30, 28], traveller_genders=["male", "female"],
+    )
+    update = ExtractedIntent(
+        travellers=3, traveller_ages=[None, None, 5],
+        traveller_genders=[None, None, "male"],
+    )
+
+    merged = merge_intents(current, update)
+
+    assert merged.traveller_ages == [30, 28, 5]
+    assert merged.traveller_genders == ["male", "female", "male"]
+    assert compute_gaps(merged) == []
+
+
+def test_a_stated_value_still_corrects_an_earlier_one():
+    """Slot-by-slot merging must not freeze the first answer in place."""
+    current = ExtractedIntent(travellers=2, traveller_ages=[30, 28],
+                              traveller_genders=["male", "female"])
+    merged = merge_intents(current, ExtractedIntent(traveller_ages=[31]))
+    assert merged.traveller_ages == [31, 28]
+    assert merged.traveller_genders == ["male", "female"]
+
+
+def test_dropping_a_traveller_truncates_rather_than_leaving_a_ghost():
+    current = ExtractedIntent(travellers=3, traveller_ages=[30, 28, 5],
+                              traveller_genders=["male", "female", "male"])
+    merged = merge_intents(current, ExtractedIntent(travellers=2))
+    assert merged.traveller_ages == [30, 28]
+    assert merged.traveller_genders == ["male", "female"]
