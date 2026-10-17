@@ -1942,8 +1942,30 @@ def init_db_command() -> None:
     click.echo(f"Initialized database at {current_app.config['DATABASE']}")
 
 
+def describe_target(target: Path | str) -> str:
+    """Where rows written by this process will land, safe to log.
+
+    Never the DSN: it carries the host and, on some providers, the password.
+    Postgres is named by schema instead, because `DATABASE_SCHEMA` is the whole
+    difference between Render's `Travelplanner_schema` and GKE's
+    `travelplanner_gke`, and looking in the wrong one makes a working
+    deployment look like it is recording nothing.
+    """
+    if is_postgres(target):
+        return f"Postgres, schema {DATABASE_SCHEMA or 'server default (public)'}"
+    return (
+        f"SQLite file {Path(target)} — rows stay on this machine or container "
+        "and never reach Postgres. Set DATABASE_URL to change that."
+    )
+
+
 def init_app(app: Flask) -> None:
     app.cli.add_command(init_db_command)
+    # One line, once, at startup. Without it the SQLite fallback in `Config`
+    # (DATABASE_URL unset or blank) is completely silent: the app works, the
+    # model is called, and the rows simply are not in the database anyone is
+    # looking at.
+    app.logger.info("Database target: %s", describe_target(app.config["DATABASE"]))
     initialize(app.config["DATABASE"])
     seed_login_user(app.config["DATABASE"], app.config["LOGIN_EMAIL"],
                     app.config["LOGIN_PASSWORD_HASH"])

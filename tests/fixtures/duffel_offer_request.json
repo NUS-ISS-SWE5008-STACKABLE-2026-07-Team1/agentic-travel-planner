@@ -1,0 +1,127 @@
+{
+  "_comment": "Trimmed Duffel v2 POST /air/offer_requests?return_offers=true response. Two passengers, two slices, LHR<->JFK — the search Duffel documents as reliably served by its Duffel Airways sandbox airline. Fields not consumed by providers/duffel.py have been dropped; the shape and naming of those that are consumed match the live API. Offer 1 is direct both ways; offer 2 connects via BOS outbound, which is what exercises multi-segment collapsing and the stops count.",
+  "data": {
+    "id": "orq_0000AfakeOfferRequest",
+    "live_mode": false,
+    "cabin_class": "economy",
+    "passengers": [
+      { "id": "pas_0000Afake1", "age": 34 },
+      { "id": "pas_0000Afake2", "age": 8 }
+    ],
+    "offers": [
+      {
+        "id": "off_0000AfakeDirect",
+        "total_amount": "1200.00",
+        "total_currency": "GBP",
+        "expires_at": "2026-08-08T12:30:00Z",
+        "owner": { "iata_code": "ZZ", "name": "Duffel Airways" },
+        "slices": [
+          {
+            "id": "sli_0000AfakeOut",
+            "duration": "PT7H10M",
+            "origin": { "iata_code": "LHR", "name": "Heathrow", "time_zone": "Europe/London" },
+            "destination": { "iata_code": "JFK", "name": "John F. Kennedy", "time_zone": "America/New_York" },
+            "segments": [
+              {
+                "id": "seg_0000AfakeOut1",
+                "departing_at": "2026-09-01T08:00:00",
+                "arriving_at": "2026-09-01T11:10:00",
+                "duration": "PT7H10M",
+                "origin": { "iata_code": "LHR", "time_zone": "Europe/London" },
+                "destination": { "iata_code": "JFK", "time_zone": "America/New_York" },
+                "marketing_carrier": { "iata_code": "ZZ", "name": "Duffel Airways" },
+                "marketing_carrier_flight_number": "4321",
+                "operating_carrier": { "iata_code": "ZZ", "name": "Duffel Airways" },
+                "passengers": [
+                  { "passenger_id": "pas_0000Afake1", "cabin_class": "economy", "cabin_class_marketing_name": "Economy Basic" },
+                  { "passenger_id": "pas_0000Afake2", "cabin_class": "economy", "cabin_class_marketing_name": "Economy Basic" }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "sli_0000AfakeRet",
+            "duration": "PT7H0M",
+            "origin": { "iata_code": "JFK", "name": "John F. Kennedy", "time_zone": "America/New_York" },
+            "destination": { "iata_code": "LHR", "name": "Heathrow", "time_zone": "Europe/London" },
+            "segments": [
+              {
+                "id": "seg_0000AfakeRet1",
+                "departing_at": "2026-09-05T18:00:00",
+                "arriving_at": "2026-09-06T06:00:00",
+                "duration": "PT7H0M",
+                "origin": { "iata_code": "JFK", "time_zone": "America/New_York" },
+                "destination": { "iata_code": "LHR", "time_zone": "Europe/London" },
+                "marketing_carrier": { "iata_code": "ZZ", "name": "Duffel Airways" },
+                "marketing_carrier_flight_number": "4322",
+                "operating_carrier": { "iata_code": "ZZ", "name": "Duffel Airways" },
+                "passengers": [
+                  { "passenger_id": "pas_0000Afake1", "cabin_class": "economy" },
+                  { "passenger_id": "pas_0000Afake2", "cabin_class": "economy" }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "off_0000AfakeConnect",
+        "total_amount": "880.00",
+        "total_currency": "GBP",
+        "expires_at": "2026-08-08T12:30:00Z",
+        "owner": { "iata_code": "ZZ", "name": "Duffel Airways" },
+        "slices": [
+          {
+            "id": "sli_0000AfakeOut2",
+            "duration": "PT9H45M",
+            "origin": { "iata_code": "LHR", "time_zone": "Europe/London" },
+            "destination": { "iata_code": "JFK", "time_zone": "America/New_York" },
+            "segments": [
+              {
+                "id": "seg_0000AfakeOut2a",
+                "departing_at": "2026-09-01T09:30:00",
+                "arriving_at": "2026-09-01T11:45:00",
+                "duration": "PT7H15M",
+                "origin": { "iata_code": "LHR", "time_zone": "Europe/London" },
+                "destination": { "iata_code": "BOS", "time_zone": "America/New_York" },
+                "marketing_carrier": { "iata_code": "ZZ", "name": "Duffel Airways" },
+                "marketing_carrier_flight_number": "5100",
+                "passengers": [{ "passenger_id": "pas_0000Afake1", "cabin_class": "premium_economy" }]
+              },
+              {
+                "id": "seg_0000AfakeOut2b",
+                "departing_at": "2026-09-01T13:45:00",
+                "arriving_at": "2026-09-01T15:15:00",
+                "duration": "PT1H30M",
+                "origin": { "iata_code": "BOS", "time_zone": "America/New_York" },
+                "destination": { "iata_code": "JFK", "time_zone": "America/New_York" },
+                "marketing_carrier": { "iata_code": "ZZ", "name": "Duffel Airways" },
+                "marketing_carrier_flight_number": "5101",
+                "passengers": [{ "passenger_id": "pas_0000Afake1", "cabin_class": "premium_economy" }]
+              }
+            ]
+          },
+          {
+            "id": "sli_0000AfakeRet2",
+            "duration": "PT7H5M",
+            "origin": { "iata_code": "JFK", "time_zone": "America/New_York" },
+            "destination": { "iata_code": "LHR", "time_zone": "Europe/London" },
+            "segments": [
+              {
+                "id": "seg_0000AfakeRet2a",
+                "departing_at": "2026-09-05T21:30:00",
+                "arriving_at": "2026-09-06T09:35:00",
+                "duration": "PT7H5M",
+                "origin": { "iata_code": "JFK", "time_zone": "America/New_York" },
+                "destination": { "iata_code": "LHR", "time_zone": "Europe/London" },
+                "marketing_carrier": { "iata_code": "ZZ", "name": "Duffel Airways" },
+                "marketing_carrier_flight_number": "5102",
+                "passengers": [{ "passenger_id": "pas_0000Afake1", "cabin_class": "economy" }]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

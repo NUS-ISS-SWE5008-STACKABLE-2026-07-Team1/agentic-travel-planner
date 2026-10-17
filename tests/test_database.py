@@ -1,5 +1,6 @@
 import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 from werkzeug.security import generate_password_hash
@@ -599,3 +600,22 @@ def test_repointing_the_eval_fk_keeps_rows_indexes_and_cascades(tmp_path):
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_legacy_eval_run_type'"
         ).fetchone()[0] == 1, "indexes died with the DROP and must be recreated"
         assert db.execute("SELECT COUNT(*) FROM planning_jobs").fetchone()[0] == jobs_before
+
+
+def test_describe_target_names_the_backend_without_leaking_the_dsn():
+    """The startup line must be enough to answer "where did my rows go?".
+
+    A blank DATABASE_URL falls back to SQLite silently (config.py), which is
+    what makes a locally-run test look like broken Supabase logging. The line
+    must never carry the DSN itself: it holds the host, and on Supabase the
+    password too.
+    """
+    from flaskapp.database import describe_target
+
+    sqlite_line = describe_target(Path("instance/travel_planner.sqlite3"))
+    assert "SQLite" in sqlite_line and "DATABASE_URL" in sqlite_line
+
+    dsn = "postgresql://user:hunter2@db.example.supabase.com:5432/postgres"
+    postgres_line = describe_target(dsn)
+    assert "Postgres" in postgres_line
+    assert "hunter2" not in postgres_line and "db.example.supabase.com" not in postgres_line
