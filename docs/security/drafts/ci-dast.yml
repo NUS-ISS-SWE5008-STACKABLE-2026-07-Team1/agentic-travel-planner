@@ -93,7 +93,7 @@ jobs:
           echo "LOGIN_PASSWORD_HASH=$password_hash" >> "$GITHUB_ENV"
 
       # ---- Stub provider ---------------------------------------------------
-      # See scripts/ci_stub_provider.py (also a draft in this folder).
+      # See scripts/ci_stub_provider.py.
       # UNVERIFIED: this is the piece item 14 says to budget an afternoon for.
       - name: Start stub LLM provider
         run: |

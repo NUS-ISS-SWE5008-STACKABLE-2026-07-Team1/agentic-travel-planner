@@ -24,9 +24,10 @@ x-image: &image
   pull_policy: never
 
 # Values here are throwaway by construction — a stub key, a disposable
-# database — so they can sit in a tracked file. Real ones never do.
+# database — so they can sit in a tracked file. Real ones never do. The
+# database has no password at all (see `db` below) rather than a known one.
 x-app-env: &app-env
-  DATABASE_URL: postgresql://travel:travel@db:5432/travel
+  DATABASE_URL: postgresql://travel@db:5432/travel
   SECRET_KEY: local-compose-only-not-a-secret
   LLM_PROVIDER: openai_compatible
   LLM_API_KEY: stub-not-a-real-key
@@ -43,9 +44,12 @@ x-app-env: &app-env
 services:
   db:
     image: postgres:16-alpine
+    # No published port: only the containers on this compose network can
+    # reach it, so it trusts them instead of sharing a password written in
+    # this file. A disposable database for one laptop, never for a server.
     environment:
       POSTGRES_USER: travel
-      POSTGRES_PASSWORD: travel
+      POSTGRES_HOST_AUTH_METHOD: trust
       POSTGRES_DB: travel
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U travel -d travel"]

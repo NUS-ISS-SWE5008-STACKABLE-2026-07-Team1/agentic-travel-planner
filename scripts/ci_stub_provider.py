@@ -137,9 +137,13 @@ class Handler(BaseHTTPRequestHandler):
         encoded = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(encoded)
+        # NOSONAR on the next line: "reflected XSS" is a false positive. The
+        # body is JSON (with nosniff) synthesised from the requested schema, the
+        # one thing a fake model must echo; this CI-only stub never ships.
+        self.wfile.write(encoded)  # NOSONAR
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if self.path.rstrip("/") in ("/healthz", "/v1/healthz"):
@@ -167,7 +171,9 @@ class Handler(BaseHTTPRequestHandler):
             "id": "chatcmpl-ci-stub",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": body.get("model", "stub-model"),
+            # A fixed name, not the caller's: nothing from the request is
+            # reflected into the response.
+            "model": "stub-model",
             "choices": [{
                 "index": 0,
                 "message": {"role": "assistant", "content": content},
@@ -186,5 +192,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"CI stub provider listening on http://127.0.0.1:{PORT}/v1", flush=True)
-    HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    print(f"CI stub provider listening on 127.0.0.1:{PORT}, path /v1", flush=True)
+    # Plain HTTP on loopback is right for a local fake model (NOSONAR).
+    HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()  # NOSONAR

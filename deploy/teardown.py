@@ -22,7 +22,6 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 
 PROJECT = os.getenv("GCP_PROJECT_ID", "").strip()
 REGION = os.getenv("GCP_REGION", "us-west1").strip()
@@ -171,4 +170,4 @@ def _has_binding(member: str, role: str) -> bool:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

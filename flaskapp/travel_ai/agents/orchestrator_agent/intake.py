@@ -25,9 +25,17 @@ DEFAULT_CURRENCY = "SGD"
 # The required set of TravelRequest, as questions. Order is the order asked.
 SCALAR_FIELDS: tuple[tuple[str, str, str, str | None], ...] = (
     # No trailing "?" — `clarification_question` lowercases these labels into a
-    # list ("could you share what to plan, flying from, ..."), so a label that
-    # ends a sentence terminates that one mid-way.
-    ("plan_scope", "What to plan", "scope", None),
+    # list ("could you share flying from, destination country, ..."), so a label
+    # that ends a sentence terminates that one mid-way.
+    #
+    # `plan_scope` is deliberately NOT here. A traveller who says nothing about
+    # scope wants the whole trip planned, and every layer below already treats
+    # a null that way: `to_request_payload` sends `plan_scope or "both"`,
+    # `TravelRequest` defaults to it, and `dispatch._BY_SCOPE.get` falls back to
+    # it. Asking cost a turn on the common case to confirm what the defaults
+    # would have produced anyway. An explicit "just book me a hotel" is still
+    # recorded by the extraction prompt, and the structured form still offers
+    # all three as option buttons -- the choice is kept, the question is not.
     ("origin", "Flying from", "country", None),
     ("destination", "Destination country", "country", None),
     ("destination_city", "Destination city", "text", "The city you will be staying in"),
@@ -57,6 +65,37 @@ def intake_instruction(today: date | None = None) -> str:
     return INTAKE_INSTRUCTION.format(today=(today or date.today()).isoformat())
 
 
+def past_dates(extracted: ExtractedIntent, today: date | None = None) -> dict[str, date]:
+    """Which stated dates have already gone, and what they were.
+
+    Separate from `drop_impossible_dates` because the caller needs both halves:
+    the date has to come OUT of the brief, and the traveller has to be told why.
+    Dropping it silently was the original complaint — someone who writes
+    "departing 2026-08-28" on 2026-10-11 gave a real date, and being asked for
+    it again with no explanation reads as the system having ignored them.
+    """
+    reference = today or date.today()
+    return {
+        field: value
+        for field in ("departure_date", "return_date")
+        if (value := getattr(extracted, field)) is not None and value < reference
+    }
+
+
+def past_date_hint(gone: date, today: date | None = None) -> str:
+    """Why this date is being asked for again.
+
+    Leads with the instruction rather than the diagnosis: the traveller needs
+    to know what to do, and the stale date is the justification for being asked
+    at all. Both dates appear, because "already passed" is only convincing next
+    to today's.
+    """
+    return (
+        f"Enter a future date — {gone.isoformat()} has already passed "
+        f"(today is {(today or date.today()).isoformat()})."
+    )
+
+
 def drop_impossible_dates(
     extracted: ExtractedIntent, today: date | None = None
 ) -> ExtractedIntent:
@@ -74,13 +113,8 @@ def drop_impossible_dates(
     Today itself is allowed — someone booking a flight for this evening is not
     making a mistake.
     """
-    reference = today or date.today()
-    dropped = {
-        field: None
-        for field in ("departure_date", "return_date")
-        if (value := getattr(extracted, field)) is not None and value < reference
-    }
-    return extracted.model_copy(update=dropped) if dropped else extracted
+    gone = past_dates(extracted, today)
+    return extracted.model_copy(update=dict.fromkeys(gone, None)) if gone else extracted
 
 
 def extract_intent(llm, prompt: str, callbacks: list | None = None) -> IntakeExtraction:
@@ -182,11 +216,25 @@ def resolve_place_countries(extracted: ExtractedIntent) -> ExtractedIntent:
     return extracted.model_copy(update=derived) if derived else extracted
 
 
-def compute_gaps(extracted: ExtractedIntent) -> list[MissingField]:
-    """Everything still needed before `TravelRequest` would accept this."""
+def compute_gaps(
+    extracted: ExtractedIntent,
+    past: dict[str, date] | None = None,
+    today: date | None = None,
+) -> list[MissingField]:
+    """Everything still needed before `TravelRequest` would accept this.
+
+    `past` comes from `past_dates`, taken BEFORE the guard dropped them: a
+    field that is missing because its date has gone gets a hint saying so,
+    instead of being asked again as though it had never been answered.
+    """
+    past = past or {}
     hotel_only = extracted.plan_scope == "hotel"
     missing = [
-        MissingField(name=name, label=label, input=kind, hint=hint)
+        MissingField(
+            name=name, label=label, input=kind,
+            hint=past_date_hint(past[name], today) if name in past else hint,
+            problem=name in past,
+        )
         for name, label, kind, hint in SCALAR_FIELDS
         if getattr(extracted, name) is None
         and not (hotel_only and name in JOURNEY_ONLY_FIELDS)

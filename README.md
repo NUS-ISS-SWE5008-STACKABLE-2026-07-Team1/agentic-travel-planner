@@ -403,8 +403,10 @@ restricted application role may not.
 Copy the existing local data across once:
 
 ```powershell
-python scripts/migrate_sqlite_to_postgres.py --destination $env:DATABASE_URL --dry-run
-python scripts/migrate_sqlite_to_postgres.py --destination $env:DATABASE_URL
+# Reads the destination from $env:DATABASE_URL, never from an argument,
+# so the password stays out of shell history.
+python scripts/migrate_sqlite_to_postgres.py --dry-run
+python scripts/migrate_sqlite_to_postgres.py
 ```
 
 The script is idempotent and prints per-table counts, exiting non-zero if any
