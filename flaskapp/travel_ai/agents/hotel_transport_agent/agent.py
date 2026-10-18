@@ -145,8 +145,8 @@ def _hotel_candidate_to_option(
         name=candidate.name,
         description=(
             f"{candidate.room_type} room at {candidate.name}, "
-            f"{candidate.distance_to_center_km:.1f} km from centre. "
-            f"{candidate.star_rating or 'N/A'} star rating."
+            + (f"{candidate.distance_to_center_km:.1f} km from centre. " if candidate.distance_to_center_km is not None else "")
+            + f"{candidate.star_rating or 'N/A'} star rating."
         ),
         estimated_cost=candidate.estimated_total_cost,
         currency=candidate.currency or "SGD",

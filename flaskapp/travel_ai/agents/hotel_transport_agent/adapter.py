@@ -57,12 +57,22 @@ def _needs_wheelchair(accessibility_needs: list[str]) -> bool:
     )
 
 
-def derive_hotel_preferences(preferences: list[str]) -> HotelPreferences:
+_WHEELCHAIR_HINTS = ("wheelchair",)
+
+
+def derive_hotel_preferences(preferences: list[str], accessibility_needs: list[str] | None = None) -> HotelPreferences:
     """Best-effort structured preferences from free-text list."""
     lowered = [p.lower() for p in preferences]
     joined = " | ".join(lowered)
+    accessibility_needs = [n for n in (accessibility_needs or []) if n and n.strip()]
+    must_be_accessible = any(
+        any(hint in need.lower() for hint in _WHEELCHAIR_HINTS)
+        for need in accessibility_needs
+    )
     return HotelPreferences(
         prefer_center=any(phrase in joined for phrase in ("city centre", "city center", "central", "downtown")),
+        accessibility_needs=accessibility_needs,
+        must_be_accessible=must_be_accessible,
     )
 
 
@@ -124,7 +134,7 @@ def to_hotel_trip_context(travel_request, *, arrival_airport: str | None = None)
         accessibility_needs=accessibility_needs,
         preferences=list(travel_request.preferences),
         refinement_notes=list(travel_request.refinement_notes),
-        hotel_preferences=derive_hotel_preferences(list(travel_request.preferences)),
+        hotel_preferences=derive_hotel_preferences(list(travel_request.preferences), accessibility_needs),
     )
     return context, unresolved
 
