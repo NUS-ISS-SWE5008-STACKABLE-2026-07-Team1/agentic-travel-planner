@@ -53,7 +53,10 @@ from flaskapp.travel_ai.agents.hotel_transport_agent.schemas import (
     HotelProposal,
     TransportOption,
 )
-from flaskapp.travel_ai.agents.hotel_transport_agent.seed_data import transport_for
+from flaskapp.travel_ai.agents.hotel_transport_agent.seed_data import (
+    transport_for,
+    covers_transport,
+)
 from flaskapp.travel_ai.guardrails.specialist import make_postprocess, make_preflight
 from flaskapp.travel_ai.schemas import AgentFinding, Option, TravelRequest
 from flaskapp.travel_ai.terminal import log_payload
@@ -331,6 +334,23 @@ def create_node(llm, tracer, provider=None, config=None):
             travel_request.destination, travel_request.destination_city,
             ctx.arrival_airport,
         )
+
+        from flaskapp.places import find_city
+
+        transport_covered = bool(transport_options)
+        city_resolved = None
+        if travel_request.destination_city:
+            city_resolved = find_city(travel_request.destination, travel_request.destination_city)
+        if city_resolved:
+            if ctx.arrival_airport:
+                transport_covered = covers_transport(city_resolved.slug, ctx.arrival_airport)
+            else:
+                transport_covered = any(
+                    covers_transport(city_resolved.slug, ap) for ap in city_resolved.airports
+                )
+        else:
+            transport_covered = bool(transport_options)
+
         if not transport_options:
             notes.append(
                 "No verified transport options are available for the selected arrival airport."
@@ -349,6 +369,8 @@ def create_node(llm, tracer, provider=None, config=None):
             tracer.record("agent_fallback", NAME, {
                 "reason": "no inventory for city/transport",
                 "source": provider.name,
+                "transport_covered": transport_covered,
+                "arrival_airport": ctx.arrival_airport,
                 "unresolved": notes,
             })
             result = prompt_only_node(state)
