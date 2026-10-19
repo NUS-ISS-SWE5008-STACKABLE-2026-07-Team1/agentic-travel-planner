@@ -12,6 +12,32 @@
 # interpreter. Raise them together.
 FROM python:3.11.9-slim-bookworm
 
+# VARIANT A, under measurement. See docs/security/image-dast-experiment.md.
+#
+# The image DAST experiment put Trivy over these layers for the first time and
+# found 11 CRITICAL and 120 HIGH, every critical of them a Debian package
+# (openssl, libgnutls30, perl-base, libexpat1, zlib1g, libsqlite3-0) with a
+# published fix. pip-audit never saw any of it: it reads requirements.lock,
+# which says nothing about the operating system underneath.
+#
+# The tag is pinned, which is what froze these packages at the date that tag
+# was built. This re-fetches the security updates Debian has published since.
+#
+# THE HONEST COST: this step is not reproducible. Two builds of the same commit
+# on different days can produce different packages, which cuts against the
+# pinning discipline everywhere else here (hash-locked requirements, actions
+# pinned to commit SHAs). The alternative under measurement is raising the base
+# tag instead, which stays reproducible but must move render.yaml's
+# PYTHON_VERSION in lockstep.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# CVE-2024-6345 (HIGH) is setuptools 65.5.1, which ships inside the base image
+# rather than coming from requirements.lock, so neither pip-audit nor the lock
+# file can reach it.
+RUN python -m pip install --upgrade "setuptools>=78.1.1"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
