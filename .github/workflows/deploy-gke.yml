@@ -88,9 +88,13 @@ env:
 
 jobs:
   gate:
-    name: Wait for CI on this commit
+    name: Wait for CI and DAST on this commit
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # Two workflows waited on in turn, each with a 20-minute finish deadline,
+    # so the worst legible case is 40 minutes of polling. The extra 5 leaves
+    # room for that to end with this job's own `::error::` rather than the
+    # runner killing it mid-poll with nothing to read.
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: read
@@ -124,48 +128,95 @@ jobs:
           echo "tag=${sha::7}" >> "$GITHUB_OUTPUT"
           echo "Deploying $sha"
 
-      - name: Wait for CI's verdict
+      # Both workflows, not just ci-checks.
+      #
+      # DAST was already a required check, so it had gated the MERGE. What it
+      # had not gated was this: on 2026-10-18 the rollout finished at 10:43:51
+      # and the DAST run for the same commit finished at 10:45:23. Production
+      # was live for 1m32s before the scan of what shipped had an answer, and
+      # nothing consumed that answer when it arrived. Now it does.
+      #
+      # The cost is real: push-to-live goes from roughly 6-10 minutes to
+      # roughly 15-25, because ci-dast is the slower of the two by design (an
+      # 8-minute active scan inside a 20-minute job). If a demo involves
+      # watching a deploy, budget for that or deploy the day before.
+      - name: Wait for CI and DAST verdicts
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.pick.outputs.sha }}
         run: |
           set -euo pipefail
-          # CI starts within seconds of the push. If nothing has appeared after
-          # five minutes, CI never ran on this commit as a push to release (it is
-          # a commit from inside a merged branch) and there is no verdict to trust.
-          appear_deadline=$(( $(date +%s) + 300 ))
-          finish_deadline=$(( $(date +%s) + 1800 ))
-          while :; do
-            run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-checks.yml \
-                     --commit "$SHA" --event push --limit 1 \
-                     --json status,conclusion,url --jq '.[0] // empty')"
-            now=$(date +%s)
-            if [ -z "$run" ]; then
-              if [ "$now" -gt "$appear_deadline" ]; then
-                echo "::error::No CI run found for $SHA as a push to release. Deploy a merge commit that CI checked."
-                exit 1
-              fi
-              echo "CI has not started for $SHA yet; waiting."
-            else
-              status="$(jq -r .status <<<"$run")"
-              conclusion="$(jq -r .conclusion <<<"$run")"
-              url="$(jq -r .url <<<"$run")"
-              if [ "$status" = "completed" ]; then
-                if [ "$conclusion" = "success" ]; then
-                  echo "CI passed: $url"
-                  exit 0
+
+          # Every workflow whose verdict this deploy depends on. Adding a third
+          # is a one-word edit.
+          WORKFLOWS="ci-checks.yml ci-dast.yml"
+
+          # Blocks until one workflow's run for $SHA concludes. 0 on success,
+          # 1 on anything else — including a run that never appeared, which
+          # means this commit was never checked as a push to release.
+          wait_for() {
+            local workflow="$1"
+            local run status conclusion url now
+            local url=""
+            # Per-workflow, computed on entry rather than shared: a single
+            # budget would silently halve the allowance for whichever is
+            # polled second.
+            #
+            # Runs start within seconds of the push. Nothing after five minutes
+            # means it never ran on this commit as a push to release (it is a
+            # commit from inside a merged branch), so there is no verdict to
+            # trust. The finish deadline matches ci-dast's own 20-minute job
+            # timeout — a run still going after that has been killed anyway,
+            # and two sequential 30-minute waits would outlast this job's own
+            # timeout-minutes and be killed mid-poll rather than failing with
+            # something readable.
+            local appear_deadline=$(( $(date +%s) + 300 ))
+            local finish_deadline=$(( $(date +%s) + 1200 ))
+            while :; do
+              run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
+                       --commit "$SHA" --event push --limit 1 \
+                       --json status,conclusion,url --jq '.[0] // empty')"
+              now=$(date +%s)
+              if [ -z "$run" ]; then
+                if [ "$now" -gt "$appear_deadline" ]; then
+                  echo "::error::No $workflow run found for $SHA as a push to release. Deploy a merge commit that both workflows checked."
+                  return 1
                 fi
-                echo "::error::CI concluded '$conclusion' for $SHA — not deploying. $url"
-                exit 1
+                echo "$workflow has not started for $SHA yet; waiting."
+              else
+                status="$(jq -r .status <<<"$run")"
+                conclusion="$(jq -r .conclusion <<<"$run")"
+                url="$(jq -r .url <<<"$run")"
+                if [ "$status" = "completed" ]; then
+                  if [ "$conclusion" = "success" ]; then
+                    echo "$workflow passed: $url"
+                    return 0
+                  fi
+                  # A cancelled run is not a pass. Both workflows set
+                  # cancel-in-progress, so a second push to release cancels the
+                  # first one's runs: deploy the head, or re-run the workflows
+                  # on the older commit before deploying it.
+                  echo "::error::$workflow concluded '$conclusion' for $SHA — not deploying. $url"
+                  return 1
+                fi
+                echo "$workflow is $status: $url"
               fi
-              echo "CI is $status: $url"
-            fi
-            if [ "$now" -gt "$finish_deadline" ]; then
-              echo "::error::CI did not finish within 30 minutes."
-              exit 1
-            fi
-            sleep 20
+              if [ "$now" -gt "$finish_deadline" ]; then
+                echo "::error::$workflow did not finish within 20 minutes. ${url:-no run URL yet}"
+                return 1
+              fi
+              sleep 20
+            done
+          }
+
+          # Sequential rather than interleaved. Both workflows start within a
+          # second of the same push and run concurrently on GitHub's side, so
+          # the wall clock is max(ci-checks, ci-dast) either way — and the log
+          # reads as a checklist.
+          for workflow in $WORKFLOWS; do
+            wait_for "$workflow" || exit 1
           done
+          echo "All required workflows passed for $SHA: $WORKFLOWS"
 
   deploy:
     name: Build, push and roll out
