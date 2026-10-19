@@ -49,7 +49,16 @@ def load_alerts(path: Path) -> list[dict]:
     than people expect. Counting only `site[0]` would quietly ignore findings.
     """
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
+        # NOSONAR on the next line: "path traversal" is a false positive here,
+        # because there is no trust boundary for it to cross. The path comes
+        # from argparse — either CI, which passes what `find` located in the
+        # workspace, or a person at a terminal checking a downloaded report.
+        # Reading the file the caller named IS the program; a "traversal" would
+        # mean someone read their own file. Taint analysis sees argv reaching
+        # read_text() and cannot see that the source and the sink are the same
+        # party. Confining it to the repo would break the local before/after
+        # check this gate was verified with, and buy nothing.
+        report = json.loads(path.read_text(encoding="utf-8"))  # NOSONAR
     except FileNotFoundError as exc:
         raise ReportUnreadable(f"no report at {path}") from exc
     except json.JSONDecodeError as exc:
