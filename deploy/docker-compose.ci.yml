@@ -1,0 +1,44 @@
+# Overlay for .github/workflows/ci-image-dast.yml. Local use needs only
+# docker-compose.yml; this file exists so that one stays untouched.
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ci.yml up -d --no-build
+#
+# Three differences from the base file, and nothing else:
+#
+#   1. A per-run SECRET_KEY instead of the published throwaway one, so any
+#      session weakness ZAP reports is a property of the app rather than of a
+#      key written in a tracked file.
+#   2. A seeded login. flaskapp/database.py creates an account at startup from
+#      LOGIN_EMAIL and LOGIN_PASSWORD_HASH, so the scan can authenticate
+#      without a credential existing anywhere outside the run.
+#   3. SESSION_COOKIE_SECURE left explicitly false. Same reasoning as
+#      ci-dast.yml: the scan speaks plain HTTP to 127.0.0.1, and a Secure
+#      cookie would simply never be sent, breaking login entirely. ZAP's
+#      "cookie without Secure flag" finding is therefore a CI artefact here and
+#      must not be reported as an application defect. The deployed site
+#      terminates TLS at the load balancer.
+#
+# NOTE: `web` keeps its `build:` from the base file, and the workflow runs
+# compose with --no-build so the image built and scanned earlier is reused.
+# Rebuilding here would mean the bytes scanned and the bytes running are only
+# probably the same, which is the exact gap this experiment exists to close.
+
+name: travel-planner-local
+
+x-ci-env: &ci-env
+  SECRET_KEY: ${SECRET_KEY:?set by the workflow}
+  SESSION_COOKIE_SECURE: "false"
+  LOGIN_EMAIL: ${LOGIN_EMAIL:?set by the workflow}
+  LOGIN_PASSWORD_HASH: ${LOGIN_PASSWORD_HASH:?set by the workflow}
+
+services:
+  web:
+    environment:
+      <<: *ci-env
+
+  # Same seed values: both roles call create_app(), and a mismatched SECRET_KEY
+  # between them is the kind of thing that produces a confusing scan rather
+  # than a failing one.
+  agents:
+    environment:
+      <<: *ci-env
