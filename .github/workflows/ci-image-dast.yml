@@ -1,47 +1,89 @@
 # =============================================================================
-# EXPERIMENT — not part of the pipeline. Nothing depends on this file.
+# ADVISORY. Visible, never blocking — it is not in the required-check ruleset,
+# and the note on the trigger below explains why it must not be added to one.
 #
 # WHAT GAP THIS EXISTS TO CLOSE
 #
 # ci-dast.yml scans `python app.py` on the runner: Flask's development server,
 # port 5000, the runner's user, a throwaway SQLite file. What GKE actually runs
 # is a container: gunicorn with gunicorn.conf.py on 8000, UID 10001, inside
-# python:3.11.9-slim-bookworm, against Postgres. The commit is built twice, two
-# different ways, and only the second one ships.
+# python:3.11.9-slim-bookworm, against Postgres. The commit was built twice, two
+# different ways, and only the second one shipped.
 #
-# So a green DAST today is evidence about the SOURCE, not about the ARTEFACT.
-# Nothing in the pipeline looks at the image's OS and library layers at all.
+# So a green ci-dast.yml is evidence about the SOURCE, not about the ARTEFACT,
+# and until this file existed nothing looked at the image's OS and library
+# layers at all. The first run of it found 11 CRITICAL and 120 HIGH down there,
+# every critical an operating system package with a published fix. pip-audit
+# could never have seen them: it reads requirements.lock.
 #
-# This file builds the image ONCE, scans those bytes, runs those same bytes, and
-# points the existing ZAP plan at them — then prints the digest it WOULD promote.
+# This file builds the image ONCE, scans those bytes with Trivy, runs those same
+# bytes under docker compose, and points the existing ZAP plan at them — then
+# prints the digest it WOULD promote.
 #
 # WHAT IT DELIBERATELY DOES NOT DO
 #
 # It does not deploy, does not authenticate to Google Cloud, does not push
 # anything outside the runner, and does not gate anything. Switching
-# deploy-gke.yml to promote this digest instead of rebuilding is phase 2, and it
-# is a separate PR, after the presentation. See
-# docs/security/image-dast-experiment.md.
+# deploy-gke.yml to promote this digest instead of rebuilding is phase 2 and is
+# a separate change. See docs/security/image-dast-experiment.md.
 #
-# WHY THE TRIGGER IS SO NARROW
+# WHAT IT STILL CANNOT SEE
 #
-# `push` on this branch prefix and nothing else. No pull_request, no main, no
-# release. A workflow that never runs on a shared branch cannot be added to the
-# required-check list by accident and cannot wedge a merge. Throwing this away
-# is deleting the branch.
+# It scans a container built from the commit, NOT the running deployment. Real
+# TLS, Secure cookies, the load balancer and IAP in front, the real database and
+# the HPA under load are all outside it. One boundary moved, not removed.
+#
 # =============================================================================
-name: CI — image DAST (experiment)
+name: CI — image DAST
 
 on:
+  # Runs on a pull request that could have CHANGED the image, and stays silent
+  # on every other one. The alternative considered was running on every PR; at
+  # roughly twelve minutes and a full container build, that is a lot to spend on
+  # a documentation typo.
+  #
+  # The paths are the ones that decide what the image IS or how it is scanned:
+  # the Dockerfile, the locked dependencies installed into it, the server config
+  # copied into it, how it is run for the scan, and the scan plan and gate
+  # themselves. Deliberately NOT flaskapp/** — application behaviour is already
+  # covered at source level by ci-dast.yml on every PR, and listing it here
+  # would make this run on nearly everything.
+  #
+  # Because a pull_request event reads its workflow files from the MERGED
+  # result, a PR that adds or edits this file is scanned by its own new version.
+  #
+  # DO NOT ADD THIS TO THE REQUIRED-CHECK RULESET. A path-filtered required
+  # check never reports on a PR that misses the filter, so every such merge
+  # waits forever on a check that will never arrive. It is advisory on purpose:
+  # red here is visible and worth reading, but it cannot wedge a merge. Drop the
+  # paths filter first if it is ever to become required.
+  pull_request:
+    branches: [main, release]
+    paths:
+      - 'Dockerfile'
+      - 'requirements.lock'
+      - 'gunicorn.conf.py'
+      - 'deploy/docker-compose.yml'
+      - 'deploy/docker-compose.ci.yml'
+      - '.zap/**'
+      - 'scripts/zap_gate.py'
+      - '.github/workflows/ci-image-dast.yml'
+
+  # The development branch this was built on, so it can still be iterated
+  # without opening a pull request.
   push:
     branches: ['ci/image-dast-**']
+
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# head_ref on a pull_request, github.ref otherwise. Without this a PR run keys
+# on refs/pull/N/merge and a push run on refs/heads/x — two groups for the same
+# commit, so neither cancels the other. Same reasoning as ci-dast.yml.
 concurrency:
-  group: image-dast-${{ github.ref }}
+  group: image-dast-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
