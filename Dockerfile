@@ -10,24 +10,46 @@
 
 # Matches PYTHON_VERSION in render.yaml, so both deploy targets run the same
 # interpreter. Raise them together.
-FROM python:3.11.17-slim-bookworm
+FROM python:3.11.9-slim-bookworm
 
-# VARIANT B, under measurement. See docs/security/image-dast-experiment.md.
+# Why these two steps exist, and what they are worth.
 #
-# The image DAST experiment put Trivy over these layers for the first time and
-# found 11 CRITICAL and 120 HIGH, every critical of them a Debian package with
-# a published fix. pip-audit never saw any of it: it reads requirements.lock,
-# which says nothing about the operating system underneath.
+# The pinned tag above is what makes this build reproducible, and it is also
+# what freezes every Debian package at the date that tag was built. Scanning
+# the image for the first time (docs/security/image-dast-experiment.md) found
+# 11 CRITICAL and 120 HIGH down here -- every critical of them an operating
+# system package with a published fix. pip-audit never saw any of it: it reads
+# requirements.lock, which says nothing about the layers underneath.
 #
-# This variant raises the base tag instead of running apt-get upgrade. 3.11.9
-# was eight patches behind; the newer tag carries Debian's accumulated security
-# updates AND the CPython patch releases, and the build stays REPRODUCIBLE,
-# which is the discipline used everywhere else here.
+# MEASURED, not assumed. Two candidates were built and scanned on
+# ci/image-dast-experiment:
 #
-# THE COST: PYTHON_VERSION in render.yaml moves with it (see the note above),
-# so this changes the Render backup's interpreter as well -- and Render is
-# covered by no scan. Variant A touches only this image, which Render never
-# builds.
+#   apt-get upgrade, keep 3.11.9   2 CRITICAL  63 HIGH  119 MEDIUM   <- this
+#   raise base tag to 3.11.17      2 CRITICAL  63 HIGH  117 MEDIUM
+#
+# A tie on everything that matters. The two surviving criticals (zlib1g
+# CVE-2023-45853, libsqlite3-0 CVE-2025-7458) have no fix published, so neither
+# approach can remove them. This one was chosen because raising the tag would
+# also move PYTHON_VERSION in render.yaml, changing the Render backup's
+# interpreter -- a deploy target no scan covers -- and jump CPython eight patch
+# releases at once.
+#
+# THE COST, named rather than hidden: `apt-get upgrade` is not reproducible.
+# Two builds of this commit on different days can differ, which cuts against
+# the pinning discipline everywhere else here (hash-locked requirements,
+# actions pinned to commit SHAs). The better long-term answer is to pin the
+# base image by DIGEST and raise it deliberately on a schedule; that is a
+# considered change, not a rushed one.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# setuptools and wheel ship INSIDE the base image rather than coming from
+# requirements.lock, so neither pip-audit nor the lock file can reach them --
+# the same blind spot as the OS packages above, one layer up. CVE-2024-6345
+# (setuptools) and CVE-2026-24049 (wheel) are both HIGH. Upgrading setuptools
+# also pulls in a fixed jaraco.context, which it vendors.
+RUN python -m pip install --upgrade "setuptools>=78.1.1" "wheel>=0.46.2"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
