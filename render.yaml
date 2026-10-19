@@ -34,7 +34,7 @@ services:
     healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11.9"
+        value: "3.11.17"
       # Rotated per deploy by Render. Sessions do not survive a restart, which
       # is correct here — nothing depends on a stable key across deploys.
       - key: SECRET_KEY
