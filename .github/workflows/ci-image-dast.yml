@@ -291,7 +291,31 @@ jobs:
       # see, which is the entire question this job was built to answer.
       - name: Compare against the source-level scan, at the same threshold
         env:
-          ZAP_GATE_ALLOWED_PLUGIN_IDS: ""
+          # 10106 "HTTP Only Site" — SUPPRESSED, with the same justification
+          # standard as every other suppression in this repo.
+          #
+          # WHAT IT IS: ZAP reports that the site is served over plain HTTP and
+          # offers no HTTPS. True, and true BY CONSTRUCTION: the scan talks to
+          # http://127.0.0.1:5000, a published container port on a CI runner.
+          # There is no certificate to serve and nothing to terminate TLS.
+          #
+          # WHY IT IS A CI ARTEFACT: in the cluster, TLS terminates at the
+          # Google HTTPS load balancer with IAP in front (deploy/k8s/ingress.yaml,
+          # iap.yaml). The container never speaks HTTPS in production either —
+          # it is not supposed to. Same class as SESSION_COOKIE_SECURE in
+          # ci-dast.yml, which is false here for the same reason.
+          #
+          # WHAT WOULD MAKE IT REAL: a finding of this class against the
+          # DEPLOYED site. That is tier 1 of the plan in
+          # docs/security/cicd-status.html, and it is exactly the class of
+          # finding this scan is structurally incapable of producing — so this
+          # suppression costs nothing we had.
+          #
+          # NOT suppressed in ci-dast.yml: the source-level scan does not raise
+          # it, and a suppression that is not needed is a suppression nobody
+          # reviews. Remove this the moment the container stops being scanned
+          # over plain HTTP.
+          ZAP_GATE_ALLOWED_PLUGIN_IDS: "10106"
         run: |
           set -euo pipefail
           report=$(find . -name 'zap-authenticated-report.json' | head -1)

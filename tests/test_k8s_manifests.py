@@ -107,6 +107,38 @@ def test_the_image_policy_refuses_placeholders_and_foreign_images():
         assert not _allowed(image), image
 
 
+# A 64-character lowercase hex string, the only shape a sha256 digest takes.
+_DIGEST = "da77c29a2cbc6a1f6492a57f3c69b8d49764e60b53cc2104f1146db57df6f5ef"
+
+
+def test_the_image_policy_admits_an_image_named_by_digest():
+    """Promoting a scanned image names it by digest, not by tag.
+
+    The original pattern required `app:<tag>` and refused `app@sha256:...`.
+    With `failurePolicy: Fail` that is not a warning that something is odd --
+    the API server rejects the Deployment and the rollout never happens. This
+    is here so that discovery happens in a test run rather than in a deploy.
+    """
+    assert _allowed(f"us-west1-docker.pkg.dev/some-project/travel-planner/app@sha256:{_DIGEST}")
+
+
+def test_the_image_policy_refuses_a_digest_that_cannot_resolve():
+    """A malformed digest is the same outage as a placeholder, so refuse it here.
+
+    Each case is a reference Kubernetes would accept as a string and then fail
+    to pull: a truncated digest, uppercase hex (the registry canonical form is
+    lowercase), and an algorithm we never produce.
+    """
+    base = "us-west1-docker.pkg.dev/some-project/travel-planner/app"
+    for image in (
+        f"{base}@sha256:deadbeef",
+        f"{base}@sha256:{_DIGEST.upper()}",
+        f"{base}@md5:{_DIGEST}",
+        f"nginx@sha256:{_DIGEST}",
+    ):
+        assert not _allowed(image), image
+
+
 def _max_replicas() -> dict[str, int]:
     """maxReplicas per autoscaler in hpa.yaml, keyed by its target Deployment."""
     text = (K8S / "hpa.yaml").read_text(encoding="utf-8")
