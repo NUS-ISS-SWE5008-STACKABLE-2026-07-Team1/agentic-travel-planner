@@ -86,7 +86,11 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
 .agent-activity-card .agent-activity { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: .4rem; scrollbar-gutter: stable; }
 .agent-thinking { flex: 0 0 auto; display: grid; place-items: center; width: 3rem; height: 3rem; border-radius: 1rem; color: var(--atlas-navy); background: var(--atlas-mint); animation: ai-pulse 1.15s ease-in-out infinite; }
 .planning-progress { height: .8rem; overflow: hidden; border-radius: 999px; background: #dfe8f5; box-shadow: inset 0 1px 2px rgba(11,32,56,.08); }
-.planning-progress-bar { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--atlas-blue), var(--atlas-mint)); transition: width .45s ease; }
+/* `width` lives here rather than on the element: a `style=` attribute is inline
+   style, which the Content-Security-Policy forbids. app.js sets it via the
+   CSSOM on the first tick, which CSP permits — this is only the frame before
+   that, and without it the bar would start at zero width. */
+.planning-progress-bar { width: 5%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--atlas-blue), var(--atlas-mint)); transition: width .45s ease; }
 .planning-travel-icon { flex: 0 0 auto; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: 50%; color: #fff; background: var(--atlas-blue); font-size: 1.2rem; animation: travel-float 1.4s ease-in-out infinite; box-shadow: 0 .4rem 1rem rgba(25,94,231,.25); }
 .planning-progress-wrap.is-complete .planning-travel-icon { animation: none; background: #198754; }
 .planning-progress-wrap.is-stopped .planning-travel-icon { animation: none; background: #6c757d; }
