@@ -1,0 +1,416 @@
+# =============================================================================
+# ADVISORY. Visible, never blocking — it is not in the required-check ruleset,
+# and the note on the trigger below explains why it must not be added to one.
+#
+# WHAT GAP THIS EXISTS TO CLOSE
+#
+# ci-dast.yml scans `python app.py` on the runner: Flask's development server,
+# port 5000, the runner's user, a throwaway SQLite file. What GKE actually runs
+# is a container: gunicorn with gunicorn.conf.py on 8000, UID 10001, inside
+# python:3.11.9-slim-bookworm, against Postgres. The commit was built twice, two
+# different ways, and only the second one shipped.
+#
+# So a green ci-dast.yml is evidence about the SOURCE, not about the ARTEFACT,
+# and until this file existed nothing looked at the image's OS and library
+# layers at all. The first run of it found 11 CRITICAL and 120 HIGH down there,
+# every critical an operating system package with a published fix. pip-audit
+# could never have seen them: it reads requirements.lock.
+#
+# This file builds the image ONCE, scans those bytes with Trivy, runs those same
+# bytes under docker compose, and points the existing ZAP plan at them — then
+# prints the digest it WOULD promote.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+#
+# It does not deploy, does not authenticate to Google Cloud, does not push
+# anything outside the runner, and does not gate anything. Switching
+# deploy-gke.yml to promote this digest instead of rebuilding is phase 2 and is
+# a separate change. See docs/security/image-scanning.md.
+#
+# WHAT IT STILL CANNOT SEE
+#
+# It scans a container built from the commit, NOT the running deployment. Real
+# TLS, Secure cookies, the load balancer and IAP in front, the real database and
+# the HPA under load are all outside it. One boundary moved, not removed.
+#
+# =============================================================================
+name: CI — image DAST
+
+on:
+  # Runs on a pull request that could have CHANGED the image, and stays silent
+  # on every other one. The alternative considered was running on every PR; at
+  # roughly twelve minutes and a full container build, that is a lot to spend on
+  # a documentation typo.
+  #
+  # The paths are the ones that decide what the image IS or how it is scanned:
+  # the Dockerfile, the locked dependencies installed into it, the server config
+  # copied into it, how it is run for the scan, and the scan plan and gate
+  # themselves. Deliberately NOT flaskapp/** — application behaviour is already
+  # covered at source level by ci-dast.yml on every PR, and listing it here
+  # would make this run on nearly everything.
+  #
+  # Because a pull_request event reads its workflow files from the MERGED
+  # result, a PR that adds or edits this file is scanned by its own new version.
+  #
+  # DO NOT ADD THIS TO THE REQUIRED-CHECK RULESET. A path-filtered required
+  # check never reports on a PR that misses the filter, so every such merge
+  # waits forever on a check that will never arrive. It is advisory on purpose:
+  # red here is visible and worth reading, but it cannot wedge a merge. Drop the
+  # paths filter first if it is ever to become required.
+  pull_request:
+    branches: [main, release]
+    paths:
+      - 'Dockerfile'
+      - 'requirements.lock'
+      - 'gunicorn.conf.py'
+      - 'deploy/docker-compose.yml'
+      - 'deploy/docker-compose.ci.yml'
+      - '.zap/**'
+      - 'scripts/zap_gate.py'
+      - '.github/workflows/ci-image-dast.yml'
+
+  # The development branch this was built on, so it can still be iterated
+  # without opening a pull request.
+  push:
+    branches: ['ci/image-dast-**']
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# head_ref on a pull_request, github.ref otherwise. Without this a PR run keys
+# on refs/pull/N/merge and a push run on refs/heads/x — two groups for the same
+# commit, so neither cancels the other. Same reasoning as ci-dast.yml.
+concurrency:
+  group: image-dast-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-dast:
+    name: Build once, scan the image, scan the container
+    runs-on: ubuntu-latest
+    # Longer than ci-dast.yml's 20: a docker build, two containers and Postgres
+    # all start before ZAP does. The compose healthcheck alone allows 60s.
+    timeout-minutes: 35
+
+    services:
+      # A real digest needs a real registry push. A local one keeps everything
+      # inside the runner: no credentials (Workload Identity Federation is
+      # trusted for `release` only, so this branch could not authenticate to
+      # Artifact Registry even if we wanted it to), nothing published, nothing
+      # to clean up. Docker treats localhost registries as insecure by default,
+      # so no TLS or daemon configuration is needed.
+      registry:
+        image: registry:2
+        ports:
+          - 5050:5000
+
+    env:
+      LOCAL_IMAGE: travel-planner:local
+      REGISTRY_IMAGE: localhost:5050/travel-planner/app
+      DAST_LOGIN_EMAIL: browser-scan@example.com
+      # Same reasoning as ci-dast.yml: a random per-run key means any session
+      # finding ZAP reports is about the app, not about our CI configuration.
+      SECRET_KEY: ${{ github.run_id }}-${{ github.run_attempt }}-image-dast
+      COMPOSE: -f deploy/docker-compose.yml -f deploy/docker-compose.ci.yml
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # ---- Build ONCE ------------------------------------------------------
+      # The classic builder, not docker/build-push-action. buildx's container
+      # driver cannot reach a `localhost` registry without extra network
+      # wiring; `docker build` runs in the daemon that owns that localhost.
+      - name: Build the image
+        run: |
+          set -euo pipefail
+          docker build -t "$LOCAL_IMAGE" .
+          docker image inspect "$LOCAL_IMAGE" --format 'built image id: {{.Id}}'
+
+      - name: Push it to the local registry and record the digest
+        id: digest
+        run: |
+          set -euo pipefail
+          docker tag "$LOCAL_IMAGE" "$REGISTRY_IMAGE:$GITHUB_SHA"
+          docker push "$REGISTRY_IMAGE:$GITHUB_SHA"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$REGISTRY_IMAGE:$GITHUB_SHA" | cut -d@ -f2)"
+          if [ -z "$digest" ]; then
+            echo "::error::No digest after push; the registry did not accept the image."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Digest for $GITHUB_SHA: $digest"
+
+      # The one assertion that makes the whole exercise mean anything: the tag
+      # compose will run and the digest we just recorded are the same bytes.
+      # Without this, "we scanned the image we ran" is an assumption.
+      - name: Prove the local tag and the pushed digest are the same image
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          local_id="$(docker image inspect "$LOCAL_IMAGE" --format '{{.Id}}')"
+          registry_id="$(docker image inspect "$REGISTRY_IMAGE:$GITHUB_SHA" --format '{{.Id}}')"
+          if [ "$local_id" != "$registry_id" ]; then
+            echo "::error::$LOCAL_IMAGE and $REGISTRY_IMAGE:$GITHUB_SHA are different images."
+            exit 1
+          fi
+          echo "Same image id ($local_id) under both names; digest $DIGEST."
+
+      # ---- Scan the artefact ----------------------------------------------
+      # ADVISORY on purpose, for now. The ZAP gate was introduced the same way
+      # on 19 Oct: take the census first, then pick a threshold with the
+      # numbers in hand. Guessing a threshold blind either locks the branch or
+      # sets it so high it gates nothing.
+      #
+      # Scans the local tag rather than the registry reference: identical bytes
+      # (asserted above) and no registry round-trip inside the scanner.
+      - name: Trivy — vulnerabilities in the image layers
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@1f0aa582c8c8f5f7639610d6d38baddfea4fdcee # v0.9.2
+        with:
+          image-ref: travel-planner:local
+          format: json
+          output: trivy-report.json
+          scanners: vuln
+          # Everything, so the report is a census. What to GATE on is a
+          # separate decision, taken once these numbers exist.
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+
+      - name: Trivy census
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -s trivy-report.json ]; then
+            echo "::warning::Trivy produced no report; see the step above."
+            exit 0
+          fi
+          echo "--- vulnerabilities by severity ---"
+          jq -r '[.Results[]?.Vulnerabilities[]?.Severity] | group_by(.) | map("\(length)\t\(.[0])") | .[]' \
+            trivy-report.json | sort -rn || echo "(none)"
+          echo "--- HIGH and CRITICAL, with fixed versions ---"
+          jq -r '.Results[]?.Vulnerabilities[]?
+                 | select(.Severity=="HIGH" or .Severity=="CRITICAL")
+                 | "\(.Severity)\t\(.VulnerabilityID)\t\(.PkgName) \(.InstalledVersion) -> \(.FixedVersion // "no fix")"' \
+            trivy-report.json | sort -u || echo "(none)"
+
+      # ---- Run those exact bytes ------------------------------------------
+      # Lifted from ci-dast.yml:125-136. The app seeds an isolated account at
+      # startup from LOGIN_EMAIL and LOGIN_PASSWORD_HASH (flaskapp/database.py),
+      # so no reusable credential is published in this workflow.
+      #
+      # The hash is computed INSIDE the image we just built, which already
+      # ships werkzeug. Nothing is installed on the runner: .github/ci-tools/
+      # has no werkzeug, and pulling in the app's full lock file to hash one
+      # password would be a minute of install for one line of output.
+      - name: Generate ephemeral login credential
+        run: |
+          set -euo pipefail
+          password=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
+          hash_py='import os; from werkzeug.security import generate_password_hash; print(generate_password_hash(os.environ["DAST_PASSWORD"]))'
+          password_hash=$(docker run --rm -e DAST_PASSWORD="$password" "$LOCAL_IMAGE" python -c "$hash_py")
+          echo "::add-mask::$password"
+          echo "E2E_LOGIN_PASSWORD=$password" >> "$GITHUB_ENV"
+          echo "LOGIN_EMAIL=$DAST_LOGIN_EMAIL" >> "$GITHUB_ENV"
+          echo "LOGIN_PASSWORD_HASH=$password_hash" >> "$GITHUB_ENV"
+
+      # No --build: the image already exists under that tag, so compose reuses
+      # it. That is what keeps "scanned" and "ran" the same bytes — a rebuild
+      # here would quietly undo the whole point of the job.
+      - name: Start the containers
+        run: |
+          set -euo pipefail
+          docker compose $COMPOSE up -d --no-build
+          docker compose $COMPOSE ps
+
+      - name: Wait for the containerised app
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:5000/readyz -o /dev/null; then
+              echo "Container ready after ${i}s."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::The containerised app never became ready."
+          docker compose $COMPOSE ps
+          docker compose $COMPOSE logs --tail 80
+          exit 1
+
+      # Identical to ci-dast.yml's block, including the [^>]* in the CSRF
+      # pattern: hidden_tag() renders id, name, type, value in that order, so a
+      # pattern expecting value= straight after name= matches nothing and the
+      # scan runs logged out looking clean.
+      - name: Establish a session and hand it to ZAP
+        run: |
+          set -euo pipefail
+          token=$(curl -s -c jar http://127.0.0.1:5000/ \
+            | grep -oP 'name="csrf_token"[^>]*value="\K[^"]+' | head -1)
+          if [ -z "${token}" ]; then
+            echo "::error::Could not extract a CSRF token from the login page"; exit 1
+          fi
+          curl -s -b jar -c jar -X POST http://127.0.0.1:5000/ \
+            -d "csrf_token=${token}" \
+            -d "email=${DAST_LOGIN_EMAIL}" \
+            -d "password=${E2E_LOGIN_PASSWORD}" \
+            -o /dev/null
+          code=$(curl -s -b jar -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:5000/api/v1/admin/activity)
+          if [ "${code}" != "200" ]; then
+            echo "::error::Login failed against the CONTAINER (got ${code})."
+            echo "::error::ZAP would scan unauthenticated and report a meaningless clean result."
+            docker compose $COMPOSE logs --tail 80 web
+            exit 1
+          fi
+          echo "Authenticated session confirmed against the container."
+
+          session=$(awk '$6 == "session" {print $7}' jar | tail -1)
+          if [ -z "${session}" ]; then
+            echo "::error::No session cookie in the jar after a successful login"; exit 1
+          fi
+          api_token=$(curl -s -b jar http://127.0.0.1:5000/main \
+            | grep -oP 'name="csrf-token" content="\K[^"]+' | head -1)
+          if [ -z "${api_token}" ]; then
+            echo "::error::No csrf-token meta tag on /main"; exit 1
+          fi
+          echo "::add-mask::${session}"
+          echo "::add-mask::${api_token}"
+          echo "ZAP_SESSION_COOKIE=${session}" >> "$GITHUB_ENV"
+          echo "ZAP_CSRF_TOKEN=${api_token}" >> "$GITHUB_ENV"
+
+      # The plan is used UNCHANGED. It already targets http://127.0.0.1:5000,
+      # and deploy/docker-compose.yml publishes web on exactly that address, so
+      # the part of this experiment that looked most expensive costs nothing.
+      - name: Render the scan plan
+        run: |
+          set -euo pipefail
+          sed -i \
+            -e "s|\${ZAP_SESSION_COOKIE}|${ZAP_SESSION_COOKIE}|g" \
+            -e "s|\${ZAP_CSRF_TOKEN}|${ZAP_CSRF_TOKEN}|g" \
+            .zap/authenticated-scan.yaml
+          if grep -q 'ZAP_SESSION_COOKIE\|ZAP_CSRF_TOKEN' .zap/authenticated-scan.yaml; then
+            echo "::error::A placeholder survived rendering; ZAP would scan logged out."
+            exit 1
+          fi
+          echo "Plan rendered."
+
+      - name: ZAP authenticated scan against the container
+        uses: zaproxy/action-af@d186d5d9536d0f1380e5eaa58168432fefc8ed6d # v0.3.0
+        with:
+          plan: ".zap/authenticated-scan.yaml"
+
+      - name: Prove the session survived the scan
+        if: always()
+        run: |
+          set -euo pipefail
+          code=$(curl -s -b jar -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:5000/api/v1/admin/activity)
+          if [ "${code}" != "200" ]; then
+            echo "::error::The session is dead after the scan (got ${code})."
+            echo "::error::ZAP most likely reached POST /logout — everything scanned"
+            echo "::error::after that point was scanned logged out."
+            exit 1
+          fi
+          echo "Session still valid after the scan; /logout was not reached."
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-dast-reports
+          path: |
+            **/zap-authenticated-report.json
+            **/zap-authenticated-report.html
+            trivy-report.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Reuses scripts/zap_gate.py, which already exists and has 17 unit tests.
+      # Same threshold as the live pipeline, so the two censuses are comparable:
+      # any difference is the container surface the source-level scan cannot
+      # see, which is the entire question this job was built to answer.
+      - name: Compare against the source-level scan, at the same threshold
+        env:
+          # 10106 "HTTP Only Site" — SUPPRESSED, with the same justification
+          # standard as every other suppression in this repo.
+          #
+          # WHAT IT IS: ZAP reports that the site is served over plain HTTP and
+          # offers no HTTPS. True, and true BY CONSTRUCTION: the scan talks to
+          # http://127.0.0.1:5000, a published container port on a CI runner.
+          # There is no certificate to serve and nothing to terminate TLS.
+          #
+          # WHY IT IS A CI ARTEFACT: in the cluster, TLS terminates at the
+          # Google HTTPS load balancer with IAP in front (deploy/k8s/ingress.yaml,
+          # iap.yaml). The container never speaks HTTPS in production either —
+          # it is not supposed to. Same class as SESSION_COOKIE_SECURE in
+          # ci-dast.yml, which is false here for the same reason.
+          #
+          # WHAT WOULD MAKE IT REAL: a finding of this class against the
+          # DEPLOYED site. That is tier 1 of the plan in
+          # docs/security/cicd-status.html, and it is exactly the class of
+          # finding this scan is structurally incapable of producing — so this
+          # suppression costs nothing we had.
+          #
+          # NOT suppressed in ci-dast.yml: the source-level scan does not raise
+          # it, and a suppression that is not needed is a suppression nobody
+          # reviews. Remove this the moment the container stops being scanned
+          # over plain HTTP.
+          ZAP_GATE_ALLOWED_PLUGIN_IDS: "10106"
+        run: |
+          set -euo pipefail
+          report=$(find . -name 'zap-authenticated-report.json' | head -1)
+          if [ -z "$report" ]; then
+            echo "::error::ZAP produced no JSON report — the scan did not complete."
+            exit 1
+          fi
+          python3 scripts/zap_gate.py "$report" --min-risk medium \
+            ${ZAP_GATE_ALLOWED_PLUGIN_IDS:+--allow $ZAP_GATE_ALLOWED_PLUGIN_IDS}
+
+      # Same reasoning as ci-dast.yml's log check: container stdout is about to
+      # become a downloadable artefact, and service.py logs whole submissions.
+      - name: Capture and check the container logs
+        if: always()
+        run: |
+          set -euo pipefail
+          docker compose $COMPOSE logs --no-color > compose.log || true
+          if grep -REn "sk-[A-Za-z0-9]{16,}|api[_-]?key['\"]?[[:space:]]*[:=][[:space:]]*\S{16,}" compose.log; then
+            echo "::error::Credential-shaped string in the container logs; refusing to upload."
+            exit 1
+          fi
+          echo "No credential-shaped strings found."
+
+      - name: Upload container logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-dast-compose-log
+          path: compose.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      # The point of the exercise, stated as output rather than performed.
+      # Phase 2 is where deploy-gke.yml stops rebuilding and promotes this.
+      - name: What this run would promote
+        if: always()
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          {
+            echo "### Image DAST (experiment)"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Commit | \`$GITHUB_SHA\` |"
+            echo "| Digest | \`${DIGEST:-not built}\` |"
+            echo "| Scanned | the image layers (Trivy) **and** the running container (ZAP) |"
+            echo "| Deployed | **nothing** — this job never contacts the cluster |"
+            echo ""
+            echo "Phase 2 would have \`deploy-gke.yml\` promote this digest instead of"
+            echo "rebuilding the commit a second way."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop the containers
+        if: always()
+        run: docker compose $COMPOSE down -v || true

@@ -163,9 +163,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"::error::DAST gate: {len(over)} alert(s) at {args.min_risk} or above.")
     for alert in sorted(over, key=risk_of, reverse=True):
         print(describe(alert))
+    # Deliberately not naming a workflow file. Two of them call this now
+    # (ci-dast.yml and ci-image-dast.yml), and a message that confidently names
+    # the wrong one sends the reader to a file whose allowlist has nothing to do
+    # with the failure they are looking at.
     print(
         "::error::Fix the finding, or add a justified entry to "
-        "ZAP_GATE_ALLOWED_PLUGIN_IDS in .github/workflows/ci-dast.yml."
+        "ZAP_GATE_ALLOWED_PLUGIN_IDS in the workflow that ran this gate."
     )
     return 1
 
