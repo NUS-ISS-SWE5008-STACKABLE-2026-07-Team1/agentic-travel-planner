@@ -172,24 +172,39 @@ jobs:
       # dropped capabilities, no privilege escalation, a read-only root
       # filesystem, resource limits.
       #
-      # DELIBERATELY REPORT-ONLY, and it must stay that way until the advisories
-      # below are dealt with. As of 2026-10-20 the two Deployments score well —
-      # runAsNonRoot, runAsUser 10001, seccompProfile RuntimeDefault,
-      # allowPrivilegeEscalation false, capabilities drop ALL, requests plus a
-      # memory limit, and all three probes — but three advisories remain:
+      # DELIBERATELY REPORT-ONLY. First real run, 2026-10-20: both Deployments
+      # score 3, with one CRITICAL and seven advisories each. Gating this today
+      # would have turned the workflow red immediately, which is exactly why the
+      # census came before the threshold.
       #
-      #   * automountServiceAccountToken is unset. Neither role calls the
-      #     Kubernetes API, so setting it false is free hardening. Not done here
-      #     because it changes what deploys.
-      #   * readOnlyRootFilesystem is unset, and setting it is not a one-liner:
-      #     the app writes traces to instance/traces, so it needs an emptyDir.
-      #   * No CPU limit. That is CORRECT on Autopilot, which bills requests and
-      #     where a CPU limit only buys throttling. This one gets suppressed when
-      #     the check is eventually gated, never "fixed".
+      # The good half is already true — runAsNonRoot, runAsUser 10001,
+      # seccompProfile RuntimeDefault, allowPrivilegeEscalation false,
+      # capabilities drop ALL, requests plus a memory limit, all three probes.
       #
-      # TO GATE IT LATER: settle those three, then drop the `|| true` and choose
-      # a score threshold. Do that AFTER the paths filter comes off, for the same
-      # reason recorded at the top of this file.
+      # What it flags, and what each one is actually worth:
+      #
+      #   * [critical] Secrets passed as environment variables. Legitimate point
+      #     — env vars surface in crash dumps and `/proc`. Fixing it means
+      #     mounting the Secret as files and teaching the app to read them, so it
+      #     is an architectural change, not a manifest tweak. Decide deliberately;
+      #     do not suppress it quietly.
+      #   * automountServiceAccountToken unset. Neither role calls the Kubernetes
+      #     API, so setting it false is free hardening — the cheapest real win
+      #     here.
+      #   * serviceAccountName unset, so both run as `default`. Pairs with the
+      #     item above.
+      #   * readOnlyRootFilesystem unset. Not a one-liner: the app writes traces
+      #     to instance/traces, so it needs an emptyDir.
+      #   * runAsGroup not set above 10000. runAsUser is; the group was missed.
+      #   * No CPU limit. CORRECT on Autopilot, which bills requests and where a
+      #     CPU limit only buys throttling. Suppress this one when gating, never
+      #     "fix" it.
+      #   * AppArmor profile, and hostUsers == false (user namespaces). Both are
+      #     constrained by what Autopilot permits; check before promising either.
+      #
+      # TO GATE IT LATER: settle the critical and pick a score threshold, then
+      # drop the `|| true`. Do that AFTER the paths filter comes off, for the
+      # same reason recorded at the top of this file.
       #
       # Only rendered-app.yaml is scanned: kubesec rates workloads, and the
       # infrastructure bundle contains none.
