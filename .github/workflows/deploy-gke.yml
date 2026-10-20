@@ -352,3 +352,141 @@ jobs:
             echo "| Before (web) | \`${BEFORE_WEB:-unknown}\` |"
             echo "| Before (agents) | \`${BEFORE_AGENTS:-unknown}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Scan the image the cluster is ACTUALLY running.
+  #
+  # WHAT THIS ADDS THAT NOTHING ELSE DOES
+  #
+  # ci-image-dast.yml Trivy-scans an image it builds from the commit, and only
+  # when image-relevant files change. Neither of those is the same as "what is
+  # serving traffic right now". A CVE published next week against an image
+  # nobody has touched is invisible to every other check we have. This reads the
+  # running image reference out of the cluster and scans that.
+  #
+  # It touches no HTTP, sends no traffic to the site, and needs no IAP: it is a
+  # registry read, not a request to the application.
+  #
+  # WHY IT CANNOT BREAK A DEPLOY
+  #
+  #   * needs: deploy — it runs strictly AFTER the rollout has finished and been
+  #     health-checked. It cannot delay or affect the deployment.
+  #   * continue-on-error: true — REQUIRED, not optional. Without it a CVE
+  #     published upstream would turn this workflow red and read as "the deploy
+  #     failed" when the deploy was fine. Remove it only once someone owns
+  #     acting on the findings.
+  #   * Nothing consumes this workflow's conclusion. deploy-gke.yml's own gate
+  #     polls ci-checks.yml and ci-dast.yml by name; no one polls this file.
+  #
+  # KNOWN LIMITATION: this job cannot run on a pull request, because the
+  # workflow triggers only on push to release. It is first exercised on merge.
+  # continue-on-error is what makes that acceptable.
+  #
+  # WORTH DOING NEXT: run the same scan on a schedule. The deploy-time run
+  # mostly repeats what the pull request already scanned; the weekly one is
+  # where the value is, because that is what catches a newly published CVE
+  # against an unchanged running image.
+  # ===========================================================================
+  scan-deployed:
+    name: Scan the running image
+    needs: deploy
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      - name: Let Docker read from Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Connect to the cluster
+        uses: google-github-actions/get-gke-credentials@64bc7249bbcf78056bb92f14d3cedc2da193946c # v2.3.5
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          location: ${{ env.REGION }}
+
+      # The same read deploy's "Record what is running now" step performs for
+      # the rollback. Asking the cluster rather than assuming the tag we pushed
+      # is the point: if a rollback happened, this reports the older image, which
+      # is the one actually serving.
+      - name: Ask the cluster what is running
+        id: running
+        run: |
+          set -euo pipefail
+          for d in web agents; do
+            image="$(kubectl -n "$NAMESPACE" get deployment "$d" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}')"
+            if [ -z "$image" ]; then
+              echo "::warning::Could not read the running image for $d."
+              exit 1
+            fi
+            echo "$d=$image" >> "$GITHUB_OUTPUT"
+            echo "$d is running $image"
+          done
+
+      # Pulled on the RUNNER, not inside the Trivy container. `gcloud auth
+      # configure-docker` installs a credential helper that shells out to the
+      # gcloud binary; that binary does not exist inside the Trivy image, so a
+      # container-side pull would fail to authenticate. Pulling here and letting
+      # Trivy read the image through the Docker socket sidesteps it entirely.
+      - name: Pull the running image
+        env:
+          WEB: ${{ steps.running.outputs.web }}
+        run: |
+          set -euo pipefail
+          docker pull "$WEB"
+
+      - name: Trivy the running image
+        env:
+          WEB: ${{ steps.running.outputs.web }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.76.0 image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --format table \
+            --no-progress \
+            "$WEB" | tee trivy-running.txt
+          echo ""
+          echo "Both roles run the same image, so web is scanned and agents is identical."
+
+      # --ignore-unfixed above means this lists only findings somebody could
+      # actually act on. A clean result is a real statement: the image serving
+      # production has no fixable HIGH or CRITICAL CVEs.
+      - name: Summary
+        if: always()
+        env:
+          WEB: ${{ steps.running.outputs.web }}
+          AGENTS: ${{ steps.running.outputs.agents }}
+        run: |
+          {
+            echo "### Running image scan"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| web | \`${WEB:-unknown}\` |"
+            echo "| agents | \`${AGENTS:-unknown}\` |"
+            echo ""
+            echo "Fixable HIGH/CRITICAL only. Advisory — this job never fails the deploy."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: trivy-running-image
+          path: trivy-running.txt
+          retention-days: 14
+          if-no-files-found: warn

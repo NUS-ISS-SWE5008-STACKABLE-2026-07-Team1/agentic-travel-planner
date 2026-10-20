@@ -23,13 +23,14 @@
 # never reports on a PR that misses the filter, so every such merge waits
 # forever on a status that will never arrive. Same trap as ci-image-dast.yml.
 # =============================================================================
-name: CI — Manifests
+name: CI — Manifests & Dockerfile
 
 on:
   pull_request:
     branches: [main, release]
     paths:
       - 'deploy/k8s/**'
+      - 'Dockerfile'
       - '.github/workflows/ci-manifests.yml'
 
   # Also on the shared branches, so there is a record of whether what actually
@@ -38,6 +39,7 @@ on:
     branches: [main, release]
     paths:
       - 'deploy/k8s/**'
+      - 'Dockerfile'
       - '.github/workflows/ci-manifests.yml'
 
   workflow_dispatch:
@@ -164,6 +166,77 @@ jobs:
           print("All manifests valid; only the four known GKE CRDs were skipped.")
           PY
 
+      # ---- Workload security posture, REPORT ONLY -------------------------
+      # kubeconform above answers "is this valid Kubernetes?". This answers a
+      # different question: "is this workload configured defensively?" — non-root,
+      # dropped capabilities, no privilege escalation, a read-only root
+      # filesystem, resource limits.
+      #
+      # DELIBERATELY REPORT-ONLY. First real run, 2026-10-20: both Deployments
+      # score 3, with one CRITICAL and seven advisories each. Gating this today
+      # would have turned the workflow red immediately, which is exactly why the
+      # census came before the threshold.
+      #
+      # The good half is already true — runAsNonRoot, runAsUser 10001,
+      # seccompProfile RuntimeDefault, allowPrivilegeEscalation false,
+      # capabilities drop ALL, requests plus a memory limit, all three probes.
+      #
+      # What it flags, and what each one is actually worth:
+      #
+      #   * [critical] Secrets passed as environment variables. Legitimate point
+      #     — env vars surface in crash dumps and `/proc`. Fixing it means
+      #     mounting the Secret as files and teaching the app to read them, so it
+      #     is an architectural change, not a manifest tweak. Decide deliberately;
+      #     do not suppress it quietly.
+      #   * automountServiceAccountToken unset. Neither role calls the Kubernetes
+      #     API, so setting it false is free hardening — the cheapest real win
+      #     here.
+      #   * serviceAccountName unset, so both run as `default`. Pairs with the
+      #     item above.
+      #   * readOnlyRootFilesystem unset. Not a one-liner: the app writes traces
+      #     to instance/traces, so it needs an emptyDir.
+      #   * runAsGroup not set above 10000. runAsUser is; the group was missed.
+      #   * No CPU limit. CORRECT on Autopilot, which bills requests and where a
+      #     CPU limit only buys throttling. Suppress this one when gating, never
+      #     "fix" it.
+      #   * AppArmor profile, and hostUsers == false (user namespaces). Both are
+      #     constrained by what Autopilot permits; check before promising either.
+      #
+      # TO GATE IT LATER: settle the critical and pick a score threshold, then
+      # drop the `|| true`. Do that AFTER the paths filter comes off, for the
+      # same reason recorded at the top of this file.
+      #
+      # Only rendered-app.yaml is scanned: kubesec rates workloads, and the
+      # infrastructure bundle contains none.
+      - name: Workload security posture (kubesec, report only)
+        if: always()
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          docker run --rm -i kubesec/kubesec:v2.15.0 scan /dev/stdin \
+            < rendered-app.yaml > kubesec.json || true
+          python3 - <<'PY'
+          import json
+          try:
+              with open("kubesec.json", encoding="utf-8") as fh:
+                  report = json.load(fh)
+          except Exception as exc:
+              print(f"::warning::kubesec produced no readable report ({exc}). "
+                    "Report-only, so this does not fail the job — but it means "
+                    "there is no posture evidence for this run.")
+              raise SystemExit(0)
+
+          for item in report if isinstance(report, list) else [report]:
+              name = (item.get("object") or "?")
+              print(f"\n=== {name}  score {item.get('score')} ===")
+              scoring = item.get("scoring") or {}
+              for bucket in ("critical", "advise"):
+                  for rule in scoring.get(bucket) or []:
+                      sel = rule.get("selector") or rule.get("id") or "?"
+                      print(f"  [{bucket}] {sel}  {rule.get('reason','')}")
+          print("\nReport only — this step never fails the job.")
+          PY
+
       - name: Upload the rendered manifests
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -173,5 +246,35 @@ jobs:
             rendered-infra.yaml
             rendered-app.yaml
             kubeconform.json
+            kubesec.json
           retention-days: 14
           if-no-files-found: warn
+
+  # ===========================================================================
+  # Dockerfile lint. Separate job so its result is readable on its own, and so a
+  # slow manifest render never delays it.
+  #
+  # --failure-threshold error, NOT the default. As of 2026-10-20 hadolint
+  # reports exactly one finding, DL3042 at Dockerfile:52 — and it is correct:
+  # that `pip install --upgrade setuptools wheel` runs BEFORE PIP_NO_CACHE_DIR=1
+  # is set four lines later, so it really does leave a pip cache in the layer.
+  # The later install is after the ENV and is not flagged.
+  #
+  # It is a warning, so this threshold passes today while still failing on a
+  # genuine error. The fix (add --no-cache-dir to that line, or move the ENV
+  # block above it) changes the production image and is deliberately NOT part of
+  # this change — it belongs with the batch scheduled after 25 Oct.
+  # ===========================================================================
+  dockerfile:
+    name: Dockerfile lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: hadolint
+        run: |
+          set -euo pipefail
+          docker run --rm -i hadolint/hadolint:v2.15.1 \
+            hadolint --no-color --failure-threshold error - < Dockerfile
+          echo "No error-level findings. Warnings, if any, are printed above."
