@@ -31,3 +31,9 @@ deploy/
 *.html
 *.txt
 !requirements.txt
+
+# A developer tool, not part of the app. scripts/ is COPYed into the image
+# wholesale (see the Dockerfile's "only what runs" comment), and this one
+# shells out to `gh`, which does not exist in the image. Keep the image's
+# contents a reviewed list.
+scripts/pipeline_timeline.py
