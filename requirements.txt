@@ -9,7 +9,7 @@
 
 # Web application
 Flask>=3.1,<4
-Werkzeug>=3.1,<4
+Werkzeug>=3.1.9,<4
 python-dotenv>=1.0,<2
 Flask-WTF>=1.2,<2
 email-validator>=2.2,<3
@@ -17,6 +17,10 @@ psycopg[binary,pool]>=3.2,<4
 
 # Outbound HTTP: scripts/e2e_test.py and the deploy/ smoke and load tests
 requests>=2.32,<3
+# requests and the model SDKs pull this in transitively. Keep the patched
+# release as an explicit security floor so a later lock regeneration cannot
+# resolve back to a version affected by PYSEC-2026-4320.
+certifi>=2026.10.19
 # Not used directly — requests pulls it in. Named here only as a security
 # floor: 2.7.0 carries CVE-2026-97687, -97688 and -97689, which fail the
 # blocking pip-audit step in ci-checks.yml and so block every merge. A floor

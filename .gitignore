@@ -25,6 +25,7 @@ test-results/
 
 # Local document/presentation generation workspaces.
 .codex-presentation-work/
+.codex-ppt-build/
 .codex-report-work/
 .codex-doc-work/
 .codex-doc-fix/
