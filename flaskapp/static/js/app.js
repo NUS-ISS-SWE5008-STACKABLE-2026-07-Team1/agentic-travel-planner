@@ -1056,18 +1056,19 @@ if (adminMonitor) {
       {id: "submitted", label: "User submission", x: 15, y: 188, status: "completed"},
       {id: "intake", label: "Orchestrator intake", x: 185, y: 188, status: intakeCompleted ? "completed" : "processing"},
       {id: "start", label: "Request validated", x: 355, y: 188, status: hasStarted ? "completed" : "queued"},
-      {id: "flight_agent", label: "Flight", x: 545, y: 28, status: runStatus.get("flight_agent") || "queued"},
-      {id: "hotel_transport_agent", label: "Hotel & transport", x: 545, y: 128, status: runStatus.get("hotel_transport_agent") || "queued"},
-      {id: "accessibility_agent", label: "Accessibility", x: 545, y: 228, status: runStatus.get("accessibility_agent") || "queued"},
+      {id: "flight_agent", label: "Flight", x: 545, y: 48, status: runStatus.get("flight_agent") || "queued"},
+      {id: "hotel_transport_agent", label: "Hotel & transport", x: 545, y: 188, status: runStatus.get("hotel_transport_agent") || "queued"},
       {id: "risk_advisory_agent", label: "Risk & advisory", x: 545, y: 328, status: runStatus.get("risk_advisory_agent") || "queued"},
-      {id: "orchestrator_agent", label: "Orchestrator", x: 900, y: 188, status: runStatus.get("orchestrator_agent") || "queued"},
-      {id: "end", label: "Final itinerary", x: 1095, y: 188, status: request.status === "completed" ? "completed" : request.status === "failed" ? "failed" : "queued"}
+      {id: "accessibility_agent", label: "Accessibility audit", x: 745, y: 188, status: runStatus.get("accessibility_agent") || "queued"},
+      {id: "orchestrator_agent", label: "Orchestrator", x: 925, y: 188, status: runStatus.get("orchestrator_agent") || "queued"},
+      {id: "end", label: "Final itinerary", x: 1100, y: 188, status: request.status === "completed" ? "completed" : request.status === "failed" ? "failed" : "queued"}
     ];
     const byId = new Map(nodes.map((node) => [node.id, node]));
-    const specialists = ["flight_agent", "hotel_transport_agent", "accessibility_agent", "risk_advisory_agent"];
+    const discoverySpecialists = ["flight_agent", "hotel_transport_agent", "risk_advisory_agent"];
     const edges = [["submitted", "intake"], ["intake", "start"]]
-      .concat(specialists.flatMap((agent) => [["start", agent], [agent, "orchestrator_agent"]]))
-      .concat([["orchestrator_agent", "end"]]);
+      .concat(discoverySpecialists.map((agent) => ["start", agent]))
+      .concat(discoverySpecialists.map((agent) => [agent, "accessibility_agent"]))
+      .concat([["accessibility_agent", "orchestrator_agent"], ["orchestrator_agent", "end"]]);
     edges.forEach(([sourceId, targetId]) => {
       const source = byId.get(sourceId); const target = byId.get(targetId);
       const path = document.createElementNS(svgNamespace, "path");
