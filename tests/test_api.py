@@ -354,6 +354,8 @@ def test_admin_page_and_activity_require_configured_admin(tmp_path):
     assert b"Orchestrator conversation" not in admin_page.data
     assert b"Agent stages" not in admin_page.data
     assert b"Processing Timeline" in admin_page.data
+    assert b"Accessibility audits their candidates" in admin_page.data
+    assert b"Accessibility then audits their candidates before the orchestrator" in admin_page.data
     assert b"User Requests" in admin_page.data
     assert b"<th>Session</th>" in admin_page.data
     response = client.get("/api/v1/admin/activity")
