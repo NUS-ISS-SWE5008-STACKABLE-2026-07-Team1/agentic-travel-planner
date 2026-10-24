@@ -150,6 +150,14 @@ def live_server(tmp_path_factory, stub_llm_base_url) -> LiveServer:
         LLM_MODEL = "stub-model"
         LOGIN_EMAIL = login_email
         LOGIN_PASSWORD_HASH = generate_password_hash(login_password)
+        # Both are required, and neither is redundant. `Config.ADMIN_EMAIL`
+        # defaults to `LOGIN_EMAIL` — but it is evaluated when the class body
+        # runs, i.e. at import, against the module-level LOGIN_EMAIL rather
+        # than the one overridden above. Without these two lines the demo user
+        # is not an admin and /admin answers 403, which is why the only page
+        # loading chart.js had no browser test at all.
+        ADMIN_EMAIL = login_email
+        ADMIN_EMAILS = (login_email,)
 
     app = create_app(config_object=E2EConfig)
     server = make_server("127.0.0.1", 0, app, threaded=True)

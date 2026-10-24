@@ -88,9 +88,13 @@ env:
 
 jobs:
   gate:
-    name: Wait for CI on this commit
+    name: Wait for CI and DAST on this commit
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # Two workflows waited on in turn, each with a 20-minute finish deadline,
+    # so the worst legible case is 40 minutes of polling. The extra 5 leaves
+    # room for that to end with this job's own `::error::` rather than the
+    # runner killing it mid-poll with nothing to read.
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: read
@@ -124,48 +128,95 @@ jobs:
           echo "tag=${sha::7}" >> "$GITHUB_OUTPUT"
           echo "Deploying $sha"
 
-      - name: Wait for CI's verdict
+      # Both workflows, not just ci-checks.
+      #
+      # DAST was already a required check, so it had gated the MERGE. What it
+      # had not gated was this: on 2026-10-18 the rollout finished at 10:43:51
+      # and the DAST run for the same commit finished at 10:45:23. Production
+      # was live for 1m32s before the scan of what shipped had an answer, and
+      # nothing consumed that answer when it arrived. Now it does.
+      #
+      # The cost is real: push-to-live goes from roughly 6-10 minutes to
+      # roughly 15-25, because ci-dast is the slower of the two by design (an
+      # 8-minute active scan inside a 20-minute job). If a demo involves
+      # watching a deploy, budget for that or deploy the day before.
+      - name: Wait for CI and DAST verdicts
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.pick.outputs.sha }}
         run: |
           set -euo pipefail
-          # CI starts within seconds of the push. If nothing has appeared after
-          # five minutes, CI never ran on this commit as a push to release (it is
-          # a commit from inside a merged branch) and there is no verdict to trust.
-          appear_deadline=$(( $(date +%s) + 300 ))
-          finish_deadline=$(( $(date +%s) + 1800 ))
-          while :; do
-            run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-checks.yml \
-                     --commit "$SHA" --event push --limit 1 \
-                     --json status,conclusion,url --jq '.[0] // empty')"
-            now=$(date +%s)
-            if [ -z "$run" ]; then
-              if [ "$now" -gt "$appear_deadline" ]; then
-                echo "::error::No CI run found for $SHA as a push to release. Deploy a merge commit that CI checked."
-                exit 1
-              fi
-              echo "CI has not started for $SHA yet; waiting."
-            else
-              status="$(jq -r .status <<<"$run")"
-              conclusion="$(jq -r .conclusion <<<"$run")"
-              url="$(jq -r .url <<<"$run")"
-              if [ "$status" = "completed" ]; then
-                if [ "$conclusion" = "success" ]; then
-                  echo "CI passed: $url"
-                  exit 0
+
+          # Every workflow whose verdict this deploy depends on. Adding a third
+          # is a one-word edit.
+          WORKFLOWS="ci-checks.yml ci-dast.yml"
+
+          # Blocks until one workflow's run for $SHA concludes. 0 on success,
+          # 1 on anything else — including a run that never appeared, which
+          # means this commit was never checked as a push to release.
+          wait_for() {
+            local workflow="$1"
+            local run status conclusion url now
+            local url=""
+            # Per-workflow, computed on entry rather than shared: a single
+            # budget would silently halve the allowance for whichever is
+            # polled second.
+            #
+            # Runs start within seconds of the push. Nothing after five minutes
+            # means it never ran on this commit as a push to release (it is a
+            # commit from inside a merged branch), so there is no verdict to
+            # trust. The finish deadline matches ci-dast's own 20-minute job
+            # timeout — a run still going after that has been killed anyway,
+            # and two sequential 30-minute waits would outlast this job's own
+            # timeout-minutes and be killed mid-poll rather than failing with
+            # something readable.
+            local appear_deadline=$(( $(date +%s) + 300 ))
+            local finish_deadline=$(( $(date +%s) + 1200 ))
+            while :; do
+              run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
+                       --commit "$SHA" --event push --limit 1 \
+                       --json status,conclusion,url --jq '.[0] // empty')"
+              now=$(date +%s)
+              if [ -z "$run" ]; then
+                if [ "$now" -gt "$appear_deadline" ]; then
+                  echo "::error::No $workflow run found for $SHA as a push to release. Deploy a merge commit that both workflows checked."
+                  return 1
                 fi
-                echo "::error::CI concluded '$conclusion' for $SHA — not deploying. $url"
-                exit 1
+                echo "$workflow has not started for $SHA yet; waiting."
+              else
+                status="$(jq -r .status <<<"$run")"
+                conclusion="$(jq -r .conclusion <<<"$run")"
+                url="$(jq -r .url <<<"$run")"
+                if [ "$status" = "completed" ]; then
+                  if [ "$conclusion" = "success" ]; then
+                    echo "$workflow passed: $url"
+                    return 0
+                  fi
+                  # A cancelled run is not a pass. Both workflows set
+                  # cancel-in-progress, so a second push to release cancels the
+                  # first one's runs: deploy the head, or re-run the workflows
+                  # on the older commit before deploying it.
+                  echo "::error::$workflow concluded '$conclusion' for $SHA — not deploying. $url"
+                  return 1
+                fi
+                echo "$workflow is $status: $url"
               fi
-              echo "CI is $status: $url"
-            fi
-            if [ "$now" -gt "$finish_deadline" ]; then
-              echo "::error::CI did not finish within 30 minutes."
-              exit 1
-            fi
-            sleep 20
+              if [ "$now" -gt "$finish_deadline" ]; then
+                echo "::error::$workflow did not finish within 20 minutes. ${url:-no run URL yet}"
+                return 1
+              fi
+              sleep 20
+            done
+          }
+
+          # Sequential rather than interleaved. Both workflows start within a
+          # second of the same push and run concurrently on GitHub's side, so
+          # the wall clock is max(ci-checks, ci-dast) either way — and the log
+          # reads as a checklist.
+          for workflow in $WORKFLOWS; do
+            wait_for "$workflow" || exit 1
           done
+          echo "All required workflows passed for $SHA: $WORKFLOWS"
 
   deploy:
     name: Build, push and roll out
@@ -301,3 +352,141 @@ jobs:
             echo "| Before (web) | \`${BEFORE_WEB:-unknown}\` |"
             echo "| Before (agents) | \`${BEFORE_AGENTS:-unknown}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Scan the image the cluster is ACTUALLY running.
+  #
+  # WHAT THIS ADDS THAT NOTHING ELSE DOES
+  #
+  # ci-image-dast.yml Trivy-scans an image it builds from the commit, and only
+  # when image-relevant files change. Neither of those is the same as "what is
+  # serving traffic right now". A CVE published next week against an image
+  # nobody has touched is invisible to every other check we have. This reads the
+  # running image reference out of the cluster and scans that.
+  #
+  # It touches no HTTP, sends no traffic to the site, and needs no IAP: it is a
+  # registry read, not a request to the application.
+  #
+  # WHY IT CANNOT BREAK A DEPLOY
+  #
+  #   * needs: deploy — it runs strictly AFTER the rollout has finished and been
+  #     health-checked. It cannot delay or affect the deployment.
+  #   * continue-on-error: true — REQUIRED, not optional. Without it a CVE
+  #     published upstream would turn this workflow red and read as "the deploy
+  #     failed" when the deploy was fine. Remove it only once someone owns
+  #     acting on the findings.
+  #   * Nothing consumes this workflow's conclusion. deploy-gke.yml's own gate
+  #     polls ci-checks.yml and ci-dast.yml by name; no one polls this file.
+  #
+  # KNOWN LIMITATION: this job cannot run on a pull request, because the
+  # workflow triggers only on push to release. It is first exercised on merge.
+  # continue-on-error is what makes that acceptable.
+  #
+  # WORTH DOING NEXT: run the same scan on a schedule. The deploy-time run
+  # mostly repeats what the pull request already scanned; the weekly one is
+  # where the value is, because that is what catches a newly published CVE
+  # against an unchanged running image.
+  # ===========================================================================
+  scan-deployed:
+    name: Scan the running image
+    needs: deploy
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      - name: Let Docker read from Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Connect to the cluster
+        uses: google-github-actions/get-gke-credentials@64bc7249bbcf78056bb92f14d3cedc2da193946c # v2.3.5
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          location: ${{ env.REGION }}
+
+      # The same read deploy's "Record what is running now" step performs for
+      # the rollback. Asking the cluster rather than assuming the tag we pushed
+      # is the point: if a rollback happened, this reports the older image, which
+      # is the one actually serving.
+      - name: Ask the cluster what is running
+        id: running
+        run: |
+          set -euo pipefail
+          for d in web agents; do
+            image="$(kubectl -n "$NAMESPACE" get deployment "$d" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}')"
+            if [ -z "$image" ]; then
+              echo "::warning::Could not read the running image for $d."
+              exit 1
+            fi
+            echo "$d=$image" >> "$GITHUB_OUTPUT"
+            echo "$d is running $image"
+          done
+
+      # Pulled on the RUNNER, not inside the Trivy container. `gcloud auth
+      # configure-docker` installs a credential helper that shells out to the
+      # gcloud binary; that binary does not exist inside the Trivy image, so a
+      # container-side pull would fail to authenticate. Pulling here and letting
+      # Trivy read the image through the Docker socket sidesteps it entirely.
+      - name: Pull the running image
+        env:
+          WEB: ${{ steps.running.outputs.web }}
+        run: |
+          set -euo pipefail
+          docker pull "$WEB"
+
+      - name: Trivy the running image
+        env:
+          WEB: ${{ steps.running.outputs.web }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.76.0 image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --format table \
+            --no-progress \
+            "$WEB" | tee trivy-running.txt
+          echo ""
+          echo "Both roles run the same image, so web is scanned and agents is identical."
+
+      # --ignore-unfixed above means this lists only findings somebody could
+      # actually act on. A clean result is a real statement: the image serving
+      # production has no fixable HIGH or CRITICAL CVEs.
+      - name: Summary
+        if: always()
+        env:
+          WEB: ${{ steps.running.outputs.web }}
+          AGENTS: ${{ steps.running.outputs.agents }}
+        run: |
+          {
+            echo "### Running image scan"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| web | \`${WEB:-unknown}\` |"
+            echo "| agents | \`${AGENTS:-unknown}\` |"
+            echo ""
+            echo "Fixable HIGH/CRITICAL only. Advisory — this job never fails the deploy."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: trivy-running-image
+          path: trivy-running.txt
+          retention-days: 14
+          if-no-files-found: warn

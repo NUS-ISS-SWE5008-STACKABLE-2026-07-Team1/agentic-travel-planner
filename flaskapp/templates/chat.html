@@ -84,7 +84,8 @@
               <div id="planning-progress-wrap" class="planning-progress-wrap mb-3">
                 <div class="d-flex align-items-center gap-3">
                   <div class="planning-progress flex-grow-1" role="progressbar" aria-label="Estimated planning progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="5">
-                    <div id="planning-progress-bar" class="planning-progress-bar" style="width: 5%"></div>
+                    {# Starting width is in .planning-progress-bar, not a style= attribute: inline style is forbidden by the CSP. #}
+                    <div id="planning-progress-bar" class="planning-progress-bar"></div>
                   </div>
                   <div id="planning-travel-icon" class="planning-travel-icon" aria-hidden="true">✈</div>
                 </div>

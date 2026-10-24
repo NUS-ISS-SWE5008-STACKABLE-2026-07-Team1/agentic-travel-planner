@@ -134,6 +134,32 @@ def extract_intent(llm, prompt: str, callbacks: list | None = None) -> IntakeExt
     )
 
 
+PER_TRAVELLER_NAMES = frozenset(name for name, *_ in PER_TRAVELLER_FIELDS)
+
+
+def _merge_per_traveller(kept: list | None, incoming: list | None) -> list:
+    """Overlay one per-traveller list onto what the traveller already told us.
+
+    Slot by slot, because `None` in an extracted list means "this turn said
+    nothing about that person" — not "forget what they said earlier." The model
+    sees only the latest message (`extract_intent`), so a turn that adds a third
+    traveller comes back as `[None, None, 5]`: the child it was told about, and
+    two placeholders for the adults it was never shown. Replacing the list
+    wholesale turned those placeholders into erased answers, and the traveller
+    was asked for ages and genders they had already given — the "it forgot the
+    conversation" report.
+
+    A stated value still corrects an earlier one, because a non-None incoming
+    slot always wins. That is the same rule the scalar fields follow.
+    """
+    kept, incoming = list(kept or []), list(incoming or [])
+    return [
+        incoming[index] if index < len(incoming) and incoming[index] is not None
+        else (kept[index] if index < len(kept) else None)
+        for index in range(max(len(kept), len(incoming)))
+    ]
+
+
 def merge_intents(current: ExtractedIntent, update: ExtractedIntent) -> ExtractedIntent:
     """Merge a newly extracted chat turn into the confirmed trip state."""
     data = current.model_dump(mode="json")
@@ -143,7 +169,9 @@ def merge_intents(current: ExtractedIntent, update: ExtractedIntent) -> Extracte
         "traveller_genders", "traveller_accessibility_needs",
     }
     for name, value in incoming.items():
-        if value is not None and (name not in list_fields or value):
+        if name in PER_TRAVELLER_NAMES:
+            data[name] = _merge_per_traveller(data.get(name), value)
+        elif value is not None and (name not in list_fields or value):
             data[name] = value
     travellers = data.get("travellers")
     if travellers is not None:
