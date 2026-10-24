@@ -16,7 +16,7 @@ Source backlog: `docs/security/cicd-owner-notes.md` (git-ignored owner notes).
 | `ci-fast.yml` | `.github/workflows/ci-fast.yml` | the `secrets`, `tests`, `sast` jobs |
 | `ci-dast.yml` | `.github/workflows/ci-dast.yml` | the `dast` job |
 | `ci-evals.yml` | `.github/workflows/ci-evals.yml` | new — nothing today |
-| `ci_stub_provider.py` | `scripts/ci_stub_provider.py` | new — nothing today |
+| ~~`ci_stub_provider.py`~~ | `scripts/ci_stub_provider.py` | promoted; the draft copy was removed 2026-10-11 |
 
 Approving all of these means **deleting `.github/workflows/security.yml`**,
 since its four jobs are redistributed across the first two files.

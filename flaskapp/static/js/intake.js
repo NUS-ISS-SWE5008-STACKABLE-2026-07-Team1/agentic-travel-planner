@@ -81,12 +81,33 @@ if (intentForm) {
     chips.className = "intake-gap-chips";
     for (const field of state.missing) {
       const chip = document.createElement("span");
+      /* A gap that corrects an answer already given is not the same as one the
+         traveller has not reached, and this block is what they read after a
+         chat reply — the form card with its hints is a different path. Showing
+         only the label here is why "departing 2026-08-28" came back as a bare
+         "Departure date" chip with no explanation. */
+      if (field.problem) chip.className = "intake-gap-chip-problem";
       chip.textContent = field.traveller_index === null
         ? field.label
         : `Traveller ${field.traveller_index + 1}: ${field.label}`;
       chips.append(chip);
     }
     progress.append(chips);
+
+    /* The corrections themselves, spelled out. The chip says which field; this
+       says what is wrong with it and what to do. */
+    const problems = state.missing.filter((field) => field.problem && field.hint);
+    if (problems.length) {
+      const list = document.createElement("div");
+      list.className = "intake-progress-problems";
+      list.setAttribute("role", "alert");
+      for (const field of problems) {
+        const line = document.createElement("div");
+        line.textContent = `${field.label}: ${field.hint}`;
+        list.append(line);
+      }
+      progress.append(list);
+    }
     conversation.append(progress);
     scrollConversationToLatest();
   };
@@ -170,7 +191,15 @@ if (intentForm) {
 
     if (field.hint) {
       const hint = document.createElement("div");
-      hint.className = "form-text";
+      /* A correction and a piece of guidance are not the same thing. Rendering
+         "Enter a future date" in the same muted grey as "Leave blank if none"
+         is why the message was being missed, so a problem gets its own style,
+         is announced to screen readers, and marks the input it belongs to. */
+      hint.className = field.problem ? "intake-hint-problem" : "form-text";
+      if (field.problem) {
+        hint.setAttribute("role", "alert");
+        input.classList.add("is-invalid");
+      }
       hint.textContent = field.hint;
       wrapper.append(hint);
     }
@@ -294,7 +323,7 @@ if (intentForm) {
     if (initialPrompt) {
       sessionStorage.removeItem("atlas-intake-prompt");
       promptInput.value = initialPrompt;
-      submitPrompt(initialPrompt);
+      submitPrompt(initialPrompt).catch((error) => showError(error.message));
     } else {
       bubble("intake-bubble-assistant", "Tell me what you have in mind. I’ll make sure the trip brief is complete before involving the specialist agents.");
       promptInput.focus();
@@ -304,6 +333,7 @@ if (intentForm) {
   // cleanup request with `keepalive`, so navigation must not wait for that
   // request to finish (or a slow response can leave the user stuck here).
   window.addEventListener("pagehide", () => {
-    if (!sessionHandoff) endSession();
+    // Best effort: the page is going away, so a failure has nowhere to show.
+    if (!sessionHandoff) endSession().catch(() => {});
   });
 }

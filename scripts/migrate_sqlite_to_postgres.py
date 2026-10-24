@@ -21,14 +21,19 @@ rather than dropping it. --dry-run runs the same check against the
 destination (read-only — it opens a connection but writes nothing) so this
 surfaces before anything is copied.
 
-    python scripts/migrate_sqlite_to_postgres.py \
-        --source instance/travel_planner.sqlite3 \
-        --destination "$DATABASE_URL"
+    DATABASE_URL=... python scripts/migrate_sqlite_to_postgres.py \
+        --source instance/travel_planner.sqlite3
+
+The destination is read from the DATABASE_URL environment variable, never
+from the command line: a DSN carries the
+password, and an argument would leave it in shell history and in the process
+list for anyone on the machine to read.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -294,7 +299,6 @@ def reset_sequences(destination) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default="instance/travel_planner.sqlite3")
-    parser.add_argument("--destination", required=True)
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Connect to source and destination and report source counts "
@@ -309,14 +313,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     arguments = parser.parse_args(argv)
 
-    if not is_postgres(arguments.destination):
-        print(f"Destination is not a Postgres DSN: {arguments.destination}")
+    destination_url = os.environ.get("DATABASE_URL", "")
+    if not is_postgres(destination_url):
+        # Name the variable, never print its value: it holds the password.
+        print("$DATABASE_URL is not set to a Postgres DSN")
         return 2
     if not Path(arguments.source).is_file():
         print(f"No SQLite database at {arguments.source}")
         return 2
 
-    source = sqlite3.connect(arguments.source)
+    # NOSONAR on the next line: "connection string injection" is a false
+    # positive. sqlite3.connect() without uri=True treats --source purely as a
+    # file name (checked to exist above), so it cannot carry connection options.
+    source = sqlite3.connect(arguments.source)  # NOSONAR
     source.row_factory = sqlite3.Row
 
     if arguments.dry_run:
@@ -324,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
         # never writes a row. If the destination's schema does not exist
         # yet (a brand-new database), there is nothing to compare against
         # for that table and check_column_drift says so instead of raising.
-        destination = connect(arguments.destination)
+        destination = connect(destination_url)
         try:
             drifted = False
             for table in TABLES:
@@ -346,8 +355,8 @@ def main(argv: list[str] | None = None) -> int:
             source.close()
         return 1 if drifted else 0
 
-    initialize(arguments.destination)
-    destination = connect(arguments.destination)
+    initialize(destination_url)
+    destination = connect(destination_url)
     try:
         occupied = blocking_tables(destination, TABLES, arguments.allow_nonempty)
         if occupied:

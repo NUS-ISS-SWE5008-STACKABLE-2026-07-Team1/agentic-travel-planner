@@ -24,7 +24,8 @@ from flaskapp.travel_ai.usage import TokenUsageCallback
 from flaskapp.travel_ai.tracing import AuditTracer
 from flaskapp.travel_ai.agents.orchestrator_agent.intake import (
     clarification_question, compute_gaps, extract_intent, merge_answers,
-    merge_intents, to_request_payload,
+    drop_impossible_dates, merge_intents, past_dates, resolve_place_countries,
+    to_request_payload,
 )
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
     ExtractedIntent, IntentResponse,
@@ -248,7 +249,19 @@ def resolve_travel_intent():
 
 def _intent_response(extracted, question: str, request_id: str | None = None):
     """Shared reply shape for both intake endpoints."""
-    missing = compute_gaps(extracted)
+    # Derive here rather than before saving, so the stored intent stays the
+    # record of what the traveller actually said. This is the one place that
+    # both asks the questions and builds the final payload, so a country
+    # derived here reaches the card, the gap list and `TravelRequest` alike.
+    extracted = resolve_place_countries(extracted)
+    # A date the model invented is refused here for the same reason: this is
+    # the one place that both asks the questions and builds the payload, so a
+    # dropped date becomes a question instead of a trip in the past.
+    # Taken before the guard drops them, so the gap can say which date had
+    # passed rather than asking again as though it were never answered.
+    gone = past_dates(extracted)
+    extracted = drop_impossible_dates(extracted)
+    missing = compute_gaps(extracted, past=gone)
     complete = not missing
     return IntentResponse(
         complete=complete,
@@ -440,6 +453,17 @@ def _prompt_catalog():
     return items
 
 
+def _looks_like_email(value: str) -> bool:
+    r"""One @, no whitespace, a dot inside the domain.
+
+    What `[^@\s]+@[^@\s]+\.[^@\s]+` accepted, without that pattern's
+    backtracking on a long run of dots in the domain.
+    """
+    local, at, domain = value.partition("@")
+    return (bool(at and local) and "@" not in domain
+            and not any(ch.isspace() for ch in value) and "." in domain[1:-1])
+
+
 @travel_api_bp.post("/admin/administrators")
 def create_administrator():
     if not is_admin_email(current_app.config, session.get("user_email")):
@@ -448,7 +472,7 @@ def create_administrator():
     name = str(payload.get("name", "")).strip()
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
-    if not name or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+    if not name or not _looks_like_email(email):
         return jsonify(error="A name and valid email address are required"), 422
     if len(password) < 12 or not re.search(r"[A-Z]", password) or not re.search(r"[a-z]", password) or not re.search(r"\d", password):
         return jsonify(error="Password must be at least 12 characters with upper-case, lower-case, and numeric characters"), 422

@@ -1,0 +1,280 @@
+# =============================================================================
+# Validates the Kubernetes manifests before they are applied, instead of
+# discovering a problem during a rollout.
+#
+# WHAT WAS MISSING
+#
+# Nothing validated deploy/k8s/ at all. `kubectl apply -k` inside deploy-gke.yml
+# was the first and only check, which is the worst possible moment: the gate has
+# already passed, the image is already built and pushed, and a typo in a
+# manifest surfaces as a failed rollout against the live cluster.
+#
+# WHY THIS IS ITS OWN FILE, AND NOT A JOB IN ci-checks.yml
+#
+# deploy-gke.yml's gate polls two workflows by name — ci-checks.yml and
+# ci-dast.yml — and requires `conclusion == success` for BOTH. A new job inside
+# ci-checks.yml would therefore block every deployment the moment it went red,
+# even though it is not in the branch ruleset and blocks no merge. That is not
+# "advisory"; it is the most blocking position in the pipeline, reached by
+# accident. A separate workflow is genuinely advisory: nothing polls it.
+#
+# TO MAKE IT BLOCKING LATER: drop the paths filter below FIRST, then add
+# "Manifests" to the ruleset's required checks. A path-filtered required check
+# never reports on a PR that misses the filter, so every such merge waits
+# forever on a status that will never arrive. Same trap as ci-image-dast.yml.
+# =============================================================================
+name: CI — Manifests & Dockerfile
+
+on:
+  pull_request:
+    branches: [main, release]
+    paths:
+      - 'deploy/k8s/**'
+      - 'Dockerfile'
+      - '.github/workflows/ci-manifests.yml'
+
+  # Also on the shared branches, so there is a record of whether what actually
+  # landed is valid. It gates nothing either way.
+  push:
+    branches: [main, release]
+    paths:
+      - 'deploy/k8s/**'
+      - 'Dockerfile'
+      - '.github/workflows/ci-manifests.yml'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manifests-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifests:
+    name: Manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # The cluster's own minor version, read from
+      #   gcloud container clusters list --format=json(currentMasterVersion)
+      # which reported 1.35.8-gke.1439001 on 2026-10-20 (REGULAR channel).
+      #
+      # Validating against a version NEWER than the cluster accepts fields the
+      # cluster would reject; against an OLDER one it rejects fields that are
+      # actually fine. Neither is silent, but both are wrong, so this tracks the
+      # cluster. Autopilot upgrades it on the REGULAR channel — when this starts
+      # failing for schema reasons rather than manifest reasons, re-read the
+      # version and bump this line.
+      K8S_VERSION: "1.35.0"
+
+      # Kinds with no schema in kubeconform's set because they are GKE CRDs, not
+      # core Kubernetes. Skipping them is correct; skipping anything ELSE is the
+      # failure this job exists to prevent, so the list is asserted exactly.
+      EXPECTED_SKIPS: "BackendConfig ManagedCertificate FrontendConfig PodMonitoring"
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # `kubectl kustomize` rather than a separate kustomize download: kubectl
+      # is already on the runner and ships kustomize inside it, so there is one
+      # less pinned binary to keep honest.
+      - name: Render both kustomizations
+        run: |
+          set -euo pipefail
+          # deploy/k8s and deploy/k8s/app are deliberately separate: CI may only
+          # update the two Deployments, and the infrastructure around them is
+          # applied by hand after a diff. See deploy/k8s/app/kustomization.yaml.
+          kubectl kustomize deploy/k8s     > rendered-infra.yaml
+          kubectl kustomize deploy/k8s/app > rendered-app.yaml
+          echo "infra: $(grep -c '^kind:' rendered-infra.yaml) resources"
+          echo "app:   $(grep -c '^kind:' rendered-app.yaml) resources"
+
+      # -strict rejects unknown fields, which is what catches a misspelled key
+      # inside an otherwise valid kind.
+      - name: Validate against the Kubernetes schemas
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/work" -w /work \
+            ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict \
+            -kubernetes-version "$K8S_VERSION" \
+            -ignore-missing-schemas \
+            -output json \
+            rendered-infra.yaml rendered-app.yaml > kubeconform.json
+          echo "kubeconform finished; see the gate below for the verdict."
+
+      # The gate. -ignore-missing-schemas is necessary for the four GKE CRDs,
+      # but on its own it would also skip `kind: Deploymnet` without comment —
+      # a typo would pass as "unknown custom resource". So the skipped set is
+      # compared against the allowlist rather than trusted.
+      #
+      # It also fails closed: a missing or unparseable report is an error, not
+      # a pass, for the same reason the ZAP gate does.
+      - name: Gate on the result
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          from collections import Counter
+
+          try:
+              with open("kubeconform.json", encoding="utf-8") as fh:
+                  report = json.load(fh)
+          except (OSError, json.JSONDecodeError) as exc:
+              sys.exit(f"::error::Could not read kubeconform's report ({exc}). "
+                       "Treating that as a failure: a gate that passes when it "
+                       "cannot see is no gate.")
+
+          results = report.get("resources")
+          if results is None:
+              sys.exit("::error::Report has no 'resources' key; the output "
+                       "format changed. Refusing to pass.")
+
+          census = Counter(r.get("status", "unknown") for r in results)
+          print("Resources: " + ", ".join(f"{n} {s}" for s, n in sorted(census.items())))
+
+          bad = [r for r in results
+                 if r.get("status") not in ("statusValid", "statusSkipped")]
+          for r in bad:
+              kind = (r.get("kind") or "?")
+              name = (r.get("name") or "?")
+              print(f"::error::{r.get('status')}  {kind}/{name}: {r.get('msg','')}")
+
+          expected = set(os.environ["EXPECTED_SKIPS"].split())
+          skipped = {r.get("kind") for r in results
+                     if r.get("status") == "statusSkipped"}
+          unexpected = skipped - expected
+          missing = expected - skipped
+
+          if skipped:
+              print("Skipped (no schema): " + ", ".join(sorted(skipped)))
+          for kind in sorted(unexpected):
+              print(f"::error::'{kind}' was skipped but is not a known GKE CRD. "
+                    "Either it is a typo in a manifest, or EXPECTED_SKIPS needs "
+                    "it added with a reason.")
+          for kind in sorted(missing):
+              print(f"::warning::'{kind}' is in EXPECTED_SKIPS but was not "
+                    "skipped — it may have gained a schema, or been removed. "
+                    "Tidy the list.")
+
+          if bad or unexpected:
+              sys.exit(1)
+          print("All manifests valid; only the four known GKE CRDs were skipped.")
+          PY
+
+      # ---- Workload security posture, REPORT ONLY -------------------------
+      # kubeconform above answers "is this valid Kubernetes?". This answers a
+      # different question: "is this workload configured defensively?" — non-root,
+      # dropped capabilities, no privilege escalation, a read-only root
+      # filesystem, resource limits.
+      #
+      # DELIBERATELY REPORT-ONLY. First real run, 2026-10-20: both Deployments
+      # score 3, with one CRITICAL and seven advisories each. Gating this today
+      # would have turned the workflow red immediately, which is exactly why the
+      # census came before the threshold.
+      #
+      # The good half is already true — runAsNonRoot, runAsUser 10001,
+      # seccompProfile RuntimeDefault, allowPrivilegeEscalation false,
+      # capabilities drop ALL, requests plus a memory limit, all three probes.
+      #
+      # What it flags, and what each one is actually worth:
+      #
+      #   * [critical] Secrets passed as environment variables. Legitimate point
+      #     — env vars surface in crash dumps and `/proc`. Fixing it means
+      #     mounting the Secret as files and teaching the app to read them, so it
+      #     is an architectural change, not a manifest tweak. Decide deliberately;
+      #     do not suppress it quietly.
+      #   * automountServiceAccountToken unset. Neither role calls the Kubernetes
+      #     API, so setting it false is free hardening — the cheapest real win
+      #     here.
+      #   * serviceAccountName unset, so both run as `default`. Pairs with the
+      #     item above.
+      #   * readOnlyRootFilesystem unset. Not a one-liner: the app writes traces
+      #     to instance/traces, so it needs an emptyDir.
+      #   * runAsGroup not set above 10000. runAsUser is; the group was missed.
+      #   * No CPU limit. CORRECT on Autopilot, which bills requests and where a
+      #     CPU limit only buys throttling. Suppress this one when gating, never
+      #     "fix" it.
+      #   * AppArmor profile, and hostUsers == false (user namespaces). Both are
+      #     constrained by what Autopilot permits; check before promising either.
+      #
+      # TO GATE IT LATER: settle the critical and pick a score threshold, then
+      # drop the `|| true`. Do that AFTER the paths filter comes off, for the
+      # same reason recorded at the top of this file.
+      #
+      # Only rendered-app.yaml is scanned: kubesec rates workloads, and the
+      # infrastructure bundle contains none.
+      - name: Workload security posture (kubesec, report only)
+        if: always()
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          docker run --rm -i kubesec/kubesec:v2.15.0 scan /dev/stdin \
+            < rendered-app.yaml > kubesec.json || true
+          python3 - <<'PY'
+          import json
+          try:
+              with open("kubesec.json", encoding="utf-8") as fh:
+                  report = json.load(fh)
+          except Exception as exc:
+              print(f"::warning::kubesec produced no readable report ({exc}). "
+                    "Report-only, so this does not fail the job — but it means "
+                    "there is no posture evidence for this run.")
+              raise SystemExit(0)
+
+          for item in report if isinstance(report, list) else [report]:
+              name = (item.get("object") or "?")
+              print(f"\n=== {name}  score {item.get('score')} ===")
+              scoring = item.get("scoring") or {}
+              for bucket in ("critical", "advise"):
+                  for rule in scoring.get(bucket) or []:
+                      sel = rule.get("selector") or rule.get("id") or "?"
+                      print(f"  [{bucket}] {sel}  {rule.get('reason','')}")
+          print("\nReport only — this step never fails the job.")
+          PY
+
+      - name: Upload the rendered manifests
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rendered-manifests
+          path: |
+            rendered-infra.yaml
+            rendered-app.yaml
+            kubeconform.json
+            kubesec.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ===========================================================================
+  # Dockerfile lint. Separate job so its result is readable on its own, and so a
+  # slow manifest render never delays it.
+  #
+  # --failure-threshold error, NOT the default. As of 2026-10-20 hadolint
+  # reports exactly one finding, DL3042 at Dockerfile:52 — and it is correct:
+  # that `pip install --upgrade setuptools wheel` runs BEFORE PIP_NO_CACHE_DIR=1
+  # is set four lines later, so it really does leave a pip cache in the layer.
+  # The later install is after the ENV and is not flagged.
+  #
+  # It is a warning, so this threshold passes today while still failing on a
+  # genuine error. The fix (add --no-cache-dir to that line, or move the ENV
+  # block above it) changes the production image and is deliberately NOT part of
+  # this change — it belongs with the batch scheduled after 25 Oct.
+  # ===========================================================================
+  dockerfile:
+    name: Dockerfile lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: hadolint
+        run: |
+          set -euo pipefail
+          docker run --rm -i hadolint/hadolint:v2.15.1 \
+            hadolint --no-color --failure-threshold error - < Dockerfile
+          echo "No error-level findings. Warnings, if any, are printed above."

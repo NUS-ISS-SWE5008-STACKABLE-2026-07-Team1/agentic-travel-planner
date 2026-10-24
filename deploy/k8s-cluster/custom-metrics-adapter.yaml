@@ -14,8 +14,9 @@
 #     --role roles/monitoring.viewer \
 #     --member "principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$GCP_PROJECT_ID.svc.id.goog/subject/ns/custom-metrics/sa/custom-metrics-stackdriver-adapter"
 #
-# Vendored verbatim from Google's repository, so it is reviewed and versioned
-# here rather than fetched at apply time:
+# Vendored from Google's repository, verbatim except the ephemeral-storage
+# request marked below, so it is reviewed and versioned here rather than
+# fetched at apply time:
 #   https://github.com/GoogleCloudPlatform/k8s-stackdriver
 #   custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
 #   commit ffb8ce99a734d367de78f4db5a6d9f049d6ccb29 (2026-09-14)
@@ -141,6 +142,10 @@ spec:
           requests:
             cpu: 100m
             memory: 200Mi
+            # Our one change to the vendored file: an explicit ephemeral-storage
+            # request. 1Gi is what Autopilot already assigns when none is set,
+            # so the pod and its bill are unchanged; it is stated, not implied.
+            ephemeral-storage: 1Gi
         readinessProbe:
           httpGet:
             path: /healthz

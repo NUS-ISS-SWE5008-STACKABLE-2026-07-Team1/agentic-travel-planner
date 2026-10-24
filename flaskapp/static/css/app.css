@@ -86,7 +86,11 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
 .agent-activity-card .agent-activity { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: .4rem; scrollbar-gutter: stable; }
 .agent-thinking { flex: 0 0 auto; display: grid; place-items: center; width: 3rem; height: 3rem; border-radius: 1rem; color: var(--atlas-navy); background: var(--atlas-mint); animation: ai-pulse 1.15s ease-in-out infinite; }
 .planning-progress { height: .8rem; overflow: hidden; border-radius: 999px; background: #dfe8f5; box-shadow: inset 0 1px 2px rgba(11,32,56,.08); }
-.planning-progress-bar { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--atlas-blue), var(--atlas-mint)); transition: width .45s ease; }
+/* `width` lives here rather than on the element: a `style=` attribute is inline
+   style, which the Content-Security-Policy forbids. app.js sets it via the
+   CSSOM on the first tick, which CSP permits — this is only the frame before
+   that, and without it the bar would start at zero width. */
+.planning-progress-bar { width: 5%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--atlas-blue), var(--atlas-mint)); transition: width .45s ease; }
 .planning-travel-icon { flex: 0 0 auto; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border-radius: 50%; color: #fff; background: var(--atlas-blue); font-size: 1.2rem; animation: travel-float 1.4s ease-in-out infinite; box-shadow: 0 .4rem 1rem rgba(25,94,231,.25); }
 .planning-progress-wrap.is-complete .planning-travel-icon { animation: none; background: #198754; }
 .planning-progress-wrap.is-stopped .planning-travel-icon { animation: none; background: #6c757d; }
@@ -127,6 +131,25 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
 #agent-chat h1, #agent-chat h2, #agent-chat h3, #agent-chat h4 { text-transform: capitalize; }
 .cancel-warning-dialog { width: min(92vw, 30rem); padding: 0; border: 0; border-radius: 1.25rem; box-shadow: 0 1.5rem 4rem rgba(7, 28, 51, .28); }
 .cancel-warning-dialog::backdrop { background: rgba(7, 28, 51, .62); backdrop-filter: blur(3px); }
+/* A gap whose hint corrects an answer the traveller already gave. Same palette
+   as .warning-icon so the card and the cancel dialog agree about what a problem
+   looks like, and deliberately NOT Bootstrap's .form-text grey: the whole point
+   is that this one is not passive guidance. */
+.intake-hint-problem {
+  display: flex;
+  gap: .4rem;
+  align-items: baseline;
+  margin-top: .35rem;
+  padding: .4rem .6rem;
+  border-left: 3px solid #842029;
+  border-radius: .25rem;
+  color: #842029;
+  background: #f8d7da;
+  font-size: .8125rem;
+  font-weight: 500;
+}
+.intake-hint-problem::before { content: "!"; font-weight: 700; }
+
 .warning-icon { display: grid; place-items: center; width: 2.75rem; height: 2.75rem; border-radius: 50%; color: #842029; background: #f8d7da; font-size: 1.25rem; font-weight: 700; }
 .admin-card { min-height: 26rem; }
 .admin-chart-wrap { position: relative; min-height: 21rem; }
@@ -225,6 +248,13 @@ h1, h2, h3, .brand { font-family: "Manrope", system-ui, sans-serif; }
 .intake-progress { margin: .25rem 0 1rem; padding: .9rem 1rem; border: 1px solid #d8e5fa; border-radius: 1rem; background: #f7faff; }
 .intake-progress-title { margin-bottom: .55rem; color: var(--atlas-navy); font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
 .intake-gap-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+/* A chip whose field needs correcting, and the messages that explain why. Same
+   #842029 on #f8d7da as .warning-icon and .intake-hint-problem, so a problem
+   looks the same wherever the card shows one. */
+.intake-gap-chip-problem { padding: .3rem .65rem; border-radius: 999px; color: #842029 !important; background: #f8d7da !important; font-size: .78rem; font-weight: 700; }
+.intake-progress-problems { margin-top: .6rem; padding: .55rem .75rem; border-left: 3px solid #842029; border-radius: .25rem; color: #842029; background: #f8d7da; font-size: .8125rem; font-weight: 500; }
+.intake-progress-problems div + div { margin-top: .3rem; }
+
 .intake-gap-chips span { padding: .3rem .65rem; border-radius: 999px; color: #234d87; background: #e6efff; font-size: .78rem; font-weight: 600; }
 .manual-planner > summary {
   cursor: pointer;

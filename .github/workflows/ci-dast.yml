@@ -8,14 +8,19 @@
 # login page. The mechanism, and the trade-off it makes, are documented in
 # .zap/authenticated-scan.yaml — read that before changing anything here.
 #
-# Findings stay advisory per item 8. What FAILS THE JOB is the authentication
-# itself: if ZAP scans logged out, the plan's own checks trip and the "Prove the
-# session survived the scan" step below fails. A clean report from a logged-out
-# scan is the failure mode this exists to prevent.
+# TWO things fail this job, and the distinction still matters.
 #
-# Note the wording: this job does not block a merge BY ITSELF. Its findings are
-# advisory; what fails it is a broken scan. Whether a failure stops a merge is
-# decided by the branch ruleset, not here — see the trigger note below.
+#   1. A FINDING at Medium or above — since 2026-10-19, enforced by the
+#      "Fail on Medium-and-above findings" step at the end. Item 8 called these
+#      advisory; they are not any more.
+#   2. A BROKEN SCAN. If ZAP scans logged out, the plan's own checks trip and
+#      "Prove the session survived the scan" fails. A clean report from a
+#      logged-out scan is the failure mode this job was written to prevent, and
+#      no risk threshold would ever catch it — a scan that saw nothing finds
+#      nothing.
+#
+# The second is still the one to protect. A finding can be read and argued
+# with; a scan that silently never authenticated reports success.
 # =============================================================================
 name: CI — DAST
 
@@ -112,11 +117,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -f requirements.lock ]; then
-            python -m pip install -r requirements.lock
-          else
-            python -m pip install -r requirements.txt
-          fi
+          python -m pip install --require-hashes --only-binary :all: -r requirements.lock
 
       - name: Prepare CI instance directory
         run: mkdir -p ci-instance/traces
@@ -209,9 +210,9 @@ jobs:
           echo "ZAP_CSRF_TOKEN=${api_token}" >> "$GITHUB_ENV"
 
       # Item 13 — AUTHENTICATED. Replaces action-baseline, which could only
-      # ever scan logged out against a CSRF-protected app. Findings stay
-      # advisory per item 8; the *authentication* is what blocks, via the
-      # requestor responseCode checks and the 401 statistic test in the plan.
+      # ever scan logged out against a CSRF-protected app. The *authentication*
+      # blocks here, via the requestor responseCode checks in the plan; the
+      # findings block later, at the Medium-and-above gate near the end.
       # Render the two placeholders into the plan before ZAP sees it.
       #
       # The obvious approach — passing them as docker_env_vars and letting the
@@ -315,6 +316,32 @@ jobs:
             **/zap-authenticated-report.html
           retention-days: 14
           if-no-files-found: warn
+
+      # ---- Item 8 revisited: findings are no longer advisory ---------------
+      # Until 2026-10-19 nothing here failed on a FINDING — only on a broken
+      # scan. A new High would have been written to an artifact nobody opens.
+      #
+      # Deliberately placed AFTER "Upload ZAP reports": the report must reach
+      # the artifact store whether or not this passes, or the failure cannot be
+      # investigated. Every step below is `if: always()`, so they still run when
+      # this one fails.
+      #
+      # No `if:` of its own, so an earlier failure skips it. Correct: if the
+      # scan did not finish, the job is already red and gating a partial report
+      # would only add a second, misleading error.
+      - name: Fail on Medium-and-above findings
+        env:
+          # Space-separated ZAP plugin IDs exempt from the gate. EMPTY, and it
+          # should stay that way. Every entry needs a comment saying why the
+          # finding is a CI artefact rather than an app defect, and who agreed
+          # — the same standard as SESSION_COOKIE_SECURE above. A suppression
+          # is printed as a warning on every run, never silent.
+          ZAP_GATE_ALLOWED_PLUGIN_IDS: ""
+        run: |
+          set -euo pipefail
+          report=$(find . -name 'zap-authenticated-report.json' | head -1)
+          python scripts/zap_gate.py "$report" --min-risk medium \
+            ${ZAP_GATE_ALLOWED_PLUGIN_IDS:+--allow $ZAP_GATE_ALLOWED_PLUGIN_IDS}
 
       # ---- Item 15: check what we are about to publish ---------------------
       # service.py log_payload() writes whole user submissions to stdout and

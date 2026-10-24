@@ -12,11 +12,14 @@ never touch the real dev database.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import secrets
+import socket
 import threading
 from dataclasses import dataclass
 from http.server import HTTPServer
+from pathlib import Path
 
 import pytest
 from flask import Flask
@@ -25,6 +28,65 @@ from werkzeug.serving import make_server
 from werkzeug.security import generate_password_hash
 
 from scripts.ci_stub_provider import Handler as StubLlmHandler
+from tests.e2e.js_coverage import JsCoverage
+
+
+JS_COVERAGE_OUTPUT = os.getenv("E2E_JS_COVERAGE", "").strip()
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@pytest.fixture(scope="session")
+def _js_coverage_port():
+    return _free_port() if JS_COVERAGE_OUTPUT else None
+
+
+@pytest.fixture(scope="session")
+def browser_type_launch_args(browser_type_launch_args, _js_coverage_port):
+    """pytest-playwright's launch args, plus a loopback DevTools port when
+    measuring JS coverage, for the collector's own connection."""
+    if _js_coverage_port is None:
+        return browser_type_launch_args
+    args = [*browser_type_launch_args.get("args", []), f"--remote-debugging-port={_js_coverage_port}"]
+    return {**browser_type_launch_args, "args": args}
+
+
+@pytest.fixture(scope="session")
+def js_coverage(_js_coverage_port, browser):
+    """Browser-JS coverage for the whole run, written as LCOV at the end.
+
+    Only when E2E_JS_COVERAGE names the output file (CI sets it for
+    SonarCloud); otherwise None and nothing below touches the browser.
+    """
+    if _js_coverage_port is None:
+        yield None
+        return
+    coverage = JsCoverage(_js_coverage_port)
+    coverage.start()
+    yield coverage
+    coverage.write_lcov(Path(JS_COVERAGE_OUTPUT))
+    print(f"\nJS coverage written to {JS_COVERAGE_OUTPUT} "
+          f"({coverage.skipped_reports} reports without block detail skipped)")
+
+
+@pytest.fixture(autouse=True)
+def _record_js_coverage(request):
+    """Take the last page's coverage before this test's browser context closes.
+
+    Autouse and set up before `context`, so its teardown runs first; earlier
+    pages were already taken as they navigated (see js_coverage.py).
+    """
+    if not JS_COVERAGE_OUTPUT:
+        yield
+        return
+    coverage = request.getfixturevalue("js_coverage")
+    request.getfixturevalue("context")
+    yield
+    coverage.flush()
 
 
 @pytest.fixture(scope="session")
@@ -88,6 +150,14 @@ def live_server(tmp_path_factory, stub_llm_base_url) -> LiveServer:
         LLM_MODEL = "stub-model"
         LOGIN_EMAIL = login_email
         LOGIN_PASSWORD_HASH = generate_password_hash(login_password)
+        # Both are required, and neither is redundant. `Config.ADMIN_EMAIL`
+        # defaults to `LOGIN_EMAIL` — but it is evaluated when the class body
+        # runs, i.e. at import, against the module-level LOGIN_EMAIL rather
+        # than the one overridden above. Without these two lines the demo user
+        # is not an admin and /admin answers 403, which is why the only page
+        # loading chart.js had no browser test at all.
+        ADMIN_EMAIL = login_email
+        ADMIN_EMAILS = (login_email,)
 
     app = create_app(config_object=E2EConfig)
     server = make_server("127.0.0.1", 0, app, threaded=True)

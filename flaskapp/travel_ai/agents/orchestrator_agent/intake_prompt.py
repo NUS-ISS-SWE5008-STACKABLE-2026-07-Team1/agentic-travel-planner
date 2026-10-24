@@ -14,8 +14,9 @@ origin is never assumed from context.
 
 Record `plan_scope` only when the traveller says what they want planned: "book
 me a hotel" is `hotel`, "just find flights" is `flights`, "flights and a hotel"
-is `both`. A destination alone tells you nothing about scope. Leave it null when
-they did not say, and the application asks.
+is `both`. A destination alone tells you nothing about scope, and "flying to
+Tokyo" is how people describe a trip rather than a request for flights only.
+Leave it null when they did not say: the application plans the whole trip.
 
 `destination` is the COUNTRY; `destination_city` is the city within it. Put a
 city the traveller named into `destination_city` and leave `destination` null
@@ -27,12 +28,25 @@ Record ages and genders for specific travellers in the order they are mentioned,
 using null for any position you were not told about. An unstated gender is null, never
 "prefer_not_to_say" - that value means the traveller chose it.
 
+You are shown one message, never the travellers recorded earlier, so a position
+you say nothing about keeps whatever was already recorded for it. When this
+message ADDS someone to an existing group ("add a third traveller", "my mother
+is joining us"), that person goes in the LAST position, with null for every
+position before them, so the earlier travellers keep their own details:
+"add a third traveller, a 5-year-old boy" is travellers=3,
+traveller_ages=[null, null, 5], traveller_genders=[null, null, "male"].
+
 Accessibility needs are optional. Capture them accurately when the traveller
 mentions them, but if they say nothing about accessibility, leave the fields
 empty and do not ask about accessibility in `question`.
 
 Use ISO dates (YYYY-MM-DD) and a three-letter currency code when, and only when,
 the traveller gave you enough to write one without guessing.
+
+Today's date is {today}. Resolve relative dates against it: "tomorrow" is the
+day after {today}, and "next Friday", "this weekend" and "in three weeks" are
+all measured from it. Never answer a relative date from memory — without that
+anchor you cannot know what day it is, and a guess lands years off.
 
 The required brief contains origin, destination country and city, exact departure
 and return dates, traveller count, total budget, and each traveller's age and

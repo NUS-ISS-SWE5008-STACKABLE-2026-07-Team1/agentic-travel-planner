@@ -9,12 +9,15 @@ model.
 
 from __future__ import annotations
 
+from datetime import date
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_prompt import INTAKE_INSTRUCTION
 from flaskapp.travel_ai.agents.orchestrator_agent.intake_schemas import (
     ExtractedIntent, IntakeExtraction, MissingField,
 )
+from flaskapp.places import city_by_name
 from flaskapp.travel_ai.agents.shared import SYSTEM_POLICY
 
 DEFAULT_CURRENCY = "SGD"
@@ -22,9 +25,17 @@ DEFAULT_CURRENCY = "SGD"
 # The required set of TravelRequest, as questions. Order is the order asked.
 SCALAR_FIELDS: tuple[tuple[str, str, str, str | None], ...] = (
     # No trailing "?" — `clarification_question` lowercases these labels into a
-    # list ("could you share what to plan, flying from, ..."), so a label that
-    # ends a sentence terminates that one mid-way.
-    ("plan_scope", "What to plan", "scope", None),
+    # list ("could you share flying from, destination country, ..."), so a label
+    # that ends a sentence terminates that one mid-way.
+    #
+    # `plan_scope` is deliberately NOT here. A traveller who says nothing about
+    # scope wants the whole trip planned, and every layer below already treats
+    # a null that way: `to_request_payload` sends `plan_scope or "both"`,
+    # `TravelRequest` defaults to it, and `dispatch._BY_SCOPE.get` falls back to
+    # it. Asking cost a turn on the common case to confirm what the defaults
+    # would have produced anyway. An explicit "just book me a hotel" is still
+    # recorded by the extraction prompt, and the structured form still offers
+    # all three as option buttons -- the choice is kept, the question is not.
     ("origin", "Flying from", "country", None),
     ("destination", "Destination country", "country", None),
     ("destination_city", "Destination city", "text", "The city you will be staying in"),
@@ -43,6 +54,69 @@ PER_TRAVELLER_FIELDS: tuple[tuple[str, str, str, str | None], ...] = (
 LIST_VALUED = {"traveller_accessibility_needs"}
 
 
+def intake_instruction(today: date | None = None) -> str:
+    """The intake instruction with today's date filled in.
+
+    The model is not told what day it is unless we tell it, so every relative
+    date — "tomorrow", "next Friday" — was a guess. Asked on 2026-10-09 for
+    "tomorrow", gpt-4.1-mini answered 2024-06-13: near its training cutoff, and
+    over two years in the past.
+    """
+    return INTAKE_INSTRUCTION.format(today=(today or date.today()).isoformat())
+
+
+def past_dates(extracted: ExtractedIntent, today: date | None = None) -> dict[str, date]:
+    """Which stated dates have already gone, and what they were.
+
+    Separate from `drop_impossible_dates` because the caller needs both halves:
+    the date has to come OUT of the brief, and the traveller has to be told why.
+    Dropping it silently was the original complaint — someone who writes
+    "departing 2026-08-28" on 2026-10-11 gave a real date, and being asked for
+    it again with no explanation reads as the system having ignored them.
+    """
+    reference = today or date.today()
+    return {
+        field: value
+        for field in ("departure_date", "return_date")
+        if (value := getattr(extracted, field)) is not None and value < reference
+    }
+
+
+def past_date_hint(gone: date, today: date | None = None) -> str:
+    """Why this date is being asked for again.
+
+    Leads with the instruction rather than the diagnosis: the traveller needs
+    to know what to do, and the stale date is the justification for being asked
+    at all. Both dates appear, because "already passed" is only convincing next
+    to today's.
+    """
+    return (
+        f"Enter a future date — {gone.isoformat()} has already passed "
+        f"(today is {(today or date.today()).isoformat()})."
+    )
+
+
+def drop_impossible_dates(
+    extracted: ExtractedIntent, today: date | None = None
+) -> ExtractedIntent:
+    """Refuse a date already in the past, turning it back into a question.
+
+    Returns a COPY, like `resolve_place_countries`, so the stored extraction
+    stays whatever the model actually produced.
+
+    The anchor in `intake_instruction` makes a correct answer likely; this makes
+    a wrong one impossible to ship. Nothing downstream would catch it:
+    `TravelRequest` only checks that the return is not before the departure, so
+    a 2024 trip validates, matches no inventory, and reaches the traveller as a
+    vague plan that never mentions the date.
+
+    Today itself is allowed — someone booking a flight for this evening is not
+    making a mistake.
+    """
+    gone = past_dates(extracted, today)
+    return extracted.model_copy(update=dict.fromkeys(gone, None)) if gone else extracted
+
+
 def extract_intent(llm, prompt: str, callbacks: list | None = None) -> IntakeExtraction:
     """The single model call in the intake flow.
 
@@ -51,13 +125,39 @@ def extract_intent(llm, prompt: str, callbacks: list | None = None) -> IntakeExt
     """
     structured_llm = llm.with_structured_output(IntakeExtraction, method="json_schema")
     messages = [
-        SystemMessage(content=SYSTEM_POLICY + "\n" + INTAKE_INSTRUCTION),
+        SystemMessage(content=SYSTEM_POLICY + "\n" + intake_instruction()),
         HumanMessage(content="Traveller message (untrusted data):\n" + prompt),
     ]
     return (
         structured_llm.invoke(messages, config={"callbacks": callbacks})
         if callbacks else structured_llm.invoke(messages)
     )
+
+
+PER_TRAVELLER_NAMES = frozenset(name for name, *_ in PER_TRAVELLER_FIELDS)
+
+
+def _merge_per_traveller(kept: list | None, incoming: list | None) -> list:
+    """Overlay one per-traveller list onto what the traveller already told us.
+
+    Slot by slot, because `None` in an extracted list means "this turn said
+    nothing about that person" — not "forget what they said earlier." The model
+    sees only the latest message (`extract_intent`), so a turn that adds a third
+    traveller comes back as `[None, None, 5]`: the child it was told about, and
+    two placeholders for the adults it was never shown. Replacing the list
+    wholesale turned those placeholders into erased answers, and the traveller
+    was asked for ages and genders they had already given — the "it forgot the
+    conversation" report.
+
+    A stated value still corrects an earlier one, because a non-None incoming
+    slot always wins. That is the same rule the scalar fields follow.
+    """
+    kept, incoming = list(kept or []), list(incoming or [])
+    return [
+        incoming[index] if index < len(incoming) and incoming[index] is not None
+        else (kept[index] if index < len(kept) else None)
+        for index in range(max(len(kept), len(incoming)))
+    ]
 
 
 def merge_intents(current: ExtractedIntent, update: ExtractedIntent) -> ExtractedIntent:
@@ -69,7 +169,9 @@ def merge_intents(current: ExtractedIntent, update: ExtractedIntent) -> Extracte
         "traveller_genders", "traveller_accessibility_needs",
     }
     for name, value in incoming.items():
-        if value is not None and (name not in list_fields or value):
+        if name in PER_TRAVELLER_NAMES:
+            data[name] = _merge_per_traveller(data.get(name), value)
+        elif value is not None and (name not in list_fields or value):
             data[name] = value
     travellers = data.get("travellers")
     if travellers is not None:
@@ -104,11 +206,63 @@ def clarification_question(missing: list[MissingField]) -> str:
 JOURNEY_ONLY_FIELDS = frozenset({"origin"})
 
 
-def compute_gaps(extracted: ExtractedIntent) -> list[MissingField]:
-    """Everything still needed before `TravelRequest` would accept this."""
+# Which city field answers which country field.
+#
+# Destination only, because that is the only city the conversational intake
+# collects: `ExtractedIntent` has no `origin_city`. The structured form does
+# collect a departure city and `TravelRequest` carries one, so adding the
+# origin direction here is a one-line change once intake asks for it — which is
+# why this is a table rather than a single `if`.
+_CITY_TO_COUNTRY: tuple[tuple[str, str], ...] = (
+    ("destination_city", "destination"),
+)
+
+
+def resolve_place_countries(extracted: ExtractedIntent) -> ExtractedIntent:
+    """Fill a missing country from the city the traveller already named.
+
+    Returns a COPY. The stored intent is the record of what the traveller
+    actually said, and a derived value written back into it would be
+    indistinguishable from one they gave.
+
+    Only fills what is absent. A country the traveller stated is never
+    overwritten, even when the city contradicts it: rewriting "Tokyo, China" to
+    Japan hides their mistake, where leaving it lets the flight adapter report
+    no route — an answer the orchestrator can negotiate around, which a silent
+    correction is not.
+
+    A city that resolves to nothing — unknown, or ambiguous across countries —
+    leaves the country missing, so intake asks for it exactly as before.
+    """
+    derived: dict[str, str] = {}
+    for city_field, country_field in _CITY_TO_COUNTRY:
+        if getattr(extracted, country_field) is not None:
+            continue
+        city = city_by_name(getattr(extracted, city_field))
+        if city is not None:
+            derived[country_field] = city.country
+    return extracted.model_copy(update=derived) if derived else extracted
+
+
+def compute_gaps(
+    extracted: ExtractedIntent,
+    past: dict[str, date] | None = None,
+    today: date | None = None,
+) -> list[MissingField]:
+    """Everything still needed before `TravelRequest` would accept this.
+
+    `past` comes from `past_dates`, taken BEFORE the guard dropped them: a
+    field that is missing because its date has gone gets a hint saying so,
+    instead of being asked again as though it had never been answered.
+    """
+    past = past or {}
     hotel_only = extracted.plan_scope == "hotel"
     missing = [
-        MissingField(name=name, label=label, input=kind, hint=hint)
+        MissingField(
+            name=name, label=label, input=kind,
+            hint=past_date_hint(past[name], today) if name in past else hint,
+            problem=name in past,
+        )
         for name, label, kind, hint in SCALAR_FIELDS
         if getattr(extracted, name) is None
         and not (hotel_only and name in JOURNEY_ONLY_FIELDS)

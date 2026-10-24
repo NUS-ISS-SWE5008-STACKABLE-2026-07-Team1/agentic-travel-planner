@@ -44,6 +44,12 @@ env:
       sessionManagement:
         method: "cookie"
   parameters:
+    # These govern the Automation Framework's own diagnostics — an unrecognised
+    # parameter, a job that could not run, a requestor responseCode mismatch —
+    # NOT scan alerts. No risk threshold is set here on purpose: alerts are
+    # gated by scripts/zap_gate.py in ci-dast.yml, which can name the finding
+    # that failed the build and is unit-tested. Turning failOnWarning on would
+    # redden the build on AF chatter and still miss a High.
     failOnError: true
     failOnWarning: false
     progressToStdout: true

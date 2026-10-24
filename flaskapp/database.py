@@ -490,7 +490,31 @@ CREATE INDEX IF NOT EXISTS idx_flight_eval_scenario ON flight_agent_eval_runs(sc
 POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 
 
-_JSON_EXTRACT = re.compile(r"json_extract\(\s*(.+?)\s*,\s*'\$\.(\w+)'\s*\)", re.IGNORECASE)
+# Two plain searches instead of one `json_extract\(\s*(.+?)\s*,...` pattern,
+# whose lazy capture between optional spaces backtracks polynomially. The
+# capture still ends at the first `, '$.field')` after the opening bracket, so
+# an argument containing commas, such as COALESCE(a, b), keeps working.
+_JSON_EXTRACT_OPEN = re.compile(r"json_extract\(", re.IGNORECASE)
+_JSON_EXTRACT_FIELD = re.compile(r",\s*'\$\.(\w+)'\s*\)")
+
+
+def _rewrite_json_extract(sql: str) -> str:
+    parts, position = [], 0
+    while (opening := _JSON_EXTRACT_OPEN.search(sql, position)) is not None:
+        field = _JSON_EXTRACT_FIELD.search(sql, opening.end())
+        if field is None:
+            break
+        expression = sql[opening.end():field.start()].strip()
+        if not expression or "\n" in expression:
+            # Left as written, as the single pattern did: its `.` stops at a newline.
+            parts.append(sql[position:opening.end()])
+            position = opening.end()
+            continue
+        parts.append(sql[position:opening.start()])
+        parts.append(f"({expression})::json->>'{field.group(1)}'")
+        position = field.end()
+    parts.append(sql[position:])
+    return "".join(parts)
 
 
 def to_postgres_sql(sql: str) -> str:
@@ -516,7 +540,7 @@ def to_postgres_sql(sql: str) -> str:
     downstream can manufacture or consume a `%s`.
     """
     sql = sql.replace("CURRENT_TIMESTAMP", _NOW)
-    sql = _JSON_EXTRACT.sub(r"(\1)::json->>'\2'", sql)
+    sql = _rewrite_json_extract(sql)
     return sql.replace("?", "%s")
 
 
@@ -1918,8 +1942,30 @@ def init_db_command() -> None:
     click.echo(f"Initialized database at {current_app.config['DATABASE']}")
 
 
+def describe_target(target: Path | str) -> str:
+    """Where rows written by this process will land, safe to log.
+
+    Never the DSN: it carries the host and, on some providers, the password.
+    Postgres is named by schema instead, because `DATABASE_SCHEMA` is the whole
+    difference between Render's `Travelplanner_schema` and GKE's
+    `travelplanner_gke`, and looking in the wrong one makes a working
+    deployment look like it is recording nothing.
+    """
+    if is_postgres(target):
+        return f"Postgres, schema {DATABASE_SCHEMA or 'server default (public)'}"
+    return (
+        f"SQLite file {Path(target)} — rows stay on this machine or container "
+        "and never reach Postgres. Set DATABASE_URL to change that."
+    )
+
+
 def init_app(app: Flask) -> None:
     app.cli.add_command(init_db_command)
+    # One line, once, at startup. Without it the SQLite fallback in `Config`
+    # (DATABASE_URL unset or blank) is completely silent: the app works, the
+    # model is called, and the rows simply are not in the database anyone is
+    # looking at.
+    app.logger.info("Database target: %s", describe_target(app.config["DATABASE"]))
     initialize(app.config["DATABASE"])
     seed_login_user(app.config["DATABASE"], app.config["LOGIN_EMAIL"],
                     app.config["LOGIN_PASSWORD_HASH"])
