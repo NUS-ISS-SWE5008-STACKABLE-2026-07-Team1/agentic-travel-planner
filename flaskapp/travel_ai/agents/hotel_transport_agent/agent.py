@@ -31,8 +31,11 @@ an answer the orchestrator can act on; an exception is not.
 
 from __future__ import annotations
 
-from flaskapp.config import Config
-from flaskapp.database import save_agent_run
+import time
+from typing import Any
+
+from flaskapp.config import Config, get_llm_settings
+from flaskapp.database import save_agent_run, save_hotel_transport_eval_run
 from flaskapp.travel_ai.a2a import response_message
 from flaskapp.travel_ai.agents.base import make_specialist_node
 from flaskapp.travel_ai.agents.hotel_transport_agent.adapter import to_hotel_request
@@ -112,15 +115,128 @@ def _forbid_concrete_options(agent_name: str, tracer):
     return postprocess
 
 
-class _InnerTracer:
-    """Forwards `run_hotel_agent`'s events except the lifecycle duplicates."""
+class _EvalSignals:
+    """Reconstructs guardrail pass/block results for `hotel_transport_agent_eval_runs`
+    purely by watching trace events `reasoning.py` already emits
+    (`agent_input_blocked`, `agent_llm_attempt_failed`) — no change to
+    `reasoning.py`'s own logic or return shape. Best-effort: 'pass' unless a
+    specific violation event was actually observed.
 
-    def __init__(self, tracer):
+    `guardrail_output_result` collapses to only 'pass'/'high': `screen_output_text`
+    only ever flags on high-risk bias or flagged toxicity (medium bias never
+    retries), so a 'medium' output-side classification can't happen here.
+    """
+
+    def __init__(self) -> None:
+        self.input_blocked = False
+        self.grounding_failed = False
+        self.output_flagged = False
+        self.block_reasons: list[str] = []
+
+    def observe(self, event: str, details: dict | None) -> None:
+        details = details or {}
+        if event == "agent_input_blocked":
+            self.input_blocked = True
+            self.block_reasons.append("input screening blocked")
+        elif event == "agent_llm_attempt_failed":
+            if "ungrounded_hotel_ids" in details:
+                self.grounding_failed = True
+                self.block_reasons.append("ungrounded hotel id(s) in rationale")
+            if "output_policy_violation" in details:
+                self.output_flagged = True
+                self.block_reasons.append("output policy violation")
+
+    def as_row(self) -> dict[str, str | None]:
+        return {
+            "guardrail_input_result": "blocked" if self.input_blocked else "pass",
+            "guardrail_output_result": "high" if self.output_flagged else "pass",
+            "guardrail_grounding_result": "fail" if self.grounding_failed else "pass",
+            "guardrail_block_reason": "; ".join(dict.fromkeys(self.block_reasons)) or None,
+        }
+
+
+class _InnerTracer:
+    """Forwards `run_hotel_agent`'s events except the lifecycle duplicates,
+    and — if given an `_EvalSignals` — feeds every event to it first, so eval
+    logging observes exactly what the traveller-facing trace saw."""
+
+    def __init__(self, tracer, signals: _EvalSignals | None = None):
         self._tracer = tracer
+        self._signals = signals
 
     def record(self, event: str, agent: str, details: dict | None = None) -> None:
+        if self._signals is not None:
+            self._signals.observe(event, details)
         if event not in {"agent_started", "agent_completed"}:
             self._tracer.record(event, agent, details)
+
+
+class _EvalRun:
+    """One row of `hotel_transport_agent_eval_runs`, assembled as the request unfolds.
+
+    Mirrors `flight_agent/agent.py`'s `_EvalRun` in shape: the row is built in one
+    place and the node only says which ending happened. Best-effort telemetry —
+    any exception in `_write` is swallowed and recorded as a trace event rather
+    than turning an already-served request into a second failure.
+    """
+
+    def __init__(
+        self, tracer, request_id: str, *, mode: str, inventory_source: str,
+        llm_provider: str | None, llm_model: str | None,
+    ) -> None:
+        self._tracer = tracer
+        self._request_id = request_id
+        self._mode = mode
+        self._inventory_source = inventory_source
+        self._llm_provider = llm_provider
+        self._llm_model = llm_model
+        self._started = time.perf_counter()
+        self.signals = _EvalSignals()
+
+    def _write(self, **fields) -> None:
+        if not self._tracer.database_path:
+            return
+        try:
+            save_hotel_transport_eval_run(
+                self._tracer.database_path,
+                run_type="production",
+                request_id=self._request_id,
+                hotel_agent_mode=self._mode,
+                inventory_source=self._inventory_source,
+                llm_provider=self._llm_provider,
+                llm_model=self._llm_model,
+                latency_ms=int((time.perf_counter() - self._started) * 1000),
+                **self.signals.as_row(),
+                **fields,
+            )
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break the response
+            self._tracer.record("agent_eval_log_failed", NAME, {"error_type": type(exc).__name__})
+
+    def path2_fallback(self, *, options_returned: int) -> None:
+        """No inventory covered the trip, so the prompt-only path answered."""
+        self._write(outcome="path2_fallback", options_returned=options_returned)
+
+    def success(
+        self, *, counts: dict, usage: dict, options_returned: int,
+        hotel_candidate_count: int, transport_option_count: int,
+    ) -> None:
+        """A finding was produced."""
+        self._write(
+            outcome="success",
+            llm_turns=counts.get("llm_turns", 0),
+            tool_calls=counts.get("tool_calls", 0),
+            provider_calls=counts.get("provider_calls", 0),
+            usage=usage,
+            options_returned=options_returned,
+            hotel_candidate_count=hotel_candidate_count,
+            transport_option_count=transport_option_count,
+        )
+
+    def error(self, exc: BaseException, *, usage: dict) -> None:
+        self._write(
+            outcome="error", error_type=type(exc).__name__,
+            usage=usage,
+        )
 
 
 def _hotel_candidate_to_option(
@@ -292,8 +408,21 @@ def create_node(llm, tracer, provider=None, config=None):
             vars(Config) if config is None else config
         )
     assumption = getattr(provider, "assumption", INVENTORY_ASSUMPTION)
+    # Resolved once here, same as the flight agent: eval logging records what
+    # actually ran, not what the current settings say, so a config change
+    # mid-deployment doesn't retroactively relabel earlier rows.
+    _llm_settings, _llm_settings_error = get_llm_settings(vars(Config) if config is None else config)
+    llm_provider_name = (_llm_settings or {}).get("provider")
+    llm_model_name = (_llm_settings or {}).get("model")
 
     def hotel_node(state) -> dict:
+        # First statement in the node: the recorder starts its clock here, and
+        # `latency_ms` is meant to cover everything the node does.
+        eval_run = _EvalRun(
+            tracer, state["request_id"], mode="grounded",
+            inventory_source=provider.name,
+            llm_provider=llm_provider_name, llm_model=llm_model_name,
+        )
         incoming = next(
             (m for m in state.get("messages", [])
              if m.message_type == "request" and m.recipient == NAME),
@@ -376,6 +505,9 @@ def create_node(llm, tracer, provider=None, config=None):
             result = prompt_only_node(state)
             for finding in result.get("findings", []):
                 finding.warnings = [*finding.warnings, *notes, ESTIMATE_WARNING]
+            eval_run.path2_fallback(
+                options_returned=sum(len(f.options) for f in result.get("findings", [])),
+            )
             return result
 
         tracer.record("agent_started", NAME, {"mode": "grounded", "source": provider.name})
@@ -386,7 +518,8 @@ def create_node(llm, tracer, provider=None, config=None):
         try:
             proposal, ranked_transport, response = run_hotel_agent(
                 adapted.request, hotel_inventory, transport_options,
-                StructuredLLM(llm, callbacks=[usage]), tracer=_InnerTracer(tracer),
+                StructuredLLM(llm, callbacks=[usage]),
+                tracer=_InnerTracer(tracer, eval_run.signals),
             )
             screening = screen_hotels(adapted.request, hotel_inventory, ctx.dest_city_slug)
 
@@ -427,6 +560,13 @@ def create_node(llm, tracer, provider=None, config=None):
                     tracer.database_path, state["request_id"], NAME, "completed",
                     usage.as_dict(), finding,
                 )
+            eval_run.success(
+                counts={},
+                usage=usage.as_dict(),
+                options_returned=len(finding.options),
+                hotel_candidate_count=len(proposal.candidates),
+                transport_option_count=len(ranked_transport),
+            )
             outgoing = response_message(
                 request=incoming, sender=NAME, payload_type="AgentFinding", payload=finding
             )
@@ -438,6 +578,7 @@ def create_node(llm, tracer, provider=None, config=None):
                     tracer.database_path, state["request_id"], NAME, "failed",
                     usage.as_dict(), error_type=type(exc).__name__,
                 )
+            eval_run.error(exc, usage=usage.as_dict())
             raise
 
     return hotel_node
