@@ -66,6 +66,7 @@ TABLES = (
     # otherwise identical in kind to agent_runs/audit_events: written by the
     # running app, not seeded.
     "flight_agent_eval_runs",
+    "hotel_transport_agent_eval_runs",
 )
 
 # Tables whose id is generated, and whose sequence therefore needs resetting.
@@ -78,6 +79,7 @@ IDENTITY_TABLES = (
     "agent_runs",
     "plan_feedback",
     "flight_agent_eval_runs",
+    "hotel_transport_agent_eval_runs",
 )
 
 # The primary-key column per table. Most identity tables use "id", but three
@@ -100,6 +102,7 @@ TABLE_PRIMARY_KEYS = {
     "agent_runs": "id",
     "plan_feedback": "id",
     "flight_agent_eval_runs": "id",
+    "hotel_transport_agent_eval_runs": "id",
 }
 
 
