@@ -634,3 +634,318 @@ def test_adapter_no_arrival_airport_without_flights():
     )
     adapted = to_hotel_request(req, flight_candidates=[])
     assert adapted.request.trip_context.arrival_airport is None
+
+def test_eval_signals_defaults_to_pass():
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalSignals
+
+    signals = _EvalSignals()
+    row = signals.as_row()
+    assert row["guardrail_input_result"] == "pass"
+    assert row["guardrail_output_result"] == "pass"
+    assert row["guardrail_grounding_result"] == "pass"
+    assert row["guardrail_block_reason"] is None
+
+
+def test_eval_signals_detects_input_blocked():
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalSignals
+
+    signals = _EvalSignals()
+    signals.observe("agent_input_blocked", {"injection_count": 1})
+    row = signals.as_row()
+    assert row["guardrail_input_result"] == "blocked"
+    assert "input screening blocked" in row["guardrail_block_reason"]
+
+
+def test_eval_signals_detects_ungrounded_hotel_ids():
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalSignals
+
+    signals = _EvalSignals()
+    signals.observe("agent_llm_attempt_failed", {"ungrounded_hotel_ids": ["FAKE-999"]})
+    row = signals.as_row()
+    assert row["guardrail_grounding_result"] == "fail"
+    assert "ungrounded hotel id(s)" in row["guardrail_block_reason"]
+
+
+def test_eval_signals_detects_output_policy_violation():
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalSignals
+
+    signals = _EvalSignals()
+    signals.observe("agent_llm_attempt_failed", {"output_policy_violation": {"bias": {"risk_level": "high"}}})
+    row = signals.as_row()
+    assert row["guardrail_output_result"] == "high"
+    assert "output policy violation" in row["guardrail_block_reason"]
+
+
+def test_eval_signals_collapses_medium_output_to_pass():
+    """screen_output_text only flags on high-risk bias or flagged toxicity,
+    so a 'medium' output-side classification cannot happen here."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalSignals
+
+    signals = _EvalSignals()
+    row = signals.as_row()
+    assert row["guardrail_output_result"] in ("pass", "high")
+
+
+def test_save_hotel_transport_eval_run_writes_a_row(tmp_path):
+    from flaskapp.database import save_hotel_transport_eval_run, initialize
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalSignals
+
+    db_path = tmp_path / "test.sqlite3"
+    initialize(db_path)
+    save_hotel_transport_eval_run(
+        db_path,
+        run_type="production",
+        hotel_agent_mode="grounded",
+        inventory_source="seed",
+        outcome="success",
+        latency_ms=1234,
+        request_id=None,
+        llm_provider="openai",
+        llm_model="gpt-4o",
+        options_returned=5,
+        hotel_candidate_count=5,
+        transport_option_count=3,
+        **_EvalSignals().as_row(),
+    )
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT run_type, hotel_agent_mode, outcome, options_returned, "
+        "guardrail_input_result, guardrail_output_result, "
+        "guardrail_grounding_result "
+        "FROM hotel_transport_agent_eval_runs"
+    ).fetchall()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["run_type"] == "production"
+    assert r["hotel_agent_mode"] == "grounded"
+    assert r["outcome"] == "success"
+    assert r["options_returned"] == 5
+    assert r["guardrail_input_result"] == "pass"
+    assert r["guardrail_output_result"] == "pass"
+    assert r["guardrail_grounding_result"] == "pass"
+    conn.close()
+
+
+def test_save_hotel_transport_eval_run_swallows_errors(tmp_path):
+    """Best-effort telemetry: a broken database path must not raise."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalRun
+
+    class _FakeTracer:
+        database_path = "/nonexistent/path/that/does/not/exist.sqlite3"
+        def record(self, event, agent, details=None):
+            pass
+
+    run = _EvalRun(
+        _FakeTracer(),
+        "test-req",
+        mode="grounded",
+        inventory_source="seed",
+        llm_provider=None,
+        llm_model=None,
+    )
+
+    run._write(outcome="success", options_returned=0)
+
+
+def test_eval_signals_block_reasons_are_deduplicated():
+    """Repeated observations of the same reason must not duplicate it."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalSignals
+
+    signals = _EvalSignals()
+    signals.observe("agent_input_blocked", {})
+    signals.observe("agent_input_blocked", {})
+    row = signals.as_row()
+    assert row["guardrail_block_reason"].count("input screening blocked") == 1
+
+
+def test_eval_run_path2_fallback_writes_a_row(tmp_path):
+    from flaskapp.database import initialize
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalRun
+
+    db_path = tmp_path / "test.sqlite3"
+    initialize(db_path)
+
+    class _FakeTracer:
+        database_path = str(db_path)
+        def record(self, event, agent, details=None):
+            pass
+
+    run = _EvalRun(
+        _FakeTracer(),
+        None,
+        mode="grounded",
+        inventory_source="seed",
+        llm_provider="openai",
+        llm_model="gpt-4o",
+    )
+    run.path2_fallback(options_returned=0)
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT outcome, options_returned, hotel_agent_mode, "
+        "       guardrail_input_result, guardrail_output_result, "
+        "       guardrail_grounding_result "
+        "FROM hotel_transport_agent_eval_runs"
+    ).fetchall()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["outcome"] == "path2_fallback"
+    assert r["options_returned"] == 0
+    assert r["hotel_agent_mode"] == "grounded"
+    assert r["guardrail_input_result"] == "pass"
+    assert r["guardrail_output_result"] == "pass"
+    assert r["guardrail_grounding_result"] == "pass"
+    conn.close()
+
+
+def test_eval_run_success_writes_a_row(tmp_path):
+    from flaskapp.database import initialize
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalRun
+
+    db_path = tmp_path / "test.sqlite3"
+    initialize(db_path)
+
+    class _FakeTracer:
+        database_path = str(db_path)
+        def record(self, event, agent, details=None):
+            pass
+
+    run = _EvalRun(
+        _FakeTracer(),
+        None,
+        mode="grounded",
+        inventory_source="seed",
+        llm_provider="openai",
+        llm_model="gpt-4o",
+    )
+    run.success(
+        counts={},
+        usage={},
+        options_returned=8,
+        hotel_candidate_count=5,
+        transport_option_count=3,
+    )
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT outcome, options_returned, hotel_candidate_count, "
+        "       transport_option_count "
+        "FROM hotel_transport_agent_eval_runs"
+    ).fetchall()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["outcome"] == "success"
+    assert r["options_returned"] == 8
+    assert r["hotel_candidate_count"] == 5
+    assert r["transport_option_count"] == 3
+    conn.close()
+
+
+def test_eval_run_error_writes_a_row(tmp_path):
+    from flaskapp.database import initialize
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalRun
+
+    db_path = tmp_path / "test.sqlite3"
+    initialize(db_path)
+
+    class _FakeTracer:
+        database_path = str(db_path)
+        def record(self, event, agent, details=None):
+            pass
+
+    run = _EvalRun(
+        _FakeTracer(),
+        None,
+        mode="grounded",
+        inventory_source="seed",
+        llm_provider="openai",
+        llm_model="gpt-4o",
+    )
+    run.error(ValueError("boom"), usage={})
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT outcome, error_type "
+        "FROM hotel_transport_agent_eval_runs"
+    ).fetchall()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["outcome"] == "error"
+    assert r["error_type"] == "ValueError"
+    conn.close()
+
+
+def test_eval_run_write_skips_when_no_database_path():
+    """When the tracer has no database_path, _write returns without doing anything."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _EvalRun
+
+    class _FakeTracer:
+        database_path = None
+        def record(self, event, agent, details=None):
+            pass
+
+    run = _EvalRun(
+        _FakeTracer(),
+        "test-req",
+        mode="grounded",
+        inventory_source="seed",
+        llm_provider=None,
+        llm_model=None,
+    )
+
+    run._write(outcome="success", options_returned=0)
+
+
+def test_inner_tracer_forwards_to_signals():
+    """_InnerTracer feeds every event to _EvalSignals before forwarding."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import (
+        _EvalSignals, _InnerTracer,
+    )
+
+    signals = _EvalSignals()
+    tracer = MagicMock()
+    inner = _InnerTracer(tracer, signals)
+
+    inner.record("agent_input_blocked", "hotel_transport_agent", {"injection_count": 1})
+    row = signals.as_row()
+    assert row["guardrail_input_result"] == "blocked"
+
+
+    tracer.record.assert_called_once_with(
+        "agent_input_blocked", "hotel_transport_agent", {"injection_count": 1}
+    )
+
+
+def test_inner_tracer_skips_lifecycle_duplicates():
+    """_InnerTracer does not forward agent_started/agent_completed events."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _InnerTracer
+
+    tracer = MagicMock()
+    inner = _InnerTracer(tracer, None)
+
+    inner.record("agent_started", "hotel_transport_agent", {"mode": "grounded"})
+    inner.record("agent_completed", "hotel_transport_agent", {"option_count": 5})
+
+    tracer.record.assert_not_called()
+
+
+def test_inner_tracer_forwards_other_events():
+    """_InnerTracer forwards non-lifecycle events to the underlying tracer."""
+    from flaskapp.travel_ai.agents.hotel_transport_agent.agent import _InnerTracer
+
+    tracer = MagicMock()
+    inner = _InnerTracer(tracer, None)
+
+    inner.record("agent_fallback", "hotel_transport_agent", {"reason": "no inventory"})
+    tracer.record.assert_called_once_with(
+        "agent_fallback", "hotel_transport_agent", {"reason": "no inventory"}
+    )
