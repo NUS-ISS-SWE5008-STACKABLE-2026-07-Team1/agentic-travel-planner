@@ -654,6 +654,9 @@ class _Connection:
     def insert_returning_id(self, sql: str, parameters: tuple = ()) -> int:
         """The generated primary key, however this engine surfaces it."""
         if self.dialect == "postgres":
+            # Only a fixed literal is appended. Every caller (1202, 1235, 1290) passes
+            # hardcoded SQL with its values bound.
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
             return self.execute(sql + " RETURNING id", parameters).fetchone()["id"]
         return self.execute(sql, parameters).lastrowid
 
@@ -728,6 +731,7 @@ def _configure_postgres(raw) -> None:
 
         # Identifier() quotes it correctly; the schema name is
         # case-sensitive and unquoted Postgres folds it to lowercase.
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         raw.execute(sql.SQL("SET search_path TO {}, public, extensions").format(
             sql.Identifier(DATABASE_SCHEMA)
         ))
@@ -850,6 +854,9 @@ def _rebuild_sqlite_table(connection, table: str, edit) -> None:
     * `PRAGMA foreign_key_check` at the end, inside the transaction, so a
       rebuild that broke a reference rolls back instead of persisting.
     """
+    # Identifier, not value: SQL has no placeholder for a table name. `table` is a literal
+    # from this module, never user input.
+    # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
     columns = connection.execute(f"PRAGMA table_info({table})").fetchall()
     table_sql = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
@@ -880,10 +887,15 @@ def _rebuild_sqlite_table(connection, table: str, edit) -> None:
     try:
         connection.execute("BEGIN")
         connection.execute(migrated_sql)
+        # Identifier, not value, as above: `table` and `names` are schema identifiers. The rows
+        # themselves are copied by the database, so no value is interpolated.
+        # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         connection.execute(
-            f"INSERT INTO {table}_migrated ({names}) SELECT {names} FROM {table}"
+            f"INSERT INTO {table}_migrated ({names}) SELECT {names} FROM {table}"  # nosec B608
         )
+        # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         connection.execute(f"DROP TABLE {table}")
+        # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         connection.execute(f"ALTER TABLE {table}_migrated RENAME TO {table}")
         for statement in dependents:
             connection.execute(statement)
@@ -968,6 +980,9 @@ def _repoint_flight_eval_run_fk(connection) -> None:
             return
         for name in stale:
             escaped = name.replace('"', '""')
+            # Identifier, not value: `escaped` is a constraint name read back from the database's own
+            # catalogue, with embedded quotes doubled.
+            # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
             connection.execute(f'ALTER TABLE flight_agent_eval_runs DROP CONSTRAINT "{escaped}"')
         connection.execute(orphan_update)
         connection.execute(
@@ -1087,6 +1102,8 @@ def initialize(target: Path | str) -> None:
                         "WHERE table_schema = current_schema() AND table_name = ?", (table,)
                     ).fetchall()
                 }
+            # Identifier, not value: `table` is a literal passed in by this module.
+            # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
             return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
 
         columns = existing_columns("users")
@@ -1095,6 +1112,9 @@ def initialize(target: Path | str) -> None:
             ("is_admin", "INTEGER NOT NULL DEFAULT 0")
         ):
             if name not in columns:
+                # Identifier, not value: the column name and its DDL type both come from the literal
+                # tuple on the lines above.
+                # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
                 connection.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
         request_columns = existing_columns("travel_requests")
         for name in (
@@ -1102,6 +1122,8 @@ def initialize(target: Path | str) -> None:
             "traveller_accessibility_needs_json", "refinement_notes_json",
         ):
             if name not in request_columns:
+                # Identifier, not value: column name from the literal tuple above.
+                # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
                 connection.execute(
                     f"ALTER TABLE travel_requests ADD COLUMN {name} TEXT NOT NULL DEFAULT '[]'"
                 )
@@ -1130,6 +1152,8 @@ def initialize(target: Path | str) -> None:
             )
         for name in ("origin_city", "destination_city"):
             if name not in request_columns:
+                # Identifier, not value: column name from the literal tuple above.
+                # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
                 connection.execute(f"ALTER TABLE travel_requests ADD COLUMN {name} TEXT")
         job_columns = existing_columns("planning_jobs")
         if "session_status" not in job_columns:
@@ -1146,6 +1170,8 @@ def initialize(target: Path | str) -> None:
         for name, kind in (("worker", "TEXT"), ("heartbeat_at", heartbeat_type),
                            ("response_json", "TEXT")):
             if name not in job_columns:
+                # Identifier, not value: column name and type from the literal tuple above.
+                # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query,python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
                 connection.execute(f"ALTER TABLE planning_jobs ADD COLUMN {name} {kind}")
         _repoint_flight_eval_run_fk(connection)
 
@@ -1505,10 +1531,13 @@ def finish_planning_job(path: Path | str, request_id: str, status: str, *,
                         error_type: str | None = None, response: Any = None) -> bool:
     """Record the outcome, unless the job already ended (e.g. was cancelled)."""
     with connect(path) as db:
+        # `_ACTIVE` is a module-level constant tuple of statuses. Everything the
+        # caller supplies is bound.
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         cursor = db.execute(
             f"""UPDATE planning_jobs SET status = ?, error_type = ?, response_json = ?,
                    completed_at = CURRENT_TIMESTAMP
-                WHERE request_id = ? AND status IN {_ACTIVE}""",
+                WHERE request_id = ? AND status IN {_ACTIVE}""",  # nosec B608
             (status, error_type, _json(response) if response is not None else None,
              request_id),
         )
@@ -1531,9 +1560,11 @@ def cancel_planning_job(path: Path | str, request_id: str,
         ).fetchone()
         if row is None or row["user_id"] != user_id:
             return None
+        # `_ACTIVE` is a module-level constant; request_id is bound.
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         cursor = db.execute(
             f"""UPDATE planning_jobs SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP
-                WHERE request_id = ? AND status IN {_ACTIVE}""",
+                WHERE request_id = ? AND status IN {_ACTIVE}""",  # nosec B608
             (request_id,),
         )
         if cursor.rowcount == 1:
@@ -1551,14 +1582,19 @@ def heartbeat_planning_jobs(path: Path | str, request_ids: Iterable[str],
         return set()
     marks = ", ".join("?" for _ in ids)
     with connect(path) as db:
+        # `marks` is generated placeholders, one `?` per id, and `_ACTIVE` is a
+        # module constant. The ids themselves are bound.
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         db.execute(
             f"""UPDATE planning_jobs SET heartbeat_at = ?
-                WHERE request_id IN ({marks}) AND status IN {_ACTIVE}""",
+                WHERE request_id IN ({marks}) AND status IN {_ACTIVE}""",  # nosec B608
             (now, *ids),
         )
+        # `marks` is generated placeholders, one `?` per id; the ids are bound.
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         rows = db.execute(
             f"""SELECT request_id FROM planning_jobs
-                WHERE request_id IN ({marks}) AND status = 'cancelled'""",
+                WHERE request_id IN ({marks}) AND status = 'cancelled'""",  # nosec B608
             tuple(ids),
         ).fetchall()
         return {row["request_id"] for row in rows}
@@ -1571,11 +1607,13 @@ def fail_lost_planning_job(path: Path | str, request_id: str, stale_before: floa
     slow is never failed under it.
     """
     with connect(path) as db:
+        # `_ACTIVE` is a module-level constant; request_id and the cutoff are bound.
+        # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
         cursor = db.execute(
             f"""UPDATE planning_jobs SET status = 'failed', error_type = 'WorkerLost',
                    completed_at = CURRENT_TIMESTAMP
                 WHERE request_id = ? AND status IN {_ACTIVE}
-                  AND (heartbeat_at IS NULL OR heartbeat_at < ?)""",
+                  AND (heartbeat_at IS NULL OR heartbeat_at < ?)""",  # nosec B608
             (request_id, stale_before),
         )
         return cursor.rowcount == 1

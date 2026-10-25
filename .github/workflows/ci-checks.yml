@@ -449,10 +449,23 @@ jobs:
           "$RUNNER_TEMP/ci-tools/bin/python" -m pip install --require-hashes --only-binary :all: -r .github/ci-tools/requirements.lock
           echo "$RUNNER_TEMP/ci-tools/bin" >> "$GITHUB_PATH"
 
-      # ADVISORY, and the team decision in item 8 recommends it stays that way:
-      # registry rules change upstream with no local change on our side.
+      # BLOCKING as of this change. It was advisory while 28 findings stood
+      # unresolved; all 18 sites have now been triaged and annotated with a
+      # named rule id and a justification, so the step passes on its own merit
+      # and nothing is being absorbed.
+      #
+      # KNOWN RISK, stated rather than hidden: the scanner binary is pinned and
+      # hash-locked, but `--config auto` resolves the RULES against Semgrep's
+      # registry at scan time. A newly published rule can therefore fail this
+      # step with no commit on our side, and because SAST is a required check
+      # that blocks merging until the new finding is triaged. That is the
+      # accepted cost of not suppressing the step.
+      #
+      # Pinning `--config p/python --config p/security-audit` was measured as
+      # the alternative on 2026-10-25: a different rule set that surfaces three
+      # `var-in-script-tag` findings in flaskapp/templates/. Those need real
+      # review, not a pragma, so the config is left alone here.
       - name: Semgrep (registry rules)
-        continue-on-error: true
         run: >
           semgrep scan --config auto --error
           --exclude-rule python.django.security.django-no-csrf-token.django-no-csrf-token
@@ -467,10 +480,14 @@ jobs:
           --json --output semgrep-llm-report.json flaskapp
 
       # Item 9 — was `-ll` (MEDIUM and above), which silently dropped every
-      # LOW finding from the report. The report is an artefact, not a gate,
-      # so report everything and decide gating separately under item 8.
+      # LOW finding from the report. Reports everything at `-l`, and as of this
+      # change it also GATES on it: the eight findings were triaged and marked
+      # with `# nosec <test-id>` and a reason, so the step passes on its own.
+      #
+      # Safer to gate than the step above: bandit is pinned and hash-locked and
+      # its rules ship with the binary, so the finding set only moves when the
+      # version is deliberately bumped.
       - name: Bandit (static code scan)
-        continue-on-error: true
         run: bandit -r flaskapp -l -f json -o bandit-report.json
 
       # Item 12 — BLOCKING, now that requirements.lock exists. It was advisory

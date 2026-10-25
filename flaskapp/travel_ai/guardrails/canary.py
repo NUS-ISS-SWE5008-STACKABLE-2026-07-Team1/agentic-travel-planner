@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import secrets
 
-_TOKEN_PREFIX = "CANARY"
+_TOKEN_PREFIX = "CANARY"  # nosec B105 - a guardrail canary marker, not a credential
 
 
 def generate_canary() -> str:
