@@ -112,6 +112,8 @@ def _search(query: str, api_key: str, timeout: float) -> dict:
     last_error: Exception | None = None
     for _attempt in range(MAX_ATTEMPTS):
         try:
+            # The URL is the fixed SERPER_SEARCH_URL constant, not caller input.
+            # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             with urlopen(request, timeout=timeout) as response:  # nosec B310: fixed HTTPS endpoint
                 payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload.get("organic", []), list):
@@ -121,7 +123,7 @@ def _search(query: str, api_key: str, timeout: float) -> dict:
             last_error = exc
             if not isinstance(exc, (TimeoutError, URLError, OSError)):
                 break
-    assert last_error is not None
+    assert last_error is not None  # nosec B101 - narrows the type before the raise below; not a runtime check
     raise last_error
 
 
